@@ -1,0 +1,154 @@
+{
+  "lamplighter": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/lamplighter/lamplighter-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/lamplighter/lamplighter-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/lamplighter/lamplighter-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "gnucash-reporter": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/gnucash-reporter/gnucash-reporter-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/gnucash-reporter/gnucash-reporter-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/gnucash-reporter/gnucash-reporter-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "by-metes-and-bounds": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/by-metes-and-bounds/by-metes-and-bounds-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/by-metes-and-bounds/by-metes-and-bounds-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/by-metes-and-bounds/by-metes-and-bounds-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "das-bomb": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/das-bomb/das-bomb-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/das-bomb/das-bomb-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/das-bomb/das-bomb-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "lifespeed": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/lifespeed/lifespeed-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/lifespeed/lifespeed-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/lifespeed/lifespeed-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "poetryscribe": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/poetryscribe/poetryscribe-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/poetryscribe/poetryscribe-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/poetryscribe/poetryscribe-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "messy-mind": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/messy-mind/messy-mind-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/messy-mind/messy-mind-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/messy-mind/messy-mind-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  },
+  "window-cleaner": {
+    "version": "1.0.0",
+    "notes": "Initial Tauri release",
+    "pub_date": "2025-01-01T00:00:00Z",
+    "platforms": {
+      "linux-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/window-cleaner/window-cleaner-1.0.0-linux.AppImage",
+        "signature": ""
+      },
+      "windows-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/window-cleaner/window-cleaner-1.0.0-windows.msi",
+        "signature": ""
+      },
+      "darwin-x86_64": {
+        "url": "https://releases.niche-knack.com/apps/window-cleaner/window-cleaner-1.0.0-macos.dmg",
+        "signature": ""
+      }
+    }
+  }
+}
