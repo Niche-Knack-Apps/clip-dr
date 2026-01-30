@@ -16,6 +16,7 @@ This document defines the shared conventions and standards that all Niche-Knack 
 8. [Testing Requirements](#8-testing-requirements)
 9. [Documentation Standards](#9-documentation-standards)
 10. [Security Guidelines](#10-security-guidelines)
+11. [GPU/VRAM Constraints](#11-gpuvram-constraints)
 
 ---
 
@@ -804,6 +805,76 @@ webPreferences: {
 - Validate SSL certificates
 - Implement request timeouts
 - Rate limit API calls
+
+---
+
+## 11. GPU/VRAM Constraints
+
+### 11.1 Maximum VRAM Budget
+
+**CRITICAL**: All AI/ML workloads MUST be designed to function within a **maximum of 6GB GPU VRAM**.
+
+This constraint applies to:
+- **messy-mind**: OCR, embeddings, document processing
+- **window-cleaner**: NSFW detection, Whisper transcription, image processing
+
+### 11.2 VRAM Budget Tracking
+
+The AI engine tracks VRAM usage and enforces the budget:
+
+```python
+MAX_GPU_VRAM_BYTES = 6 * 1024 * 1024 * 1024  # 6GB
+
+# Before loading any model, check:
+if current_vram + model_vram > MAX_GPU_VRAM:
+    raise MemoryError("Would exceed 6GB VRAM budget")
+```
+
+### 11.3 Model VRAM Estimates
+
+| Model | Estimated VRAM |
+|-------|----------------|
+| EasyOCR (English) | ~500MB |
+| EasyOCR (Multilingual) | ~800MB |
+| MiniLM-L6 Embeddings | ~300MB |
+| MPNet Embeddings | ~500MB |
+| NSFW Classifier | ~400MB |
+| Whisper Tiny | ~150MB |
+| Whisper Base | ~300MB |
+| Whisper Small | ~1GB |
+| Whisper Medium | ~3GB |
+
+### 11.4 Best Practices
+
+1. **Load models lazily**: Only load when first needed
+2. **Unload when done**: Free VRAM after processing completes
+3. **Use smaller models**: Prefer tiny/base variants unless quality demands larger
+4. **Avoid concurrent loading**: Don't load multiple large models simultaneously
+5. **Monitor usage**: Log VRAM usage during development
+
+### 11.5 Recommended Model Combinations
+
+Within the 6GB budget, these combinations are safe:
+
+**Combination A** (OCR + Transcription): ~1.3GB
+- EasyOCR English (500MB)
+- Whisper Base (300MB)
+- MiniLM Embeddings (300MB)
+
+**Combination B** (Video Processing): ~1.7GB
+- NSFW Classifier (400MB)
+- Whisper Small (1GB)
+- MiniLM Embeddings (300MB)
+
+**NOT Recommended** (Exceeds budget):
+- Whisper Medium + Any other model (3GB + X > 6GB with overhead)
+
+### 11.6 Error Handling
+
+When VRAM budget is exceeded:
+- Return error code `-30003` (INSUFFICIENT_MEMORY)
+- Suggest unloading unused models
+- Never crash - handle gracefully
 
 ---
 
