@@ -2,6 +2,11 @@
 Model Manager
 
 Handles loading, unloading, and lifecycle of ML models.
+
+IMPORTANT: GPU Memory Constraint
+All models MUST be designed to work within a 6GB GPU VRAM budget.
+This constraint applies to all AI-heavy apps (messy-mind, window-cleaner).
+When loading multiple models, ensure combined VRAM usage stays under 6GB.
 """
 
 import os
@@ -13,6 +18,23 @@ from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
+
+# Maximum GPU VRAM budget in bytes (6GB)
+MAX_GPU_VRAM_BYTES = 6 * 1024 * 1024 * 1024  # 6GB
+
+# Estimated VRAM usage per model (conservative estimates)
+# These should be updated based on actual measurements
+MODEL_VRAM_ESTIMATES: dict[str, int] = {
+    "easyocr-en": 500_000_000,           # ~500MB
+    "easyocr-multilingual": 800_000_000,  # ~800MB
+    "sentence-transformers/all-MiniLM-L6-v2": 300_000_000,  # ~300MB
+    "sentence-transformers/all-mpnet-base-v2": 500_000_000,  # ~500MB
+    "nsfw-classifier": 400_000_000,       # ~400MB
+    "whisper-tiny": 150_000_000,          # ~150MB
+    "whisper-base": 300_000_000,          # ~300MB
+    "whisper-small": 1_000_000_000,       # ~1GB
+    "whisper-medium": 3_000_000_000,      # ~3GB (use with caution!)
+}
 
 
 @dataclass
@@ -100,14 +122,19 @@ DEFAULT_MODELS: dict[str, dict[str, Any]] = {
 
 
 class ModelManager:
-    """Manages ML model lifecycle."""
+    """
+    Manages ML model lifecycle.
 
-    def __init__(self, model_dir: str | None = None) -> None:
+    GPU Memory Constraint: All operations respect a 6GB VRAM budget.
+    """
+
+    def __init__(self, model_dir: str | None = None, max_vram: int = MAX_GPU_VRAM_BYTES) -> None:
         """
         Initialize the model manager.
 
         Args:
             model_dir: Directory to store downloaded models
+            max_vram: Maximum GPU VRAM budget in bytes (default: 6GB)
         """
         if model_dir:
             self.model_dir = Path(model_dir)
@@ -118,6 +145,11 @@ class ModelManager:
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Model directory: %s", self.model_dir)
+
+        # GPU VRAM budget tracking
+        self.max_vram = max_vram
+        self.current_vram_usage = 0
+        logger.info("GPU VRAM budget: %d MB", self.max_vram // (1024 * 1024))
 
         # Initialize model registry
         self.models: dict[str, ModelInfo] = {}
@@ -158,11 +190,34 @@ class ModelManager:
             for model in self.models.values()
         ]
 
+    def _estimate_vram_usage(self, model_id: str) -> int:
+        """Estimate VRAM usage for a model."""
+        return MODEL_VRAM_ESTIMATES.get(model_id, 500_000_000)  # Default 500MB
+
+    def _check_vram_budget(self, model_id: str) -> bool:
+        """Check if loading a model would exceed VRAM budget."""
+        estimated = self._estimate_vram_usage(model_id)
+        projected = self.current_vram_usage + estimated
+
+        if projected > self.max_vram:
+            logger.warning(
+                "Loading %s would exceed VRAM budget: %d MB + %d MB > %d MB",
+                model_id,
+                self.current_vram_usage // (1024 * 1024),
+                estimated // (1024 * 1024),
+                self.max_vram // (1024 * 1024),
+            )
+            return False
+        return True
+
     def load_model(
         self, model_id: str, options: dict[str, Any] | None = None
     ) -> bool:
         """
         Load a model into memory.
+
+        Respects the 6GB GPU VRAM budget. Will refuse to load if
+        the model would exceed the budget.
 
         Returns:
             True if successful, False otherwise
@@ -175,6 +230,15 @@ class ModelManager:
         if model.loaded:
             logger.info("Model already loaded: %s", model_id)
             return True
+
+        # Check VRAM budget before loading
+        if not self._check_vram_budget(model_id):
+            logger.error(
+                "Cannot load %s: would exceed 6GB VRAM budget. "
+                "Unload other models first.",
+                model_id,
+            )
+            return False
 
         try:
             config = DEFAULT_MODELS.get(model_id, {})
@@ -189,7 +253,18 @@ class ModelManager:
             model.last_used = time.time()
             model.load_options = model_config
 
-            logger.info("Loaded model: %s", model_id)
+            # Track VRAM usage
+            estimated_vram = self._estimate_vram_usage(model_id)
+            model.memory_usage = estimated_vram
+            self.current_vram_usage += estimated_vram
+
+            logger.info(
+                "Loaded model: %s (VRAM: %d MB, Total: %d MB / %d MB)",
+                model_id,
+                estimated_vram // (1024 * 1024),
+                self.current_vram_usage // (1024 * 1024),
+                self.max_vram // (1024 * 1024),
+            )
             return True
 
         except Exception as e:
@@ -242,6 +317,8 @@ class ModelManager:
         """
         Unload a model from memory.
 
+        Frees up VRAM budget for other models.
+
         Returns:
             True if successful, False otherwise
         """
@@ -255,17 +332,35 @@ class ModelManager:
             return True
 
         try:
+            # Track VRAM being freed
+            freed_vram = model.memory_usage
+
             # Clear the instance
             model.instance = None
             model.loaded = False
             model.memory_usage = 0
 
-            # Force garbage collection
-            import gc
+            # Update VRAM tracking
+            self.current_vram_usage = max(0, self.current_vram_usage - freed_vram)
 
+            # Force garbage collection and clear GPU cache
+            import gc
             gc.collect()
 
-            logger.info("Unloaded model: %s", model_id)
+            # Try to clear PyTorch CUDA cache if available
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+
+            logger.info(
+                "Unloaded model: %s (Freed: %d MB, Total VRAM: %d MB)",
+                model_id,
+                freed_vram // (1024 * 1024),
+                self.current_vram_usage // (1024 * 1024),
+            )
             return True
 
         except Exception as e:
