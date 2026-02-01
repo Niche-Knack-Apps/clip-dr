@@ -12,6 +12,22 @@ export const usePlaybackStore = defineStore('playback', () => {
   const selectionStore = useSelectionStore();
   const tracksStore = useTracksStore();
 
+  // Helper to get effective duration (from soloed processed track or full duration)
+  function getEffectiveDuration(): number {
+    const cleaningStore = useCleaningStore();
+    const silenceStore = useSilenceStore();
+
+    const soloedClip = tracksStore.clipTracks.find(t => t.solo);
+    if (soloedClip) {
+      const hasProcessedAudio = cleaningStore.hasCleanedAudio(soloedClip.id) ||
+                                silenceStore.hasCutAudio(soloedClip.id);
+      if (hasProcessedAudio) {
+        return soloedClip.end; // Track end IS the duration for processed tracks
+      }
+    }
+    return audioStore.duration;
+  }
+
   const isPlaying = ref(false);
   const currentTime = ref(0);
   const loopEnabled = ref(true);
@@ -72,13 +88,13 @@ export const usePlaybackStore = defineStore('playback', () => {
     const activeTracks = getActiveTracks();
 
     if (activeTracks.length === 0) {
-      return { start: 0, end: audioStore.duration };
+      return { start: 0, end: getEffectiveDuration() };
     }
 
     // Check if full track is active and not muted
     const fullTrack = activeTracks.find(t => t.type === 'full');
     if (fullTrack) {
-      return { start: 0, end: audioStore.duration };
+      return { start: 0, end: getEffectiveDuration() };
     }
 
     // Get combined bounds of all clip tracks
@@ -103,19 +119,43 @@ export const usePlaybackStore = defineStore('playback', () => {
           return { start: inPoint, end: outPoint };
         }
         // Fall back to full if no in/out set
-        return { start: 0, end: audioStore.duration };
+        return { start: 0, end: getEffectiveDuration() };
       case 'active':
         // Loop across active (non-muted) tracks
         return getActiveRegion();
+      case 'clip':
+        // Loop on the soloed clip
+        const clipTracks = tracksStore.clipTracks;
+        const soloedClip = clipTracks.find(t => t.solo);
+        if (soloedClip) {
+          return { start: soloedClip.start, end: soloedClip.end };
+        }
+        // Auto-solo top-most clip if none soloed
+        if (clipTracks.length > 0) {
+          const topClip = clipTracks[clipTracks.length - 1];
+          tracksStore.setTrackSolo(topClip.id, true);
+          return { start: topClip.start, end: topClip.end };
+        }
+        return { start: 0, end: getEffectiveDuration() };
       case 'full':
       default:
         // Loop the full audio
-        return { start: 0, end: audioStore.duration };
+        return { start: 0, end: getEffectiveDuration() };
     }
   }
 
   async function setLoopMode(mode: LoopMode): Promise<void> {
     loopMode.value = mode;
+
+    // Auto-solo top-most clip when switching to 'clip' mode if none soloed
+    if (mode === 'clip') {
+      const clipTracks = tracksStore.clipTracks;
+      const hasSoloedClip = clipTracks.some(t => t.solo);
+      if (!hasSoloedClip && clipTracks.length > 0) {
+        tracksStore.setTrackSolo(clipTracks[clipTracks.length - 1].id, true);
+      }
+    }
+
     // If playing, restart to apply new loop region
     if (isPlaying.value) {
       const time = currentTime.value;
@@ -133,11 +173,18 @@ export const usePlaybackStore = defineStore('playback', () => {
     if (!track) return null;
 
     const cleaningStore = useCleaningStore();
+    const silenceStore = useSilenceStore();
 
     // Check if this track has cleaned audio
     const cleanedBuffer = cleaningStore.getBufferForTrack(track.id);
     if (cleanedBuffer) {
       return cleanedBuffer;
+    }
+
+    // Check if this track has cut (silence removed) audio
+    const cutBuffer = silenceStore.getBufferForTrack(track.id);
+    if (cutBuffer) {
+      return cutBuffer;
     }
 
     // Fall back to main audio buffer
@@ -210,13 +257,15 @@ export const usePlaybackStore = defineStore('playback', () => {
       sourceNode.connect(gainNode);
       gainNode.connect(ctx.destination);
 
-      // Calculate buffer offset
+      // Calculate buffer offset - for cleaned or cut tracks, use relative offset
       const cleaningStore = useCleaningStore();
-      const isCleanedTrack = cleaningStore.hasCleanedAudio(trackAtTime.id);
+      const silenceStoreLocal = useSilenceStore();
+      const isProcessedTrack = cleaningStore.hasCleanedAudio(trackAtTime.id) || silenceStoreLocal.hasCutAudio(trackAtTime.id);
 
       let bufferOffset: number;
-      if (isCleanedTrack) {
-        bufferOffset = playStart - trackAtTime.start;
+      if (isProcessedTrack) {
+        // Processed tracks have their own buffer starting at 0
+        bufferOffset = playStart;
       } else {
         bufferOffset = playStart;
       }
@@ -225,9 +274,9 @@ export const usePlaybackStore = defineStore('playback', () => {
       // Only set native loop if there's a single track
       if (loopEnabled.value && playbackSpeed.value > 0 && activeTracks.length === 1) {
         sourceNode.loop = true;
-        if (isCleanedTrack) {
+        if (isProcessedTrack) {
           sourceNode.loopStart = 0;
-          sourceNode.loopEnd = trackAtTime.end - trackAtTime.start;
+          sourceNode.loopEnd = trackAtTime.end;
         } else {
           sourceNode.loopStart = trackAtTime.start;
           sourceNode.loopEnd = trackAtTime.end;
@@ -304,7 +353,7 @@ export const usePlaybackStore = defineStore('playback', () => {
       pause();
     }
 
-    let seekTime = Math.max(0, Math.min(time, audioStore.duration));
+    let seekTime = Math.max(0, Math.min(time, getEffectiveDuration()));
 
     // If seeking into silence while compression is enabled, jump to end of silence
     const silenceStore = useSilenceStore();
@@ -419,7 +468,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   function scrub(time: number): void {
-    currentTime.value = Math.max(0, Math.min(time, audioStore.duration));
+    currentTime.value = Math.max(0, Math.min(time, getEffectiveDuration()));
   }
 
   function endScrubbing(): void {
@@ -444,10 +493,9 @@ export const usePlaybackStore = defineStore('playback', () => {
       if (silenceStore.compressionEnabled && playbackSpeed.value > 0) {
         const silenceRegion = silenceStore.isInSilence(newTime);
         if (silenceRegion) {
-          // Jump to end of silence
+          // Jump to end of silence region
           newTime = silenceRegion.end;
-          startOffset = newTime;
-          startTime = ctx.currentTime;
+          // Force audio restart at the new position
           needsRestart = true;
         }
       }
@@ -481,11 +529,12 @@ export const usePlaybackStore = defineStore('playback', () => {
 
       currentTime.value = newTime;
 
-      // If we hit a loop boundary, restart the audio at the new position
+      // If we need to restart (loop boundary or silence skip), restart audio at the new position
       if (needsRestart) {
         startTime = ctx.currentTime;
         startOffset = newTime;
-        const trackAtTime = getTrackAtTime(newTime);
+        // Always restart audio when skipping - get track at new position or use active track
+        const trackAtTime = getTrackAtTime(newTime) || getActiveTrack();
         if (trackAtTime) {
           switchToTrack(trackAtTime, newTime);
         }
@@ -510,6 +559,7 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     const ctx = audioStore.getAudioContext();
     const cleaningStore = useCleaningStore();
+    const silenceStore = useSilenceStore();
 
     // Stop current source
     if (sourceNode) {
@@ -538,11 +588,12 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     sourceNode.connect(gainNode);
 
-    // Calculate buffer offset
-    const isCleanedTrack = cleaningStore.hasCleanedAudio(track.id);
+    // Calculate buffer offset - for cleaned or cut tracks, use relative offset
+    const isProcessedTrack = cleaningStore.hasCleanedAudio(track.id) || silenceStore.hasCutAudio(track.id);
     let bufferOffset: number;
-    if (isCleanedTrack) {
-      bufferOffset = time - track.start;
+    if (isProcessedTrack) {
+      // Processed tracks have their own buffer starting at 0
+      bufferOffset = time;
     } else {
       bufferOffset = time;
     }
@@ -550,9 +601,9 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Set up looping if enabled
     if (loopEnabled.value && playbackSpeed.value > 0) {
       sourceNode.loop = true;
-      if (isCleanedTrack) {
+      if (isProcessedTrack) {
         sourceNode.loopStart = 0;
-        sourceNode.loopEnd = track.end - track.start;
+        sourceNode.loopEnd = track.end;
       } else {
         sourceNode.loopStart = track.start;
         sourceNode.loopEnd = track.end;

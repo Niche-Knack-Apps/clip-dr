@@ -5,6 +5,7 @@ import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
+import { usePlaybackStore } from './playback';
 import { useVadStore } from './vad';
 import { generateId } from '@/shared/utils';
 
@@ -66,8 +67,11 @@ export const useCleaningStore = defineStore('cleaning', () => {
     error.value = null;
 
     try {
+      console.log('[Clean] Starting clean for track:', sourceTrack.name);
+
       // Get temp path for output
       const outputPath = await invoke<string>('get_temp_audio_path');
+      console.log('[Clean] Temp output path:', outputPath);
 
       // Collect silence segments from VAD if available
       const silenceSegments = vadStore.silenceSegments.map((seg) => ({
@@ -93,6 +97,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
         expanderRatio: options.value.expanderRatio,
       };
 
+      console.log('[Clean] Calling backend clean_audio...');
       // Call backend to clean audio
       const result = await invoke<CleanResult>('clean_audio', {
         sourcePath: audioStore.currentFile.path,
@@ -102,26 +107,40 @@ export const useCleaningStore = defineStore('cleaning', () => {
         options: backendOptions,
         silenceSegments: silenceSegments.length > 0 ? silenceSegments : null,
       });
+      console.log('[Clean] Backend result:', result);
 
       lastResult.value = result;
 
+      console.log('[Clean] Loading cleaned audio buffer...');
       // Load the cleaned audio file into a buffer
       const cleanedAudioEntry = await loadCleanedAudio(result.outputPath);
+      console.log('[Clean] Loaded cleaned audio, duration:', cleanedAudioEntry.duration);
 
+      console.log('[Clean] Creating new track...');
       // Create a new track for the cleaned audio
       const cleanedTrack = createCleanedTrack(sourceTrack, result, cleanedAudioEntry);
+      console.log('[Clean] Created track:', cleanedTrack.id, cleanedTrack.name);
 
       // Store the cleaned audio data mapped to the new track's ID
-      cleanedAudioFiles.value.set(cleanedTrack.id, cleanedAudioEntry);
+      // Create a new Map to trigger Vue reactivity
+      const newMap = new Map(cleanedAudioFiles.value);
+      newMap.set(cleanedTrack.id, cleanedAudioEntry);
+      cleanedAudioFiles.value = newMap;
+      console.log('[Clean] Mapped cleaned audio to track ID:', cleanedTrack.id);
 
       // MUTE the source track (non-destructive)
+      console.log('[Clean] Muting source track:', sourceTrack.id, sourceTrack.name);
       tracksStore.setTrackMuted(sourceTrack.id, true);
+      console.log('[Clean] Source track muted state:', tracksStore.tracks.find(t => t.id === sourceTrack.id)?.muted);
 
-      console.log('Audio cleaned successfully:', result);
+      console.log('[Clean] Audio cleaned successfully, new track added');
+      console.log('[Clean] Total tracks now:', tracksStore.tracks.length);
+      console.log('[Clean] All track names:', tracksStore.tracks.map(t => t.name).join(', '));
       return cleanedTrack;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to clean audio';
-      console.error('Cleaning error:', e);
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      error.value = errorMsg;
+      console.error('[Clean] Cleaning error:', e);
       return null;
     } finally {
       loading.value = false;
@@ -195,8 +214,13 @@ export const useCleaningStore = defineStore('cleaning', () => {
     // Add to tracks store
     tracksStore.addTrack(cleanedTrack);
 
-    // Select the new cleaned track
-    tracksStore.selectedTrackId = cleanedTrack.id;
+    // Select and solo the new cleaned track (exclusive solo)
+    tracksStore.selectTrack(cleanedTrack.id);
+    tracksStore.setTrackSolo(cleanedTrack.id, true);
+
+    // Switch to 'clip' loop mode
+    const playbackStore = usePlaybackStore();
+    playbackStore.setLoopMode('clip');
 
     return cleanedTrack;
   }

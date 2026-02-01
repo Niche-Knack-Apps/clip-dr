@@ -21,7 +21,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 const containerRef = ref<HTMLDivElement | null>(null);
 const width = ref(0);
 
-const { getBucketsForRange, renderWaveform } = useWaveform();
+const { getBucketsForRange, renderWaveform, waveformData, duration } = useWaveform();
 
 let resizeObserver: ResizeObserver | null = null;
 
@@ -67,7 +67,8 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
 });
 
-watch([() => props.startTime, () => props.endTime, () => props.color], render);
+// Watch for props changes and waveform data changes (when soloed track switches)
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformData, duration], render);
 </script>
 
 <template>

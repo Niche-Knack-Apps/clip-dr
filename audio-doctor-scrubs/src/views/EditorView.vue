@@ -9,9 +9,11 @@ import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useTracksStore } from '@/stores/tracks';
 import { useSettingsStore } from '@/stores/settings';
+import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
 
 const audioStore = useAudioStore();
+const { effectiveDuration } = useEffectiveAudio();
 const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const tracksStore = useTracksStore();
@@ -30,7 +32,7 @@ useKeyboardShortcuts({
   },
   onToggleLoop: () => playbackStore.setLoopEnabled(!playbackStore.loopEnabled),
   onJumpStart: () => playbackStore.seek(0),
-  onJumpEnd: () => playbackStore.seek(audioStore.duration),
+  onJumpEnd: () => playbackStore.seek(effectiveDuration.value),
   onJumpIn: () => {
     const { inPoint } = selectionStore.inOutPoints;
     if (inPoint !== null) playbackStore.seek(inPoint);

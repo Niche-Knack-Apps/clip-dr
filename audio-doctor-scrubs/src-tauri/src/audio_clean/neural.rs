@@ -43,11 +43,10 @@ impl NeuralDenoiser {
         // Resample to 48kHz if needed
         let needs_resample = (self.source_sample_rate - RNNOISE_SAMPLE_RATE as f32).abs() > 1.0;
 
-        let (samples_48k, _resampler_up, resampler_down) = if needs_resample {
-            let (up, down, resampled) = self.resample_to_48k(&original)?;
-            (resampled, Some(up), Some(down))
+        let samples_48k = if needs_resample {
+            self.resample_to_48k(&original)?
         } else {
-            (original.clone(), None, None)
+            original.clone()
         };
 
         // Process through RNNoise
@@ -55,7 +54,7 @@ impl NeuralDenoiser {
 
         // Resample back if needed
         let denoised = if needs_resample {
-            self.resample_from_48k(&denoised_48k, samples.len(), resampler_down)?
+            self.resample_from_48k(&denoised_48k, samples.len())?
         } else {
             denoised_48k
         };
@@ -71,8 +70,8 @@ impl NeuralDenoiser {
     }
 
     /// Resample input to 48kHz
-    fn resample_to_48k(&self, samples: &[f32]) -> Result<(SincFixedIn<f32>, SincFixedIn<f32>, Vec<f32>), String> {
-        let params_up = SincInterpolationParameters {
+    fn resample_to_48k(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
+        let params = SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: 0.95,
             interpolation: SincInterpolationType::Linear,
@@ -80,38 +79,21 @@ impl NeuralDenoiser {
             window: WindowFunction::BlackmanHarris2,
         };
 
-        let params_down = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        };
+        let ratio = RNNOISE_SAMPLE_RATE as f64 / self.source_sample_rate as f64;
 
-        let ratio_up = RNNOISE_SAMPLE_RATE as f64 / self.source_sample_rate as f64;
-        let ratio_down = self.source_sample_rate as f64 / RNNOISE_SAMPLE_RATE as f64;
-
-        let mut resampler_up = SincFixedIn::<f32>::new(
-            ratio_up,
+        let mut resampler = SincFixedIn::<f32>::new(
+            ratio,
             2.0,
-            params_up,
+            params,
             samples.len(),
             1,
         ).map_err(|e| format!("Failed to create upsampler: {}", e))?;
 
-        let resampler_down = SincFixedIn::<f32>::new(
-            ratio_down,
-            2.0,
-            params_down,
-            (samples.len() as f64 * ratio_up) as usize + 1024,
-            1,
-        ).map_err(|e| format!("Failed to create downsampler: {}", e))?;
-
         let input = vec![samples.to_vec()];
-        let resampled = resampler_up.process(&input, None)
-            .map_err(|e| format!("Failed to resample: {}", e))?;
+        let resampled = resampler.process(&input, None)
+            .map_err(|e| format!("Failed to resample to 48k: {}", e))?;
 
-        Ok((resampler_up, resampler_down, resampled.into_iter().next().unwrap_or_default()))
+        Ok(resampled.into_iter().next().unwrap_or_default())
     }
 
     /// Resample from 48kHz back to original rate
@@ -119,22 +101,36 @@ impl NeuralDenoiser {
         &self,
         samples: &[f32],
         target_len: usize,
-        resampler: Option<SincFixedIn<f32>>,
     ) -> Result<Vec<f32>, String> {
-        if let Some(mut resampler) = resampler {
-            let input = vec![samples.to_vec()];
-            let mut resampled = resampler.process(&input, None)
-                .map_err(|e| format!("Failed to resample back: {}", e))?
-                .into_iter()
-                .next()
-                .unwrap_or_default();
+        let params = SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        };
 
-            // Ensure output matches original length
-            resampled.resize(target_len, 0.0);
-            Ok(resampled)
-        } else {
-            Ok(samples.to_vec())
-        }
+        let ratio = self.source_sample_rate as f64 / RNNOISE_SAMPLE_RATE as f64;
+
+        // Create resampler with the ACTUAL input length
+        let mut resampler = SincFixedIn::<f32>::new(
+            ratio,
+            2.0,
+            params,
+            samples.len(),
+            1,
+        ).map_err(|e| format!("Failed to create downsampler: {}", e))?;
+
+        let input = vec![samples.to_vec()];
+        let mut resampled = resampler.process(&input, None)
+            .map_err(|e| format!("Failed to resample from 48k: {}", e))?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        // Ensure output matches original length
+        resampled.resize(target_len, 0.0);
+        Ok(resampled)
     }
 
     /// Run audio through RNNoise

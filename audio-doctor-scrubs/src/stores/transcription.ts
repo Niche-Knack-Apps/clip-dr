@@ -5,7 +5,7 @@ import type { Transcription, Word, TranscriptionProgress, SearchResult, ModelInf
 import { useAudioStore } from './audio';
 import { useSettingsStore } from './settings';
 import { generateId, binarySearch } from '@/shared/utils';
-import { SEARCH_MIN_WORDS } from '@/shared/constants';
+import { SEARCH_MIN_WORDS, SEARCH_STOPWORDS } from '@/shared/constants';
 
 export const useTranscriptionStore = defineStore('transcription', () => {
   const audioStore = useAudioStore();
@@ -218,6 +218,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     enableFalloff.value = enabled;
   }
 
+  // Update word text (for inline editing)
+  function updateWordText(wordId: string, newText: string): void {
+    if (!transcription.value) return;
+
+    const word = transcription.value.words.find((w) => w.id === wordId);
+    if (word) {
+      word.text = newText;
+      // Update full text
+      transcription.value.fullText = transcription.value.words.map((w) => w.text).join(' ');
+      hasUnsavedChanges.value = true;
+      // Auto-save
+      saveTranscription();
+    }
+  }
+
   // Get the current offset for a word
   function getWordOffset(wordId: string): number {
     return wordOffsetsMs.value.get(wordId) ?? 0;
@@ -346,7 +361,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (!transcription.value) return [];
 
     const queryWords = query.toLowerCase().trim().split(/\s+/);
-    if (queryWords.length < SEARCH_MIN_WORDS) return [];
+    // Filter out stopwords when checking if we have enough meaningful words
+    const meaningfulWords = queryWords.filter(w => !SEARCH_STOPWORDS.has(w));
+    if (meaningfulWords.length < SEARCH_MIN_WORDS) return [];
 
     const results: SearchResult[] = [];
     // Use adjusted words for search
@@ -547,5 +564,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     loadTimingMetadata,
     loadExistingTranscription,
     setEnableFalloff,
+    updateWordText,
   };
 });

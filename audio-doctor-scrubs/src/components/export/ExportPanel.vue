@@ -4,6 +4,10 @@ import Button from '@/components/ui/Button.vue';
 import { useExportStore } from '@/stores/export';
 import type { ExportFormat } from '@/shared/types';
 
+const emit = defineEmits<{
+  close: [];
+}>();
+
 const exportStore = useExportStore();
 
 const selectedFormat = ref<ExportFormat>('wav');
@@ -21,6 +25,10 @@ async function handleExport() {
   const path = await exportStore.exportActiveTracks(selectedFormat.value);
   if (path) {
     lastExportedPath.value = path;
+    // Close panel after short delay to show success
+    setTimeout(() => {
+      emit('close');
+    }, 1500);
   }
 }
 </script>

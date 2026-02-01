@@ -52,7 +52,7 @@ defineExpose({ focus });
         ref="searchInput"
         v-model="localQuery"
         type="text"
-        placeholder="Search transcription (3+ words)..."
+        placeholder="Search transcription..."
         class="w-full h-8 pl-8 pr-3 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500"
         @keydown="handleKeyDown"
       />

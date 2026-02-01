@@ -2,15 +2,14 @@ import { ref, computed } from 'vue';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useSelectionStore } from '@/stores/selection';
 import { usePlaybackStore } from '@/stores/playback';
-import { useSettingsStore } from '@/stores/settings';
 import type { SearchResult } from '@/shared/types';
 import { debounce } from '@/shared/utils';
+import { SEARCH_STOPWORDS, SEARCH_MIN_WORDS } from '@/shared/constants';
 
 export function useSearch() {
   const transcriptionStore = useTranscriptionStore();
   const selectionStore = useSelectionStore();
   const playbackStore = usePlaybackStore();
-  const settingsStore = useSettingsStore();
 
   const query = ref('');
   const results = ref<SearchResult[]>([]);
@@ -23,15 +22,16 @@ export function useSearch() {
   );
   const resultCount = computed(() => results.value.length);
 
-  const minWords = computed(() => settingsStore.settings.autoNavigateAfterWords);
-
   // Padding around the matched phrase (in seconds)
   const SELECTION_PADDING = 0.5;
 
   const performSearch = debounce(() => {
-    const wordCount = query.value.trim().split(/\s+/).filter(Boolean).length;
+    const queryWords = query.value.trim().split(/\s+/).filter(Boolean);
+    const wordCount = queryWords.length;
+    // Filter out stopwords when checking if we have enough meaningful words
+    const meaningfulWords = queryWords.filter(w => !SEARCH_STOPWORDS.has(w.toLowerCase()));
 
-    if (wordCount >= minWords.value) {
+    if (meaningfulWords.length >= SEARCH_MIN_WORDS) {
       results.value = transcriptionStore.searchWords(query.value);
       currentResultIndex.value = 0;
 

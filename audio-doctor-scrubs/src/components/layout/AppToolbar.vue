@@ -78,9 +78,7 @@ async function handleReTranscribe() {
 
 async function handleDetectSilence() {
   await vadStore.detectSilence();
-}
-
-function handleRemoveSilence() {
+  // Automatically create silence overlays from detection results
   silenceStore.initFromVad();
 }
 
@@ -93,6 +91,11 @@ function handleAddSilenceRegion() {
 
 function handleClearSilenceRegions() {
   silenceStore.clear();
+  vadStore.clear();
+}
+
+async function handleCutSilence() {
+  await silenceStore.cutSilenceToNewTrack();
 }
 
 async function handleImport() {
@@ -292,7 +295,7 @@ defineExpose({ focusSearch });
       <!-- VAD / Silence Removal -->
       <div class="flex items-center gap-1 relative">
         <Button
-          v-if="!vadStore.hasResult && !silenceStore.hasRegions"
+          v-if="!silenceStore.hasRegions"
           variant="secondary"
           size="sm"
           :disabled="!hasFile"
@@ -305,31 +308,11 @@ defineExpose({ focusSearch });
           Detect Silence
         </Button>
 
-        <template v-else-if="vadStore.hasResult && !silenceStore.hasRegions">
-          <span class="text-[10px] text-gray-400">
-            {{ vadStore.silencePercentage.toFixed(0) }}% silence
-          </span>
-          <Button
-            variant="primary"
-            size="sm"
-            @click="handleRemoveSilence"
-          >
-            Remove Silence
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon
-            @click="vadStore.clear()"
-            title="Clear detection"
-          >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </Button>
-        </template>
-
         <template v-else-if="silenceStore.hasRegions">
+          <!-- Silence percentage -->
+          <span class="text-[10px] text-gray-400">
+            {{ silenceStore.activeSilenceRegions.length }} regions
+          </span>
           <!-- Skip Silence toggle -->
           <Toggle
             :model-value="silenceStore.compressionEnabled"
@@ -338,8 +321,21 @@ defineExpose({ focusSearch });
           />
           <!-- Saved duration -->
           <span class="text-[10px] text-green-400 font-mono">
-            Saves: {{ formatTime(silenceStore.savedDuration) }}
+            -{{ formatTime(silenceStore.savedDuration) }}
           </span>
+          <!-- Cut Silence - creates new track -->
+          <Button
+            variant="primary"
+            size="sm"
+            :loading="silenceStore.cutting"
+            title="Cut silence and create new track (non-destructive)"
+            @click="handleCutSilence"
+          >
+            <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" />
+            </svg>
+            Cut
+          </Button>
           <!-- Add manual silence region -->
           <Button
             variant="ghost"
@@ -467,6 +463,23 @@ defineExpose({ focusSearch });
 
       <div class="w-px h-5 bg-gray-700" />
 
+      <!-- Transcription -->
+      <Button
+        variant="secondary"
+        size="sm"
+        :disabled="!hasFile || !transcriptionStore.hasModel"
+        :loading="transcriptionStore.loading"
+        :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : 'Re-run transcription'"
+        @click="handleReTranscribe"
+      >
+        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+        </svg>
+        Re-transcribe
+      </Button>
+
+      <div class="w-px h-5 bg-gray-700" />
+
       <!-- Export -->
       <div class="flex items-center gap-1 relative">
         <Button
@@ -485,28 +498,11 @@ defineExpose({ focusSearch });
         <!-- Export Panel Popover -->
         <div
           v-if="showExportPanel"
-          class="absolute top-full left-0 mt-2 z-50"
+          class="absolute top-full right-0 mt-2 z-50"
         >
-          <ExportPanel />
+          <ExportPanel @close="showExportPanel = false" />
         </div>
       </div>
-
-      <div class="w-px h-5 bg-gray-700" />
-
-      <!-- Transcription -->
-      <Button
-        variant="secondary"
-        size="sm"
-        :disabled="!hasFile || !transcriptionStore.hasModel"
-        :loading="transcriptionStore.loading"
-        :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : 'Re-run transcription'"
-        @click="handleReTranscribe"
-      >
-        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-        </svg>
-        Re-transcribe
-      </Button>
 
       <!-- Spacer -->
       <div class="flex-1" />

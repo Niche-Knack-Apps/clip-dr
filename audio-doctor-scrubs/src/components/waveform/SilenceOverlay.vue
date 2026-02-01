@@ -65,6 +65,7 @@ function xToTime(clientX: number): number {
 function handleMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   if (!props.region.enabled) return;
+  event.stopPropagation();
 
   isDragging.value = true;
   lastX.value = event.clientX;

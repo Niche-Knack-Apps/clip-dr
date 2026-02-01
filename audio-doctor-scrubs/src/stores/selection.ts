@@ -1,12 +1,32 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useAudioStore } from './audio';
+import { useTracksStore } from './tracks';
+import { useCleaningStore } from './cleaning';
+import { useSilenceStore } from './silence';
 import type { Selection, InOutPoints } from '@/shared/types';
 import { DEFAULT_SELECTION_DURATION, MIN_SELECTION_DURATION } from '@/shared/constants';
 import { clamp } from '@/shared/utils';
 
 export const useSelectionStore = defineStore('selection', () => {
   const audioStore = useAudioStore();
+
+  // Helper to get effective duration (from soloed processed track or full duration)
+  function getEffectiveDuration(): number {
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+    const silenceStore = useSilenceStore();
+
+    const soloedClip = tracksStore.clipTracks.find(t => t.solo);
+    if (soloedClip) {
+      const hasProcessedAudio = cleaningStore.hasCleanedAudio(soloedClip.id) ||
+                                silenceStore.hasCutAudio(soloedClip.id);
+      if (hasProcessedAudio) {
+        return soloedClip.end; // Track end IS the duration for processed tracks
+      }
+    }
+    return audioStore.duration;
+  }
 
   const selection = ref<Selection>({
     start: 0,
@@ -30,7 +50,7 @@ export const useSelectionStore = defineStore('selection', () => {
   });
 
   function setSelection(start: number, end: number): void {
-    const duration = audioStore.duration;
+    const duration = getEffectiveDuration();
     const clampedStart = clamp(start, 0, duration - MIN_SELECTION_DURATION);
     const clampedEnd = clamp(end, clampedStart + MIN_SELECTION_DURATION, duration);
 
@@ -41,7 +61,7 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function moveSelection(delta: number): void {
-    const duration = audioStore.duration;
+    const duration = getEffectiveDuration();
     const selDuration = selectionDuration.value;
 
     let newStart = selection.value.start + delta;
@@ -64,7 +84,6 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function resizeSelectionStart(newStart: number): void {
-    const duration = audioStore.duration;
     const clampedStart = clamp(newStart, 0, selection.value.end - MIN_SELECTION_DURATION);
 
     selection.value = {
@@ -74,7 +93,7 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function resizeSelectionEnd(newEnd: number): void {
-    const duration = audioStore.duration;
+    const duration = getEffectiveDuration();
     const clampedEnd = clamp(
       newEnd,
       selection.value.start + MIN_SELECTION_DURATION,
@@ -88,7 +107,7 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function setSelectionFromPosition(position: number, width: number = DEFAULT_SELECTION_DURATION): void {
-    const duration = audioStore.duration;
+    const duration = getEffectiveDuration();
     const halfWidth = width / 2;
 
     let start = position - halfWidth;
@@ -108,14 +127,14 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function setInPoint(time: number): void {
-    inOutPoints.value.inPoint = clamp(time, 0, audioStore.duration);
+    inOutPoints.value.inPoint = clamp(time, 0, getEffectiveDuration());
     if (inOutPoints.value.outPoint !== null && inOutPoints.value.outPoint < time) {
       inOutPoints.value.outPoint = null;
     }
   }
 
   function setOutPoint(time: number): void {
-    inOutPoints.value.outPoint = clamp(time, 0, audioStore.duration);
+    inOutPoints.value.outPoint = clamp(time, 0, getEffectiveDuration());
     if (inOutPoints.value.inPoint !== null && inOutPoints.value.inPoint > time) {
       inOutPoints.value.inPoint = null;
     }
@@ -139,7 +158,7 @@ export const useSelectionStore = defineStore('selection', () => {
   function resetSelection(): void {
     selection.value = {
       start: 0,
-      end: Math.min(DEFAULT_SELECTION_DURATION, audioStore.duration),
+      end: Math.min(DEFAULT_SELECTION_DURATION, getEffectiveDuration()),
     };
     clearInOutPoints();
   }

@@ -4,16 +4,16 @@ import WaveformCanvas from './WaveformCanvas.vue';
 import SilenceOverlay from './SilenceOverlay.vue';
 import Playhead from './Playhead.vue';
 import Toggle from '@/components/ui/Toggle.vue';
-import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useSettingsStore } from '@/stores/settings';
 import { useSilenceStore } from '@/stores/silence';
 import { useUIStore } from '@/stores/ui';
+import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { formatTime } from '@/shared/utils';
 import { ZOOMED_HEIGHT } from '@/shared/constants';
 
-const audioStore = useAudioStore();
+const { effectiveDuration } = useEffectiveAudio();
 const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const settingsStore = useSettingsStore();
@@ -67,7 +67,7 @@ watch(currentTime, (time) => {
   if (time < viewStart || time > viewEnd) {
     const viewDuration = viewEnd - viewStart;
     const newStart = Math.max(0, time - viewDuration * 0.25); // Put playhead at 25% of view
-    const newEnd = Math.min(audioStore.duration, newStart + viewDuration);
+    const newEnd = Math.min(effectiveDuration.value, newStart + viewDuration);
     selectionStore.setSelection(
       newEnd - viewDuration < 0 ? 0 : newEnd - viewDuration,
       newEnd
@@ -209,7 +209,7 @@ function handleMouseUp(event: MouseEvent) {
 function handleWheel(event: WheelEvent) {
   event.preventDefault();
 
-  const duration = audioStore.duration;
+  const duration = effectiveDuration.value;
   if (duration <= 0) return;
 
   const currentDuration = selection.value.end - selection.value.start;

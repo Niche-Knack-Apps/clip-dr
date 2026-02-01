@@ -31,8 +31,18 @@ const resizeStartWidth = ref(0);
 // Drag reorder state
 const draggedTrackId = ref<string | null>(null);
 const dragOverTrackId = ref<string | null>(null);
+const canDrag = ref(false);
 
 const panelWidth = computed(() => uiStore.trackPanelWidth);
+
+// Track if mousedown was on a drag handle
+function handleMouseDown(event: MouseEvent) {
+  canDrag.value = (event.target as HTMLElement).closest('.drag-handle') !== null;
+}
+
+function handleMouseUp() {
+  canDrag.value = false;
+}
 
 async function handleExport(trackId: string) {
   const track = tracks.value.find((t) => t.id === trackId);
@@ -109,7 +119,10 @@ function stopResize() {
 
 // Drag reorder handlers
 function handleDragStart(event: DragEvent, trackId: string) {
-  if (!event.dataTransfer) return;
+  if (!event.dataTransfer || !canDrag.value) {
+    event.preventDefault();
+    return;
+  }
 
   draggedTrackId.value = trackId;
   event.dataTransfer.effectAllowed = 'move';
@@ -177,6 +190,8 @@ function handleDrop(event: DragEvent, targetTrackId: string) {
           'border-t-2 border-cyan-500': dragOverTrackId === track.id && draggedTrackId !== track.id,
         }"
         draggable="true"
+        @mousedown="handleMouseDown"
+        @mouseup="handleMouseUp"
         @dragstart="handleDragStart($event, track.id)"
         @dragend="handleDragEnd"
         @dragover="handleDragOver($event, track.id)"

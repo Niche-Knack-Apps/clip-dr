@@ -4,10 +4,6 @@ import { invoke } from '@tauri-apps/api/core';
 import type { AudioFile, AudioMetadata } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
-import { useTranscriptionStore } from './transcription';
-import { useCleaningStore } from './cleaning';
-import { useTracksStore } from './tracks';
-import { useSelectionStore } from './selection';
 
 export const useAudioStore = defineStore('audio', () => {
   const currentFile = ref<AudioFile | null>(null);
@@ -102,6 +98,8 @@ export const useAudioStore = defineStore('audio', () => {
       console.log('Audio loaded successfully');
 
       // Initialize tracks and selection
+      const { useTracksStore } = await import('./tracks');
+      const { useSelectionStore } = await import('./selection');
       const tracksStore = useTracksStore();
       const selectionStore = useSelectionStore();
       tracksStore.initMainTrack();
@@ -123,10 +121,12 @@ export const useAudioStore = defineStore('audio', () => {
     audioBuffer.value = null;
     error.value = null;
     // Clear tracks and cleaned audio when unloading
-    const tracksStore = useTracksStore();
-    const cleaningStore = useCleaningStore();
-    tracksStore.clearTracks();
-    cleaningStore.clearCleanedAudio();
+    import('./tracks').then(({ useTracksStore }) => {
+      useTracksStore().clearTracks();
+    });
+    import('./cleaning').then(({ useCleaningStore }) => {
+      useCleaningStore().clearCleanedAudio();
+    });
   }
 
   function getAudioBuffer(): AudioBuffer | null {
@@ -138,6 +138,7 @@ export const useAudioStore = defineStore('audio', () => {
   }
 
   async function autoTranscribe(): Promise<void> {
+    const { useTranscriptionStore } = await import('./transcription');
     const transcriptionStore = useTranscriptionStore();
 
     // Check if model exists first
@@ -149,7 +150,7 @@ export const useAudioStore = defineStore('audio', () => {
     }
 
     // Fire-and-forget transcription (non-blocking)
-    transcriptionStore.transcribeAudio().catch((e) => {
+    transcriptionStore.transcribeAudio().catch((e: Error) => {
       console.error('Auto-transcription failed:', e);
     });
   }

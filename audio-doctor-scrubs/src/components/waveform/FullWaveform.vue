@@ -4,15 +4,15 @@ import WaveformCanvas from './WaveformCanvas.vue';
 import SelectionWindow from './SelectionWindow.vue';
 import SilenceOverlay from './SilenceOverlay.vue';
 import Playhead from './Playhead.vue';
-import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useSettingsStore } from '@/stores/settings';
 import { useSilenceStore } from '@/stores/silence';
+import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { formatTime } from '@/shared/utils';
 import { WAVEFORM_HEIGHT } from '@/shared/constants';
 
-const audioStore = useAudioStore();
+const { effectiveDuration } = useEffectiveAudio();
 const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const settingsStore = useSettingsStore();
@@ -22,7 +22,7 @@ const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
 const containerLeft = ref(0);
 
-const duration = computed(() => audioStore.duration);
+const duration = effectiveDuration;
 const currentTime = computed(() => playbackStore.currentTime);
 const selection = computed(() => selectionStore.selection);
 const waveformColor = computed(() => settingsStore.settings.waveformColor);
@@ -104,7 +104,7 @@ onUnmounted(() => {
         :height="WAVEFORM_HEIGHT"
       />
 
-      <!-- Silence region overlays -->
+      <!-- Silence region overlays (z-10 to stay above waveform but below selection) -->
       <SilenceOverlay
         v-for="region in silenceStore.silenceRegions"
         :key="region.id"
@@ -112,6 +112,7 @@ onUnmounted(() => {
         :container-width="containerWidth"
         :start-time="0"
         :end-time="duration"
+        class="z-10"
         @resize="handleSilenceResize"
         @move="handleSilenceMove"
         @delete="handleSilenceDelete"

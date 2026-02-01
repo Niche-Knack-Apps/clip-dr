@@ -7,6 +7,36 @@ import { useTracksStore } from './tracks';
 import { useCleaningStore } from './cleaning';
 import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
+
+// Helper to get the source path and time range for a track
+function getTrackSource(track: Track, audioStore: ReturnType<typeof useAudioStore>, cleaningStore: ReturnType<typeof useCleaningStore>, silenceStore: ReturnType<typeof useSilenceStore>) {
+  // Check for cleaned audio
+  const cleanedEntry = cleaningStore.cleanedAudioFiles.get(track.id);
+  if (cleanedEntry) {
+    return {
+      sourcePath: cleanedEntry.path,
+      startTime: 0,
+      endTime: cleanedEntry.duration,
+    };
+  }
+
+  // Check for cut (silence removed) audio
+  const cutEntry = silenceStore.cutAudioFiles.get(track.id);
+  if (cutEntry) {
+    return {
+      sourcePath: cutEntry.path,
+      startTime: 0,
+      endTime: cutEntry.duration,
+    };
+  }
+
+  // Use original audio
+  return {
+    sourcePath: audioStore.currentFile!.path,
+    startTime: track.start,
+    endTime: track.end,
+  };
+}
 import type { ExportFormat, Track } from '@/shared/types';
 
 export const useExportStore = defineStore('export', () => {
@@ -72,31 +102,17 @@ export const useExportStore = defineStore('export', () => {
       // For now, export the first active track
       // TODO: Mix multiple tracks if needed
       const track = activeTracks.value[0];
+      const silenceStore = useSilenceStore();
 
-      // Check if this track has cleaned audio
-      const cleanedBuffer = cleaningStore.getBufferForTrack(track.id);
+      // Get the appropriate source (cleaned, cut, or original)
+      const source = getTrackSource(track, audioStore, cleaningStore, silenceStore);
 
-      if (cleanedBuffer) {
-        // Export the cleaned audio buffer
-        // For cleaned tracks, we need to export from the temp file
-        const cleanedEntry = cleaningStore.cleanedAudioFiles.get(track.id);
-        if (cleanedEntry) {
-          await invoke('export_audio_region', {
-            sourcePath: cleanedEntry.path,
-            outputPath,
-            startTime: 0,
-            endTime: cleanedEntry.duration,
-          });
-        }
-      } else {
-        // Export from original audio
-        await invoke('export_audio_region', {
-          sourcePath: audioStore.currentFile.path,
-          outputPath,
-          startTime: track.start,
-          endTime: track.end,
-        });
-      }
+      await invoke('export_audio_region', {
+        sourcePath: source.sourcePath,
+        outputPath,
+        startTime: source.startTime,
+        endTime: source.endTime,
+      });
 
       progress.value = 100;
       return outputPath;
@@ -142,23 +158,17 @@ export const useExportStore = defineStore('export', () => {
       loading.value = true;
       error.value = null;
 
-      const cleanedEntry = cleaningStore.cleanedAudioFiles.get(track.id);
+      const silenceStore = useSilenceStore();
 
-      if (cleanedEntry) {
-        await invoke('export_audio_region', {
-          sourcePath: cleanedEntry.path,
-          outputPath,
-          startTime: 0,
-          endTime: cleanedEntry.duration,
-        });
-      } else {
-        await invoke('export_audio_region', {
-          sourcePath: audioStore.currentFile.path,
-          outputPath,
-          startTime: track.start,
-          endTime: track.end,
-        });
-      }
+      // Get the appropriate source (cleaned, cut, or original)
+      const source = getTrackSource(track, audioStore, cleaningStore, silenceStore);
+
+      await invoke('export_audio_region', {
+        sourcePath: source.sourcePath,
+        outputPath,
+        startTime: source.startTime,
+        endTime: source.endTime,
+      });
 
       return outputPath;
     } catch (e) {

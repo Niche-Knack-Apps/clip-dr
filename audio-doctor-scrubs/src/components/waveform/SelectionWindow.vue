@@ -111,7 +111,7 @@ function handleMouseUp() {
 <template>
   <div
     ref="windowRef"
-    class="absolute top-0 bottom-0 cursor-move"
+    class="absolute top-0 bottom-0 cursor-move z-[15]"
     :style="{
       left: `${left}px`,
       width: `${width}px`,

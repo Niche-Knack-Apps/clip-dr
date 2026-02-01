@@ -6,7 +6,15 @@ export const WAVEFORM_BUCKET_COUNT = 1000;
 
 export const MIN_SELECTION_DURATION = 0.1;
 
-export const SEARCH_MIN_WORDS = 3;
+export const SEARCH_MIN_WORDS = 1;
+
+export const SEARCH_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+  'of', 'with', 'by', 'is', 'it', 'as', 'be', 'are', 'was', 'were',
+  'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+  'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'can',
+  'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'we', 'they',
+]);
 
 export const DEFAULT_SETTINGS = {
   loopByDefault: true,
@@ -62,12 +70,13 @@ export const TRACK_PANEL_MIN_WIDTH = 80;
 export const TRACK_PANEL_MAX_WIDTH = 300;
 export const TRACK_PANEL_DEFAULT_WIDTH = 128;
 
-export type LoopMode = 'full' | 'zoom' | 'inout' | 'active';
+export type LoopMode = 'full' | 'zoom' | 'inout' | 'active' | 'clip';
 export const LOOP_MODES: { value: LoopMode; label: string }[] = [
   { value: 'full', label: 'Full' },
   { value: 'zoom', label: 'Zoom' },
   { value: 'inout', label: 'I/O' },
   { value: 'active', label: 'Tracks' },
+  { value: 'clip', label: 'Clip' },
 ];
 
 import type { CleaningOptions, CleaningPreset } from './types';

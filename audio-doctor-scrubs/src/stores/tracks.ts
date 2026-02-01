@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import type { Track } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useSelectionStore } from './selection';
+import { usePlaybackStore } from './playback';
 import { generateId } from '@/shared/utils';
 
 export const useTracksStore = defineStore('tracks', () => {
@@ -60,13 +61,15 @@ export const useTracksStore = defineStore('tracks', () => {
 
     tracks.value.push(clip);
 
-    const main = mainTrack.value;
-    if (main) {
-      main.muted = true;
-    }
+    // Solo the new clip (using setTrackSolo for exclusive behavior)
+    setTrackSolo(clip.id, true);
 
     selectionStore.clearInOutPoints();
     selectedTrackId.value = clip.id;
+
+    // Auto-switch loop mode to 'clip' when clip is created
+    const playbackStore = usePlaybackStore();
+    playbackStore.setLoopMode('clip');
 
     return clip;
   }
@@ -97,10 +100,17 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function setTrackSolo(trackId: string, solo: boolean): void {
-    const track = tracks.value.find((t) => t.id === trackId);
-    if (track) {
-      track.solo = solo;
-    }
+    // Create new array to trigger reactivity for computed properties
+    tracks.value = tracks.value.map((t) => {
+      if (t.id === trackId) {
+        return { ...t, solo };
+      }
+      // Exclusive solo - de-solo all other tracks
+      if (solo && t.solo) {
+        return { ...t, solo: false };
+      }
+      return t;
+    });
   }
 
   function setTrackVolume(trackId: string, volume: number): void {
@@ -127,7 +137,9 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function addTrack(track: Track): void {
-    tracks.value.push(track);
+    // Use spread to create new array for guaranteed reactivity
+    tracks.value = [...tracks.value, track];
+    console.log('[Tracks] Added track:', track.name, 'Total tracks:', tracks.value.length);
   }
 
   function reorderTrack(fromIndex: number, toIndex: number): void {
@@ -164,16 +176,15 @@ export const useTracksStore = defineStore('tracks', () => {
 
     tracks.value.push(...newTracks);
 
-    // Mute main track
-    const main = mainTrack.value;
-    if (main) {
-      main.muted = true;
-    }
-
-    // Select the first new track
+    // Solo the first new track (using setTrackSolo for exclusive behavior)
     if (newTracks.length > 0) {
+      setTrackSolo(newTracks[0].id, true);
       selectedTrackId.value = newTracks[0].id;
     }
+
+    // Switch to 'clip' loop mode
+    const playbackStore = usePlaybackStore();
+    playbackStore.setLoopMode('clip');
 
     return newTracks;
   }

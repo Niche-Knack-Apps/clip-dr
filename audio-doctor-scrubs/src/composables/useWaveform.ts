@@ -1,5 +1,4 @@
-import { computed, ref, watch } from 'vue';
-import { useAudioStore } from '@/stores/audio';
+import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import type { WaveformBucket } from '@/shared/types';
 
 export interface WaveformRenderOptions {
@@ -12,10 +11,11 @@ export interface WaveformRenderOptions {
 }
 
 export function useWaveform() {
-  const audioStore = useAudioStore();
+  const { effectiveWaveformData, effectiveDuration } = useEffectiveAudio();
 
-  const waveformData = computed(() => audioStore.currentFile?.waveformData ?? []);
-  const duration = computed(() => audioStore.duration);
+  // Use effective waveform/duration which switches when a processed track is soloed
+  const waveformData = effectiveWaveformData;
+  const duration = effectiveDuration;
 
   function getBucketsForRange(
     start: number,

@@ -82,6 +82,10 @@ function handleWordClick(word: Word) {
   }
 }
 
+function handleWordTextUpdate(wordId: string, newText: string) {
+  transcriptionStore.updateWordText(wordId, newText);
+}
+
 function handleWordDragStart(event: MouseEvent, word: Word) {
   event.preventDefault();
   event.stopPropagation();
@@ -187,6 +191,7 @@ onUnmounted(() => {
           :is-highlighted="isWordHighlighted(word)"
           :is-dragging="isWordBeingDragged(word)"
           @click="handleWordClick"
+          @update-text="handleWordTextUpdate"
         />
       </div>
 

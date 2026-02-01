@@ -4,8 +4,12 @@ import { invoke } from '@tauri-apps/api/core';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Slider from '@/components/ui/Slider.vue';
+import AboutPanel from '@/components/settings/AboutPanel.vue';
+import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
+
+const APP_VERSION = '0.1.0';
 
 const emit = defineEmits<{
   close: [];
@@ -282,6 +286,21 @@ onMounted(() => {
               />
             </div>
           </div>
+        </div>
+
+        <!-- Logging -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Logging</h3>
+          <LoggingPanel />
+        </div>
+
+        <!-- About -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">About</h3>
+          <AboutPanel
+            app-name="Project Scrubs: The Clip Dr."
+            :app-version="APP_VERSION"
+          />
         </div>
       </div>
 
