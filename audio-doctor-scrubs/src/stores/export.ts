@@ -5,6 +5,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useCleaningStore } from './cleaning';
+import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
 import type { ExportFormat, Track } from '@/shared/types';
 
@@ -168,6 +169,96 @@ export const useExportStore = defineStore('export', () => {
     }
   }
 
+  async function exportWithSilenceRemoval(format: ExportFormat = 'wav'): Promise<string | null> {
+    const silenceStore = useSilenceStore();
+
+    if (!audioStore.currentFile) {
+      error.value = 'No audio loaded';
+      return null;
+    }
+
+    if (!silenceStore.hasRegions) {
+      error.value = 'No silence regions defined';
+      return null;
+    }
+
+    const extensions: Record<ExportFormat, string> = {
+      wav: 'wav',
+      mp3: 'mp3',
+      flac: 'flac',
+      ogg: 'ogg',
+    };
+
+    const ext = extensions[format];
+    const defaultName = audioStore.currentFile.name.replace(/\.[^.]+$/, `_no_silence.${ext}`);
+    const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+
+    try {
+      const outputPath = await save({
+        defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+        filters: [
+          { name: format.toUpperCase(), extensions: [ext] },
+        ],
+      });
+
+      if (!outputPath) {
+        return null;
+      }
+
+      settingsStore.setLastExportFolder(outputPath);
+      loading.value = true;
+      error.value = null;
+      progress.value = 0;
+
+      // Build speech segments from gaps between active silence regions
+      const duration = audioStore.duration;
+      const silenceRegions = silenceStore.activeSilenceRegions;
+
+      // Sort by start time
+      const sorted = [...silenceRegions].sort((a, b) => a.start - b.start);
+
+      // Create speech segments (inverse of silence)
+      const speechSegments: Array<{ start: number; end: number; isSpeech: boolean }> = [];
+      let prevEnd = 0;
+
+      for (const region of sorted) {
+        if (region.start > prevEnd) {
+          speechSegments.push({
+            start: prevEnd,
+            end: region.start,
+            isSpeech: true,
+          });
+        }
+        prevEnd = region.end;
+      }
+
+      // Add final segment if there's speech after last silence
+      if (prevEnd < duration) {
+        speechSegments.push({
+          start: prevEnd,
+          end: duration,
+          isSpeech: true,
+        });
+      }
+
+      // Call the backend to export
+      await invoke('export_without_silence', {
+        sourcePath: audioStore.currentFile.path,
+        outputPath,
+        speechSegments,
+      });
+
+      progress.value = 100;
+      return outputPath;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e);
+      console.error('Export with silence removal error:', e);
+      return null;
+    } finally {
+      loading.value = false;
+    }
+  }
+
   function clear(): void {
     error.value = null;
     progress.value = 0;
@@ -181,6 +272,7 @@ export const useExportStore = defineStore('export', () => {
     canExport,
     exportActiveTracks,
     exportTrack,
+    exportWithSilenceRemoval,
     clear,
   };
 });

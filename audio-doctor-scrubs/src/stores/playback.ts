@@ -4,6 +4,7 @@ import { useAudioStore } from './audio';
 import { useSelectionStore } from './selection';
 import { useTracksStore } from './tracks';
 import { useCleaningStore } from './cleaning';
+import { useSilenceStore } from './silence';
 import type { LoopMode } from '@/shared/constants';
 
 export const usePlaybackStore = defineStore('playback', () => {
@@ -303,7 +304,15 @@ export const usePlaybackStore = defineStore('playback', () => {
       pause();
     }
 
-    currentTime.value = Math.max(0, Math.min(time, audioStore.duration));
+    let seekTime = Math.max(0, Math.min(time, audioStore.duration));
+
+    // If seeking into silence while compression is enabled, jump to end of silence
+    const silenceStore = useSilenceStore();
+    if (silenceStore.compressionEnabled) {
+      seekTime = silenceStore.getNextSpeechTime(seekTime);
+    }
+
+    currentTime.value = seekTime;
 
     if (wasPlaying) {
       await play();
@@ -419,6 +428,7 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   function startTimeUpdate(): void {
     const ctx = audioStore.getAudioContext();
+    const silenceStore = useSilenceStore();
 
     const update = () => {
       if (!isPlaying.value) return;
@@ -429,6 +439,18 @@ export const usePlaybackStore = defineStore('playback', () => {
       const absSpeed = Math.abs(playbackSpeed.value) || 1;
       let newTime = startOffset + (elapsed * absSpeed * Math.sign(playbackSpeed.value));
       let needsRestart = false;
+
+      // Skip over silence regions when compression is enabled (forward playback only)
+      if (silenceStore.compressionEnabled && playbackSpeed.value > 0) {
+        const silenceRegion = silenceStore.isInSilence(newTime);
+        if (silenceRegion) {
+          // Jump to end of silence
+          newTime = silenceRegion.end;
+          startOffset = newTime;
+          startTime = ctx.currentTime;
+          needsRestart = true;
+        }
+      }
 
       // Handle boundaries
       if (playbackSpeed.value > 0) {

@@ -192,3 +192,10 @@ export interface TranscriptionMetadata {
   fullText?: string;
   language?: string;
 }
+
+export interface SilenceRegion {
+  id: string;
+  start: number;      // Start time in seconds (original timeline)
+  end: number;        // End time in seconds (original timeline)
+  enabled: boolean;   // If false, this region is "restored" (not cut)
+}

@@ -2,11 +2,13 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import WaveformCanvas from './WaveformCanvas.vue';
 import SelectionWindow from './SelectionWindow.vue';
+import SilenceOverlay from './SilenceOverlay.vue';
 import Playhead from './Playhead.vue';
 import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useSettingsStore } from '@/stores/settings';
+import { useSilenceStore } from '@/stores/silence';
 import { formatTime } from '@/shared/utils';
 import { WAVEFORM_HEIGHT } from '@/shared/constants';
 
@@ -14,6 +16,7 @@ const audioStore = useAudioStore();
 const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const settingsStore = useSettingsStore();
+const silenceStore = useSilenceStore();
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
@@ -52,6 +55,22 @@ function handleResizeEnd(newEnd: number) {
   selectionStore.resizeSelectionEnd(newEnd);
 }
 
+function handleSilenceResize(id: string, updates: { start?: number; end?: number }) {
+  silenceStore.updateRegion(id, updates);
+}
+
+function handleSilenceMove(id: string, delta: number) {
+  silenceStore.moveRegion(id, delta);
+}
+
+function handleSilenceDelete(id: string) {
+  silenceStore.deleteRegion(id);
+}
+
+function handleSilenceRestore(id: string) {
+  silenceStore.restoreRegion(id);
+}
+
 onMounted(() => {
   updateWidth();
 
@@ -83,6 +102,20 @@ onUnmounted(() => {
         :end-time="duration"
         :color="waveformColor"
         :height="WAVEFORM_HEIGHT"
+      />
+
+      <!-- Silence region overlays -->
+      <SilenceOverlay
+        v-for="region in silenceStore.silenceRegions"
+        :key="region.id"
+        :region="region"
+        :container-width="containerWidth"
+        :start-time="0"
+        :end-time="duration"
+        @resize="handleSilenceResize"
+        @move="handleSilenceMove"
+        @delete="handleSilenceDelete"
+        @restore="handleSilenceRestore"
       />
 
       <SelectionWindow

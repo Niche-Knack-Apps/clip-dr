@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import WaveformCanvas from './WaveformCanvas.vue';
+import SilenceOverlay from './SilenceOverlay.vue';
 import Playhead from './Playhead.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useSettingsStore } from '@/stores/settings';
+import { useSilenceStore } from '@/stores/silence';
 import { useUIStore } from '@/stores/ui';
 import { formatTime } from '@/shared/utils';
 import { ZOOMED_HEIGHT } from '@/shared/constants';
@@ -15,6 +17,7 @@ const audioStore = useAudioStore();
 const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const settingsStore = useSettingsStore();
+const silenceStore = useSilenceStore();
 const uiStore = useUIStore();
 
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -43,6 +46,11 @@ const outPoint = computed(() => selectionStore.inOutPoints.outPoint);
 const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 const followPlayhead = computed(() => uiStore.followPlayhead);
+
+// Get silence regions visible in the current zoom range
+const visibleSilenceRegions = computed(() =>
+  silenceStore.getRegionsInRange(selection.value.start, selection.value.end)
+);
 
 // Hit detection threshold in pixels
 const MARKER_HIT_THRESHOLD = 10;
@@ -261,6 +269,23 @@ function handleOutMarkerMouseDown(event: MouseEvent) {
   document.addEventListener('mouseup', handleMouseUp);
 }
 
+// Silence overlay handlers
+function handleSilenceResize(id: string, updates: { start?: number; end?: number }) {
+  silenceStore.updateRegion(id, updates);
+}
+
+function handleSilenceMove(id: string, delta: number) {
+  silenceStore.moveRegion(id, delta);
+}
+
+function handleSilenceDelete(id: string) {
+  silenceStore.deleteRegion(id);
+}
+
+function handleSilenceRestore(id: string) {
+  silenceStore.restoreRegion(id);
+}
+
 onMounted(() => {
   updateWidth();
 
@@ -305,6 +330,21 @@ onUnmounted(() => {
         :end-time="selection.end"
         :color="waveformColor"
         :height="ZOOMED_HEIGHT"
+      />
+
+      <!-- Silence region overlays (z-index below markers) -->
+      <SilenceOverlay
+        v-for="region in visibleSilenceRegions"
+        :key="region.id"
+        :region="region"
+        :container-width="containerWidth"
+        :start-time="selection.start"
+        :end-time="selection.end"
+        class="z-10"
+        @resize="handleSilenceResize"
+        @move="handleSilenceMove"
+        @delete="handleSilenceDelete"
+        @restore="handleSilenceRestore"
       />
 
       <!-- In point marker (draggable) -->

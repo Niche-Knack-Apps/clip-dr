@@ -12,6 +12,7 @@ import { usePlayback } from '@/composables/usePlayback';
 import { useSelection } from '@/composables/useSelection';
 import { useClipping } from '@/composables/useClipping';
 import { useVadStore } from '@/stores/vad';
+import { useSilenceStore } from '@/stores/silence';
 import { useCleaningStore } from '@/stores/cleaning';
 import { useSettingsStore } from '@/stores/settings';
 import { useExportStore } from '@/stores/export';
@@ -58,6 +59,7 @@ const {
 } = useClipping();
 
 const vadStore = useVadStore();
+const silenceStore = useSilenceStore();
 const cleaningStore = useCleaningStore();
 const settingsStore = useSettingsStore();
 const exportStore = useExportStore();
@@ -79,7 +81,18 @@ async function handleDetectSilence() {
 }
 
 function handleRemoveSilence() {
-  vadStore.createSpeechTracks();
+  silenceStore.initFromVad();
+}
+
+function handleAddSilenceRegion() {
+  // Add silence region from in/out points
+  if (inPoint.value !== null && outPoint.value !== null) {
+    silenceStore.addRegion(inPoint.value, outPoint.value);
+  }
+}
+
+function handleClearSilenceRegions() {
+  silenceStore.clear();
 }
 
 async function handleImport() {
@@ -279,7 +292,7 @@ defineExpose({ focusSearch });
       <!-- VAD / Silence Removal -->
       <div class="flex items-center gap-1 relative">
         <Button
-          v-if="!vadStore.hasResult"
+          v-if="!vadStore.hasResult && !silenceStore.hasRegions"
           variant="secondary"
           size="sm"
           :disabled="!hasFile"
@@ -292,27 +305,60 @@ defineExpose({ focusSearch });
           Detect Silence
         </Button>
 
-        <template v-else>
+        <template v-else-if="vadStore.hasResult && !silenceStore.hasRegions">
           <span class="text-[10px] text-gray-400">
             {{ vadStore.silencePercentage.toFixed(0) }}% silence
           </span>
           <Button
-            v-if="!vadStore.speechTracksCreated"
             variant="primary"
             size="sm"
             @click="handleRemoveSilence"
           >
-            Create Tracks
+            Remove Silence
           </Button>
-          <span v-else class="text-[10px] text-green-400">
-            ✓ Tracks
-          </span>
           <Button
             variant="ghost"
             size="sm"
             icon
             @click="vadStore.clear()"
-            title="Clear"
+            title="Clear detection"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </Button>
+        </template>
+
+        <template v-else-if="silenceStore.hasRegions">
+          <!-- Skip Silence toggle -->
+          <Toggle
+            :model-value="silenceStore.compressionEnabled"
+            label="Skip"
+            @update:model-value="silenceStore.toggleCompression"
+          />
+          <!-- Saved duration -->
+          <span class="text-[10px] text-green-400 font-mono">
+            Saves: {{ formatTime(silenceStore.savedDuration) }}
+          </span>
+          <!-- Add manual silence region -->
+          <Button
+            variant="ghost"
+            size="sm"
+            :disabled="inPoint === null || outPoint === null"
+            title="Add silence region from In/Out points"
+            @click="handleAddSilenceRegion"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+            </svg>
+          </Button>
+          <!-- Clear all -->
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
+            @click="handleClearSilenceRegions"
+            title="Clear all silence regions"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
