@@ -204,11 +204,47 @@ export class DebugLogger {
       const content = this._formatLogsForExport(logs);
       const filename = `${this.config.appName.toLowerCase().replace(/\s+/g, '-')}-logs-${this._formatDate()}.log`;
 
-      this._blobDownload(content, filename);
-      return { success: true, filename };
+      if (this.isTauri) {
+        // Use Tauri's file dialog and fs API
+        const saved = await this._tauriSaveFile(content, filename);
+        if (saved) {
+          return { success: true, filename: saved };
+        }
+        return { success: false, error: 'Save cancelled' };
+      } else {
+        this._blobDownload(content, filename);
+        return { success: true, filename };
+      }
     } catch (error) {
       this._originalConsole.error('[DebugLogger] Download failed:', error);
       return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Save file using Tauri's file dialog
+   */
+  private async _tauriSaveFile(content: string, defaultFilename: string): Promise<string | null> {
+    try {
+      // Dynamic import to avoid issues in non-Tauri environments
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+
+      const filePath = await save({
+        defaultPath: defaultFilename,
+        filters: [{ name: 'Log Files', extensions: ['log', 'txt'] }],
+      });
+
+      if (filePath) {
+        await writeTextFile(filePath, content);
+        return filePath;
+      }
+      return null;
+    } catch (error) {
+      this._originalConsole.error('[DebugLogger] Tauri save failed:', error);
+      // Fall back to blob download
+      this._blobDownload(content, defaultFilename);
+      return defaultFilename;
     }
   }
 

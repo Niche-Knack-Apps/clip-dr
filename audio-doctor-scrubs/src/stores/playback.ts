@@ -130,10 +130,9 @@ export const usePlaybackStore = defineStore('playback', () => {
         if (soloedClip) {
           return { start: soloedClip.start, end: soloedClip.end };
         }
-        // Auto-solo top-most clip if none soloed
+        // If no soloed clip, use top-most clip bounds (don't auto-solo here - causes infinite loop)
         if (clipTracks.length > 0) {
           const topClip = clipTracks[clipTracks.length - 1];
-          tracksStore.setTrackSolo(topClip.id, true);
           return { start: topClip.start, end: topClip.end };
         }
         return { start: 0, end: getEffectiveDuration() };
@@ -210,8 +209,9 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   async function play(): Promise<void> {
     const activeTracks = getActiveTracks();
+    console.log('[Playback] play() called, activeTracks:', activeTracks.length);
     if (activeTracks.length === 0) {
-      console.log('No playable tracks (all muted)');
+      console.log('[Playback] No playable tracks (all muted)');
       return;
     }
 
@@ -219,6 +219,18 @@ export const usePlaybackStore = defineStore('playback', () => {
     await audioStore.resumeAudioContext();
 
     const ctx = audioStore.getAudioContext();
+    console.log('[Playback] AudioContext state:', ctx.state, 'sampleRate:', ctx.sampleRate, 'destination:', ctx.destination);
+
+    // Verify context is running
+    if (ctx.state !== 'running') {
+      console.error('[Playback] AudioContext NOT running! State:', ctx.state);
+      try {
+        await ctx.resume();
+        console.log('[Playback] After resume attempt, state:', ctx.state);
+      } catch (e) {
+        console.error('[Playback] Failed to resume AudioContext:', e);
+      }
+    }
 
     // Stop any existing playback without resetting position
     stopPlayback();
@@ -227,6 +239,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     const region = getActiveRegion();
     const regionStart = region.start;
     const regionEnd = region.end;
+    console.log('[Playback] Region:', regionStart, '-', regionEnd);
 
     // Keep current position if within region, otherwise start at region start
     let playStart = currentTime.value;
@@ -234,16 +247,27 @@ export const usePlaybackStore = defineStore('playback', () => {
       playStart = playbackSpeed.value >= 0 ? regionStart : regionEnd;
       currentTime.value = playStart;
     }
+    console.log('[Playback] playStart:', playStart);
 
     // Find the track at the current playback position
     const trackAtTime = getTrackAtTime(playStart);
+    console.log('[Playback] trackAtTime:', trackAtTime?.id, trackAtTime?.type, 'start:', trackAtTime?.start, 'end:', trackAtTime?.end);
 
     if (trackAtTime) {
       const buffer = getBufferForTrack(trackAtTime);
       if (!buffer) {
-        console.log('No buffer for track');
+        console.error('[Playback] No buffer for track!');
         return;
       }
+      console.log('[Playback] Buffer:', buffer.duration, 'sec,', buffer.numberOfChannels, 'ch,', buffer.sampleRate, 'Hz, length:', buffer.length);
+
+      // Verify buffer has audio data
+      const ch0 = buffer.getChannelData(0);
+      let maxSample = 0;
+      for (let i = 0; i < Math.min(1000, ch0.length); i++) {
+        maxSample = Math.max(maxSample, Math.abs(ch0[i]));
+      }
+      console.log('[Playback] Buffer sample check - max amplitude in first 1000 samples:', maxSample);
 
       sourceNode = ctx.createBufferSource();
       sourceNode.buffer = buffer;
@@ -252,10 +276,13 @@ export const usePlaybackStore = defineStore('playback', () => {
       sourceNode.playbackRate.value = absSpeed;
 
       gainNode = ctx.createGain();
-      gainNode.gain.value = volume.value * (trackAtTime.volume ?? 1);
+      const gainValue = volume.value * (trackAtTime.volume ?? 1);
+      gainNode.gain.value = gainValue;
+      console.log('[Playback] Gain value:', gainValue, '(volume:', volume.value, 'trackVolume:', trackAtTime.volume, ')');
 
       sourceNode.connect(gainNode);
       gainNode.connect(ctx.destination);
+      console.log('[Playback] Audio chain connected: source -> gain -> destination');
 
       // Calculate buffer offset - for cleaned or cut tracks, use relative offset
       const cleaningStore = useCleaningStore();
@@ -265,7 +292,8 @@ export const usePlaybackStore = defineStore('playback', () => {
       let bufferOffset: number;
       if (isProcessedTrack) {
         // Processed tracks have their own buffer starting at 0
-        bufferOffset = playStart;
+        // Calculate offset relative to track start
+        bufferOffset = playStart - trackAtTime.start;
       } else {
         bufferOffset = playStart;
       }
@@ -275,27 +303,46 @@ export const usePlaybackStore = defineStore('playback', () => {
       if (loopEnabled.value && playbackSpeed.value > 0 && activeTracks.length === 1) {
         sourceNode.loop = true;
         if (isProcessedTrack) {
+          // Processed track buffer starts at 0, duration is (end - start)
           sourceNode.loopStart = 0;
-          sourceNode.loopEnd = trackAtTime.end;
+          sourceNode.loopEnd = trackAtTime.end - trackAtTime.start;
         } else {
           sourceNode.loopStart = trackAtTime.start;
           sourceNode.loopEnd = trackAtTime.end;
         }
+        console.log('[Playback] Native loop set:', sourceNode.loopStart, '-', sourceNode.loopEnd, 'buffer duration:', buffer.duration);
+      } else {
+        console.log('[Playback] No native loop, loopEnabled:', loopEnabled.value, 'speed:', playbackSpeed.value, 'tracks:', activeTracks.length);
       }
 
+      // Verify offset is valid
+      if (bufferOffset >= buffer.duration) {
+        console.error('[Playback] Buffer offset', bufferOffset, 'exceeds buffer duration', buffer.duration, '- resetting to 0');
+        bufferOffset = 0;
+      }
+
+      console.log('[Playback] Starting source at offset:', bufferOffset, 'isProcessed:', isProcessedTrack, 'buffer.duration:', buffer.duration);
       sourceNode.start(0, Math.max(0, bufferOffset));
       currentPlayingTrackId = trackAtTime.id;
+      console.log('[Playback] Source node started successfully');
 
       sourceNode.onended = () => {
-        // Check if we should continue to next track or loop
+        console.log('[Playback] sourceNode.onended fired, isPlaying:', isPlaying.value, 'loopEnabled:', loopEnabled.value);
+        // If we're still supposed to be playing and loop is enabled, restart
         if (isPlaying.value && loopEnabled.value) {
-          // Time update will handle track switching
-        } else if (!loopEnabled.value) {
-          // Check if playhead is at end
-          const currentTrack = getTrackAtTime(currentTime.value);
-          if (!currentTrack) {
-            isPlaying.value = false;
+          console.log('[Playback] Audio ended unexpectedly, restarting from loop start');
+          const region = getLoopRegion();
+          currentTime.value = region.start;
+          // Restart playback
+          const trackAtTime = getTrackAtTime(region.start) || getActiveTrack();
+          if (trackAtTime) {
+            switchToTrack(trackAtTime, region.start);
           }
+        } else if (isPlaying.value && !loopEnabled.value) {
+          // Not looping, stop playback
+          console.log('[Playback] Audio ended, stopping (no loop)');
+          isPlaying.value = false;
+          stopTimeUpdate();
         }
       };
     }
@@ -317,11 +364,47 @@ export const usePlaybackStore = defineStore('playback', () => {
       }
       sourceNode = null;
     }
+    // Also disconnect gainNode to prevent orphaned nodes
+    if (gainNode) {
+      try {
+        gainNode.disconnect();
+      } catch (e) {
+        // Ignore
+      }
+      gainNode = null;
+    }
     currentPlayingTrackId = null;
     stopTimeUpdate();
   }
 
+  // Debug function to test audio output with FRESH context
+  function testAudioOutput(): void {
+    // Create a COMPLETELY NEW AudioContext to bypass any cached state
+    const freshCtx = new AudioContext();
+    console.log('[Playback] Testing with FRESH AudioContext...');
+    console.log('[Playback] Fresh context state:', freshCtx.state);
+
+    freshCtx.resume().then(() => {
+      console.log('[Playback] Fresh context resumed, state:', freshCtx.state);
+
+      const osc = freshCtx.createOscillator();
+      const testGain = freshCtx.createGain();
+      testGain.gain.value = 0.3; // Louder test tone
+      osc.frequency.value = 440;
+      osc.connect(testGain);
+      testGain.connect(freshCtx.destination);
+      osc.start();
+      osc.stop(freshCtx.currentTime + 1); // Play for 1 second
+      console.log('[Playback] Test tone started on fresh context');
+
+      // Also log the destination details
+      console.log('[Playback] Destination channels:', freshCtx.destination.maxChannelCount);
+      console.log('[Playback] Destination channelCount:', freshCtx.destination.channelCount);
+    });
+  }
+
   function pause(): void {
+    console.log('[Playback] pause() called from:', new Error().stack?.split('\n').slice(1, 4).join(' <- '));
     stopPlayback();
     isPlaying.value = false;
     // Don't reset currentTime - keep position
@@ -336,6 +419,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   async function togglePlay(): Promise<void> {
+    console.log('[Playback] togglePlay called, isPlaying:', isPlaying.value, 'stack:', new Error().stack?.split('\n').slice(2, 5).join(' <- '));
     if (isPlaying.value) {
       pause();
     } else {
@@ -555,6 +639,7 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   // Switch playback to a different track seamlessly
   function switchToTrack(track: typeof tracksStore.selectedTrack, time: number): void {
+    console.log('[Playback] switchToTrack called:', track?.id, 'at time:', time);
     if (!track) return;
 
     const ctx = audioStore.getAudioContext();
@@ -572,7 +657,11 @@ export const usePlaybackStore = defineStore('playback', () => {
     }
 
     const buffer = getBufferForTrack(track);
-    if (!buffer) return;
+    if (!buffer) {
+      console.error('[Playback] switchToTrack: No buffer for track!');
+      return;
+    }
+    console.log('[Playback] switchToTrack buffer:', buffer.duration, 'sec');
 
     sourceNode = ctx.createBufferSource();
     sourceNode.buffer = buffer;
@@ -583,6 +672,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     if (!gainNode) {
       gainNode = ctx.createGain();
       gainNode.connect(ctx.destination);
+      console.log('[Playback] switchToTrack: Created new gainNode');
     }
     gainNode.gain.value = volume.value * (track.volume ?? 1);
 
@@ -593,7 +683,8 @@ export const usePlaybackStore = defineStore('playback', () => {
     let bufferOffset: number;
     if (isProcessedTrack) {
       // Processed tracks have their own buffer starting at 0
-      bufferOffset = time;
+      // Calculate offset relative to track start
+      bufferOffset = time - track.start;
     } else {
       bufferOffset = time;
     }
@@ -602,8 +693,9 @@ export const usePlaybackStore = defineStore('playback', () => {
     if (loopEnabled.value && playbackSpeed.value > 0) {
       sourceNode.loop = true;
       if (isProcessedTrack) {
+        // Processed track buffer starts at 0, duration is (end - start)
         sourceNode.loopStart = 0;
-        sourceNode.loopEnd = track.end;
+        sourceNode.loopEnd = track.end - track.start;
       } else {
         sourceNode.loopStart = track.start;
         sourceNode.loopEnd = track.end;
@@ -636,31 +728,50 @@ export const usePlaybackStore = defineStore('playback', () => {
     }
   }
 
+  // Guard to prevent re-entrant playback restarts
+  let isRestarting = false;
+
+  // Watch selection changes - only restart if loop mode uses selection
+  let lastSelectionKey = '';
   watch(
-    () => selectionStore.selection,
-    () => {
-      if (isPlaying.value && loopEnabled.value) {
+    () => `${selectionStore.selection.start}-${selectionStore.selection.end}`,
+    async (newKey) => {
+      if (newKey === lastSelectionKey) return; // No actual change
+      console.log('[Playback] Selection watcher triggered:', lastSelectionKey, '->', newKey);
+      lastSelectionKey = newKey;
+      if (isRestarting) return;
+      if (isPlaying.value && loopEnabled.value && loopMode.value === 'zoom') {
+        console.log('[Playback] Selection change causing restart');
+        isRestarting = true;
         const time = currentTime.value;
         pause();
         currentTime.value = time;
-        play();
+        await play();
+        isRestarting = false;
       }
-    },
-    { deep: true }
+    }
   );
 
   // Restart playback when track mute/solo changes
+  // Use a string key to avoid creating new objects on every evaluation
+  let lastTracksKey = '';
   watch(
-    () => tracksStore.tracks.map(t => ({ id: t.id, muted: t.muted, solo: t.solo })),
-    () => {
+    () => tracksStore.tracks.map(t => `${t.id}:${t.muted}:${t.solo}`).join(','),
+    async (newKey) => {
+      if (newKey === lastTracksKey) return; // No actual change
+      console.log('[Playback] Tracks watcher triggered:', lastTracksKey.substring(0, 50), '->', newKey.substring(0, 50));
+      lastTracksKey = newKey;
+      if (isRestarting) return;
       if (isPlaying.value) {
+        console.log('[Playback] Track change causing restart');
+        isRestarting = true;
         const time = currentTime.value;
         pause();
         currentTime.value = time;
-        play();
+        await play();
+        isRestarting = false;
       }
-    },
-    { deep: true }
+    }
   );
 
   return {
@@ -699,5 +810,6 @@ export const usePlaybackStore = defineStore('playback', () => {
     getActiveTracks,
     getActiveRegion,
     getLoopRegion,
+    testAudioOutput,
   };
 });

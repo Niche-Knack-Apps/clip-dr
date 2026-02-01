@@ -117,6 +117,14 @@ export interface AudioMetadata {
   format: string;
 }
 
+/** Combined result from single-pass audio loading (3x faster) */
+export interface AudioLoadResult {
+  metadata: AudioMetadata;
+  waveform: number[];
+  /** Audio channels as separate arrays (already deinterleaved) */
+  channels: number[][];
+}
+
 export interface TranscriptionProgress {
   stage: 'loading' | 'transcribing' | 'aligning' | 'complete';
   progress: number;

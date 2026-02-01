@@ -14,6 +14,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             audio::get_audio_metadata,
             audio::load_audio_buffer,
+            audio::load_audio_complete,
             waveform::extract_waveform,
             transcribe::transcribe_audio,
             transcribe::check_whisper_model,
