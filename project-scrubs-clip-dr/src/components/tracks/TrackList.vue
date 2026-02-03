@@ -36,11 +36,21 @@ const canDrag = ref(false);
 
 // Clip dragging state (for moving clips on timeline / between tracks)
 const clipDraggingTrackId = ref<string | null>(null);
+const clipDraggingClipId = ref<string | null>(null);
 const clipDragTargetTrackId = ref<string | null>(null);
 const clipDragPreviewStart = ref<number>(0);
 
 const panelWidth = computed(() => uiStore.trackPanelWidth);
 const isAllSelected = computed(() => selectedTrackId.value === 'ALL');
+const snapEnabled = computed(() => uiStore.snapEnabled);
+
+// Minimum width for timeline to allow horizontal scrolling
+// Use 100 pixels per second as minimum, with a floor of 600px
+const minTimelineWidth = computed(() => {
+  const duration = tracksStore.timelineDuration;
+  const pxPerSecond = 100;
+  return Math.max(600, duration * pxPerSecond) + panelWidth.value;
+});
 
 // Toggle ALL view on/off
 function toggleAllView() {
@@ -184,29 +194,35 @@ function handleDrop(event: DragEvent, targetTrackId: string) {
 }
 
 // Clip drag handlers (for moving clips on timeline)
-function handleClipDragStart(trackId: string) {
+function handleClipDragStart(trackId: string, clipId: string) {
   clipDraggingTrackId.value = trackId;
+  clipDraggingClipId.value = clipId;
   clipDragTargetTrackId.value = trackId;
 }
 
-function handleClipDrag(trackId: string, newTrackStart: number) {
-  clipDragPreviewStart.value = newTrackStart;
-  // Update track position in real-time for visual feedback
-  tracksStore.setTrackStart(trackId, newTrackStart);
+function handleClipDrag(trackId: string, clipId: string, newClipStart: number) {
+  clipDragPreviewStart.value = newClipStart;
+  // Update clip position in real-time for visual feedback (with snap if enabled)
+  tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
 }
 
-function handleClipDragEnd(trackId: string, newTrackStart: number) {
-  // Final position update
-  tracksStore.setTrackStart(trackId, newTrackStart);
+function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number) {
+  // Final position update (with snap if enabled)
+  tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
+
+  // Finalize track bounds after drag completes
+  tracksStore.finalizeClipPositions(trackId);
 
   // If dragged to a different track, move the audio
+  // TODO: Support moving individual clips between tracks
   if (clipDragTargetTrackId.value && clipDragTargetTrackId.value !== trackId) {
     const ctx = audioStore.getAudioContext();
-    tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newTrackStart, ctx);
+    tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
   }
 
   // Reset state
   clipDraggingTrackId.value = null;
+  clipDraggingClipId.value = null;
   clipDragTargetTrackId.value = null;
 }
 
@@ -243,6 +259,22 @@ function handleClipDragLeaveTrack() {
         >
           ALL
         </button>
+        <!-- Snap/Magnet button -->
+        <button
+          type="button"
+          :class="[
+            'p-1 rounded transition-colors',
+            snapEnabled
+              ? 'bg-cyan-600 text-white'
+              : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
+          ]"
+          title="Snap clips to edges (prevents overlap)"
+          @click="uiStore.toggleSnap()"
+        >
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+            <path d="m15,0v11.807c0,1.638-1.187,3.035-2.701,3.179-.858.083-1.684-.189-2.316-.765-.625-.568-.983-1.377-.983-2.221V0H0v11.652c0,6.689,5,12.348,12.003,12.348,3.164,0,6.142-1.216,8.404-3.437,2.316-2.275,3.593-5.316,3.593-8.563V0h-9Zm6,12c0,2.435-.957,4.716-2.695,6.422-1.736,1.706-4.039,2.618-6.474,2.576-4.869-.089-8.831-4.282-8.831-9.347v-5.652h3v6c0,1.687.716,3.305,1.965,4.44,1.248,1.135,2.932,1.695,4.62,1.532,3.037-.29,5.416-2.998,5.416-6.166v-5.807h3v6Z"/>
+          </svg>
+        </button>
       </div>
       <div class="flex items-center gap-2">
         <span v-if="exporting" class="text-xs text-cyan-400">Exporting...</span>
@@ -250,47 +282,51 @@ function handleClipDragLeaveTrack() {
       </div>
     </div>
 
-    <div class="max-h-48 overflow-y-auto">
+    <div class="max-h-48 overflow-y-auto overflow-x-auto">
       <div
-        v-for="track in tracks"
-        :key="track.id"
-        class="relative"
-        :class="{
-          'border-t-2 border-cyan-500': dragOverTrackId === track.id && draggedTrackId !== track.id,
-          'bg-cyan-900/30': clipDragTargetTrackId === track.id && clipDraggingTrackId !== track.id,
-        }"
-        draggable="true"
-        @mousedown="handleMouseDown"
-        @mouseup="handleMouseUp"
-        @dragstart="handleDragStart($event, track.id)"
-        @dragend="handleDragEnd"
-        @dragover="handleDragOver($event, track.id)"
-        @dragleave="handleDragLeave"
-        @drop="handleDrop($event, track.id)"
-        @mouseenter="handleClipDragOverTrack(track.id)"
-        @mouseleave="handleClipDragLeaveTrack"
+        :style="{ minWidth: `${minTimelineWidth}px` }"
       >
-        <TrackLane
-          :track="track"
-          :is-selected="track.id === selectedTrackId"
-          @select="selectTrack"
-          @toggle-mute="toggleMute"
-          @toggle-solo="toggleSolo"
-          @delete="deleteTrack"
-          @export="handleExport"
-          @rename="handleRename"
-          @set-volume="handleSetVolume"
-          @clip-drag-start="handleClipDragStart"
-          @clip-drag="handleClipDrag"
-          @clip-drag-end="handleClipDragEnd"
-        />
-      </div>
+        <div
+          v-for="track in tracks"
+          :key="track.id"
+          class="relative"
+          :class="{
+            'border-t-2 border-cyan-500': dragOverTrackId === track.id && draggedTrackId !== track.id,
+            'bg-cyan-900/30': clipDragTargetTrackId === track.id && clipDraggingTrackId !== track.id,
+          }"
+          draggable="true"
+          @mousedown="handleMouseDown"
+          @mouseup="handleMouseUp"
+          @dragstart="handleDragStart($event, track.id)"
+          @dragend="handleDragEnd"
+          @dragover="handleDragOver($event, track.id)"
+          @dragleave="handleDragLeave"
+          @drop="handleDrop($event, track.id)"
+          @mouseenter="handleClipDragOverTrack(track.id)"
+          @mouseleave="handleClipDragLeaveTrack"
+        >
+          <TrackLane
+            :track="track"
+            :is-selected="track.id === selectedTrackId"
+            @select="selectTrack"
+            @toggle-mute="toggleMute"
+            @toggle-solo="toggleSolo"
+            @delete="deleteTrack"
+            @export="handleExport"
+            @rename="handleRename"
+            @set-volume="handleSetVolume"
+            @clip-drag-start="handleClipDragStart"
+            @clip-drag="handleClipDrag"
+            @clip-drag-end="handleClipDragEnd"
+          />
+        </div>
 
-      <div
-        v-if="!tracks.length"
-        class="flex items-center justify-center h-16 text-xs text-gray-600"
-      >
-        No tracks - Import or record audio
+        <div
+          v-if="!tracks.length"
+          class="flex items-center justify-center h-16 text-xs text-gray-600"
+        >
+          No tracks - Import or record audio
+        </div>
       </div>
     </div>
 

@@ -484,6 +484,153 @@ export const useTracksStore = defineStore('tracks', () => {
     }];
   }
 
+  // Snap threshold in seconds (clips snap when within this distance)
+  const SNAP_THRESHOLD = 0.1;
+
+  // Calculate snapped position for a clip, preventing overlap with other clips
+  function getSnappedClipPosition(
+    trackId: string,
+    clipId: string,
+    desiredStart: number,
+    clipDuration: number,
+    snapEnabled: boolean
+  ): number {
+    const track = tracks.value.find((t) => t.id === trackId);
+    if (!track) return Math.max(0, desiredStart);
+
+    // Get all other clips in the same track
+    const allClips = getTrackClips(trackId);
+    const otherClips = allClips.filter((c) => c.id !== clipId);
+
+    if (otherClips.length === 0) {
+      return Math.max(0, desiredStart);
+    }
+
+    const desiredEnd = desiredStart + clipDuration;
+    let snappedStart = desiredStart;
+
+    // Sort other clips by position
+    const sortedClips = [...otherClips].sort((a, b) => a.clipStart - b.clipStart);
+
+    if (snapEnabled) {
+      // Check for snap points at edges of other clips
+      for (const other of sortedClips) {
+        const otherEnd = other.clipStart + other.duration;
+
+        // Snap to end of other clip (our start aligns with their end)
+        if (Math.abs(desiredStart - otherEnd) < SNAP_THRESHOLD) {
+          snappedStart = otherEnd;
+          break;
+        }
+
+        // Snap to start of other clip (our end aligns with their start)
+        if (Math.abs(desiredEnd - other.clipStart) < SNAP_THRESHOLD) {
+          snappedStart = other.clipStart - clipDuration;
+          break;
+        }
+
+        // Snap our start to their start
+        if (Math.abs(desiredStart - other.clipStart) < SNAP_THRESHOLD) {
+          snappedStart = other.clipStart;
+          break;
+        }
+      }
+    }
+
+    // Prevent overlap - find valid position
+    const snappedEnd = snappedStart + clipDuration;
+
+    for (const other of sortedClips) {
+      const otherEnd = other.clipStart + other.duration;
+
+      // Check if we would overlap
+      if (snappedStart < otherEnd && snappedEnd > other.clipStart) {
+        // We overlap - push to nearest edge
+        const distToSnapBefore = Math.abs(snappedStart - otherEnd);
+        const distToSnapAfter = Math.abs(snappedEnd - other.clipStart);
+
+        if (distToSnapBefore <= distToSnapAfter) {
+          // Snap to just after this clip
+          snappedStart = otherEnd;
+        } else {
+          // Snap to just before this clip
+          snappedStart = other.clipStart - clipDuration;
+        }
+      }
+    }
+
+    return Math.max(0, snappedStart);
+  }
+
+  // Update a specific clip's position within a track
+  // Note: This only updates the clip position, not track bounds (to avoid zoom changes during drag)
+  function setClipStart(trackId: string, clipId: string, newClipStart: number, snapEnabled: boolean = false): void {
+    const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
+    if (trackIndex === -1) return;
+
+    const track = tracks.value[trackIndex];
+
+    // Handle single-clip track (no clips array)
+    if (!track.clips || track.clips.length === 0) {
+      // For tracks without clips array, clipId is "trackId-main"
+      if (clipId === track.id + '-main') {
+        // For single-clip tracks, snap is handled differently (snap to other tracks' clips)
+        // For now, just constrain to >= 0
+        track.trackStart = Math.max(0, newClipStart);
+        // Trigger reactivity
+        tracks.value = [...tracks.value];
+      }
+      return;
+    }
+
+    // Find the clip being moved
+    const clipIndex = track.clips.findIndex((c) => c.id === clipId);
+    if (clipIndex === -1) return;
+
+    const clip = track.clips[clipIndex];
+
+    // Calculate snapped position (with overlap prevention)
+    const snappedStart = getSnappedClipPosition(
+      trackId,
+      clipId,
+      newClipStart,
+      clip.duration,
+      snapEnabled
+    );
+
+    // Only update the clip's position, don't recalculate track bounds
+    // This prevents timeline duration from changing during drag
+    track.clips[clipIndex] = {
+      ...track.clips[clipIndex],
+      clipStart: snappedStart,
+    };
+
+    // Trigger reactivity
+    tracks.value = [...tracks.value];
+  }
+
+  // Finalize clip positions and recalculate track bounds after drag ends
+  function finalizeClipPositions(trackId: string): void {
+    const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
+    if (trackIndex === -1) return;
+
+    const track = tracks.value[trackIndex];
+    if (!track.clips || track.clips.length === 0) return;
+
+    // Recalculate track bounds based on all clips
+    const firstClipStart = Math.min(...track.clips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...track.clips.map(c => c.clipStart + c.duration));
+
+    tracks.value[trackIndex] = {
+      ...track,
+      trackStart: firstClipStart,
+      duration: lastClipEnd - firstClipStart,
+    };
+
+    // Trigger reactivity
+    tracks.value = [...tracks.value];
+  }
+
   return {
     tracks,
     selectedTrackId,
@@ -511,5 +658,7 @@ export const useTracksStore = defineStore('tracks', () => {
     moveTrackToTrack,
     cutRegionFromTrack,
     getTrackClips,
+    setClipStart,
+    finalizeClipPositions,
   };
 });

@@ -1,6 +1,7 @@
 import { computed } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+import type { TrackClip } from '@/shared/types';
 
 /**
  * Composable that creates a composite waveform from all tracks.
@@ -11,6 +12,51 @@ import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 export function useCompositeWaveform() {
   const tracksStore = useTracksStore();
 
+  /**
+   * Add a clip's waveform to the composite at the appropriate position.
+   */
+  function addClipToComposite(
+    composite: number[],
+    clip: TrackClip,
+    timelineDuration: number,
+    bucketDuration: number
+  ): void {
+    const clipStart = clip.clipStart;
+    const clipDuration = clip.duration;
+    const clipEnd = clipStart + clipDuration;
+    const clipWaveform = clip.waveformData;
+    const clipBucketCount = clipWaveform.length / 2;
+
+    // Calculate which composite buckets this clip covers
+    const startBucket = Math.floor((clipStart / timelineDuration) * WAVEFORM_BUCKET_COUNT);
+    const endBucket = Math.ceil((clipEnd / timelineDuration) * WAVEFORM_BUCKET_COUNT);
+
+    // Map clip waveform to composite buckets
+    for (let i = startBucket; i < endBucket && i < WAVEFORM_BUCKET_COUNT; i++) {
+      if (i < 0) continue;
+
+      // Calculate position within clip's waveform
+      const bucketTimeStart = i * bucketDuration;
+      const relativeTime = bucketTimeStart - clipStart;
+      const clipProgress = relativeTime / clipDuration;
+
+      // Map to clip's waveform bucket
+      const clipBucket = Math.floor(clipProgress * clipBucketCount);
+
+      if (clipBucket >= 0 && clipBucket < clipBucketCount) {
+        const clipIdx = clipBucket * 2;
+        const compositeIdx = i * 2;
+        // Take min/max bounds that cover both waveforms (additive mixing)
+        const clipMin = clipWaveform[clipIdx] || 0;
+        const clipMax = clipWaveform[clipIdx + 1] || 0;
+        const existingMin = composite[compositeIdx];
+        const existingMax = composite[compositeIdx + 1];
+        composite[compositeIdx] = Math.min(existingMin, clipMin);
+        composite[compositeIdx + 1] = Math.max(existingMax, clipMax);
+      }
+    }
+  }
+
   // Compute composite waveform data by merging all tracks
   const compositeWaveformData = computed(() => {
     const tracks = tracksStore.tracks;
@@ -19,8 +65,8 @@ export function useCompositeWaveform() {
       return [];
     }
 
-    // Single track - just return its waveform
-    if (tracks.length === 1) {
+    // Single track without clips - just return its waveform
+    if (tracks.length === 1 && (!tracks[0].clips || tracks[0].clips.length === 0)) {
       return tracks[0].audioData.waveformData;
     }
 
@@ -33,41 +79,14 @@ export function useCompositeWaveform() {
     const composite = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
     const bucketDuration = timelineDuration / WAVEFORM_BUCKET_COUNT;
 
-    // Process tracks in order (later tracks override earlier ones in overlaps)
+    // Process tracks in order
     for (const track of tracks) {
-      const trackWaveform = track.audioData.waveformData;
-      const trackStart = track.trackStart;
-      const trackDuration = track.duration;
-      const trackEnd = trackStart + trackDuration;
-      const trackBucketCount = trackWaveform.length / 2; // min/max pairs
+      // Get clips for this track (handles both multi-clip and single-buffer tracks)
+      const clips = tracksStore.getTrackClips(track.id);
 
-      // Calculate which buckets this track covers
-      const startBucket = Math.floor((trackStart / timelineDuration) * WAVEFORM_BUCKET_COUNT);
-      const endBucket = Math.ceil((trackEnd / timelineDuration) * WAVEFORM_BUCKET_COUNT);
-
-      // Map track waveform to composite buckets
-      for (let i = startBucket; i < endBucket && i < WAVEFORM_BUCKET_COUNT; i++) {
-        if (i < 0) continue;
-
-        // Calculate position within track's waveform
-        const bucketTimeStart = i * bucketDuration;
-        const relativeTime = bucketTimeStart - trackStart;
-        const trackProgress = relativeTime / trackDuration;
-
-        // Map to track's waveform bucket (min/max pair index)
-        const trackBucket = Math.floor(trackProgress * trackBucketCount);
-
-        if (trackBucket >= 0 && trackBucket < trackBucketCount) {
-          const trackIdx = trackBucket * 2;
-          const compositeIdx = i * 2;
-          // Take min/max bounds that cover both waveforms (additive mixing)
-          const trackMin = trackWaveform[trackIdx] || 0;
-          const trackMax = trackWaveform[trackIdx + 1] || 0;
-          const existingMin = composite[compositeIdx];
-          const existingMax = composite[compositeIdx + 1];
-          composite[compositeIdx] = Math.min(existingMin, trackMin);
-          composite[compositeIdx + 1] = Math.max(existingMax, trackMax);
-        }
+      // Add each clip to the composite
+      for (const clip of clips) {
+        addClipToComposite(composite, clip, timelineDuration, bucketDuration);
       }
     }
 

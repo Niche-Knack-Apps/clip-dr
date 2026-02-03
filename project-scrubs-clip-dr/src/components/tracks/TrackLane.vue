@@ -26,9 +26,9 @@ const emit = defineEmits<{
   export: [trackId: string];
   rename: [trackId: string, name: string];
   setVolume: [trackId: string, volume: number];
-  clipDragStart: [trackId: string];
-  clipDrag: [trackId: string, newTrackStart: number];
-  clipDragEnd: [trackId: string, newTrackStart: number];
+  clipDragStart: [trackId: string, clipId: string];
+  clipDrag: [trackId: string, clipId: string, newClipStart: number];
+  clipDragEnd: [trackId: string, clipId: string, newClipStart: number];
 }>();
 
 const playbackStore = usePlaybackStore();
@@ -42,6 +42,7 @@ const isClipDragging = ref(false);
 const clipDragPending = ref(false);
 const clipDragStartX = ref(0);
 const clipDragOriginalStart = ref(0);
+const draggingClipId = ref<string | null>(null);
 
 // Minimum pixels to move before drag starts (to allow click-to-select)
 const DRAG_THRESHOLD = 5;
@@ -77,14 +78,19 @@ function updateWidth() {
 }
 
 // Clip drag handlers - called from ClipRegion
-function handleClipDragStart(event: MouseEvent) {
+function handleClipDragStart(clipId: string, event: MouseEvent) {
   if (event.button !== 0) return;
+
+  // Find the clip being dragged to get its original position
+  const clip = trackClips.value.find(c => c.id === clipId);
+  if (!clip) return;
 
   // Don't start drag immediately - wait for threshold
   clipDragPending.value = true;
   isClipDragging.value = false;
   clipDragStartX.value = event.clientX;
-  clipDragOriginalStart.value = props.track.trackStart;
+  clipDragOriginalStart.value = clip.clipStart;
+  draggingClipId.value = clipId;
 
   document.addEventListener('mousemove', handleClipDragMove);
   document.addEventListener('mouseup', handleClipDragEnd);
@@ -92,37 +98,39 @@ function handleClipDragStart(event: MouseEvent) {
 
 function handleClipDragMove(event: MouseEvent) {
   if (!clipDragPending.value && !isClipDragging.value) return;
-  if (!containerRef.value) return;
+  if (!containerRef.value || !draggingClipId.value) return;
 
   const deltaX = event.clientX - clipDragStartX.value;
 
   // Check if we've crossed the drag threshold
   if (!isClipDragging.value && Math.abs(deltaX) >= DRAG_THRESHOLD) {
     isClipDragging.value = true;
-    emit('clipDragStart', props.track.id);
+    emit('clipDragStart', props.track.id, draggingClipId.value);
   }
 
   // Only update position if actually dragging
   if (isClipDragging.value) {
     const deltaTime = (deltaX / containerWidth.value) * duration.value;
     const newStart = Math.max(0, clipDragOriginalStart.value + deltaTime);
-    emit('clipDrag', props.track.id, newStart);
+    emit('clipDrag', props.track.id, draggingClipId.value, newStart);
   }
 }
 
 function handleClipDragEnd(event: MouseEvent) {
   const wasDragging = isClipDragging.value;
+  const clipId = draggingClipId.value;
 
-  if (wasDragging) {
+  if (wasDragging && clipId) {
     const deltaX = event.clientX - clipDragStartX.value;
     const deltaTime = (deltaX / containerWidth.value) * duration.value;
     const newStart = Math.max(0, clipDragOriginalStart.value + deltaTime);
-    emit('clipDragEnd', props.track.id, newStart);
+    emit('clipDragEnd', props.track.id, clipId, newStart);
   }
   // If not dragging (threshold not reached), the click event on parent will handle selection
 
   clipDragPending.value = false;
   isClipDragging.value = false;
+  draggingClipId.value = null;
 
   document.removeEventListener('mousemove', handleClipDragMove);
   document.removeEventListener('mouseup', handleClipDragEnd);
@@ -326,6 +334,7 @@ onUnmounted(() => {
         :container-width="containerWidth"
         :duration="duration"
         :is-dragging="isClipDragging"
+        :dragging-clip-id="draggingClipId"
         @drag-start="handleClipDragStart"
       />
 

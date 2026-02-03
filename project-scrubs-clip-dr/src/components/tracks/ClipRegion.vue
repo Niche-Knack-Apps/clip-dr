@@ -8,19 +8,27 @@ interface Props {
   containerWidth: number;
   duration: number;
   isDragging?: boolean;
+  draggingClipId?: string | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isDragging: false,
+  draggingClipId: null,
 });
 
 const emit = defineEmits<{
-  dragStart: [event: MouseEvent];
+  dragStart: [clipId: string, event: MouseEvent];
 }>();
 
 // Use clip position if provided, otherwise fall back to track position
+const clipId = computed(() => props.clip?.id ?? props.track.id + '-main');
 const clipStart = computed(() => props.clip?.clipStart ?? props.track.trackStart);
 const clipDuration = computed(() => props.clip?.duration ?? props.track.duration);
+
+// Only show as dragging if this specific clip is being dragged
+const isThisClipDragging = computed(() =>
+  props.isDragging && props.draggingClipId === clipId.value
+);
 
 // Calculate pixel position and width
 const left = computed(() => {
@@ -47,7 +55,7 @@ const borderColor = computed(() => {
 function handleMouseDown(event: MouseEvent) {
   // Prevent default to avoid text selection during drag
   event.preventDefault();
-  emit('dragStart', event);
+  emit('dragStart', clipId.value, event);
 }
 </script>
 
@@ -56,7 +64,7 @@ function handleMouseDown(event: MouseEvent) {
     class="absolute top-1 bottom-1 rounded cursor-grab active:cursor-grabbing select-none"
     :class="[
       track.solo ? 'ring-2 ring-yellow-500' : '',
-      isDragging ? 'opacity-70 ring-2 ring-cyan-400' : '',
+      isThisClipDragging ? 'opacity-70 ring-2 ring-cyan-400' : '',
     ]"
     :style="{
       left: `${left}px`,
@@ -71,7 +79,7 @@ function handleMouseDown(event: MouseEvent) {
     />
     <!-- Drag indicator when dragging -->
     <div
-      v-if="isDragging"
+      v-if="isThisClipDragging"
       class="absolute inset-0 flex items-center justify-center text-[10px] text-cyan-400 font-medium"
     >
       {{ clipStart.toFixed(2) }}s

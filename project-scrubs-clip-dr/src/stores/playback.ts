@@ -8,6 +8,7 @@ import type { Track } from '@/shared/types';
 
 interface TrackPlaybackNode {
   trackId: string;
+  clipId: string;
   sourceNode: AudioBufferSourceNode;
   gainNode: GainNode;
 }
@@ -65,12 +66,27 @@ export const usePlaybackStore = defineStore('playback', () => {
     return tracks.filter(t => !t.muted);
   }
 
-  // Get tracks that are active at a specific time
-  function getTracksAtTime(time: number): Track[] {
-    return getActiveTracks().filter(track => {
-      const trackEnd = track.trackStart + track.duration;
-      return time >= track.trackStart && time < trackEnd;
-    });
+  // Get clips that are active at a specific time (handles both multi-clip and single-buffer tracks)
+  function getClipsAtTime(time: number): Array<{ track: Track; clipId: string; buffer: AudioBuffer; clipStart: number; duration: number }> {
+    const result: Array<{ track: Track; clipId: string; buffer: AudioBuffer; clipStart: number; duration: number }> = [];
+
+    for (const track of getActiveTracks()) {
+      const clips = tracksStore.getTrackClips(track.id);
+      for (const clip of clips) {
+        const clipEnd = clip.clipStart + clip.duration;
+        if (time >= clip.clipStart && time < clipEnd) {
+          result.push({
+            track,
+            clipId: clip.id,
+            buffer: clip.buffer,
+            clipStart: clip.clipStart,
+            duration: clip.duration,
+          });
+        }
+      }
+    }
+
+    return result;
   }
 
   // Get the active playback region (union of all active tracks)
@@ -147,9 +163,14 @@ export const usePlaybackStore = defineStore('playback', () => {
     activeNodes = [];
   }
 
-  // Create playback node for a track
-  function createTrackNode(track: Track, ctx: AudioContext, offsetInTrack: number): TrackPlaybackNode | null {
-    const buffer = track.audioData.buffer;
+  // Create playback node for a clip (or single-buffer track)
+  function createClipNode(
+    track: Track,
+    clipId: string,
+    buffer: AudioBuffer,
+    offsetInClip: number,
+    ctx: AudioContext
+  ): TrackPlaybackNode | null {
     if (!buffer) return null;
 
     const sourceNode = ctx.createBufferSource();
@@ -166,12 +187,13 @@ export const usePlaybackStore = defineStore('playback', () => {
       gainNode.connect(masterGain);
     }
 
-    // Start at the correct offset within the track
-    const safeOffset = Math.max(0, Math.min(offsetInTrack, buffer.duration - 0.001));
+    // Start at the correct offset within the clip buffer
+    const safeOffset = Math.max(0, Math.min(offsetInClip, buffer.duration - 0.001));
     sourceNode.start(0, safeOffset);
 
     return {
       trackId: track.id,
+      clipId,
       sourceNode,
       gainNode,
     };
@@ -213,15 +235,15 @@ export const usePlaybackStore = defineStore('playback', () => {
       currentTime.value = playStart;
     }
 
-    // Start playback nodes for tracks that are active at the current time
-    const tracksAtTime = getTracksAtTime(playStart);
+    // Start playback nodes for clips that are active at the current time
+    const clipsAtTime = getClipsAtTime(playStart);
 
-    for (const track of tracksAtTime) {
-      const offsetInTrack = playStart - track.trackStart;
-      const node = createTrackNode(track, ctx, offsetInTrack);
+    for (const { track, clipId, buffer, clipStart } of clipsAtTime) {
+      const offsetInClip = playStart - clipStart;
+      const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
       if (node) {
         activeNodes.push(node);
-        console.log('[Playback] Started track:', track.name, 'at offset:', offsetInTrack);
+        console.log('[Playback] Started clip:', clipId, 'of track:', track.name, 'at offset:', offsetInClip);
       }
     }
 
@@ -408,27 +430,27 @@ export const usePlaybackStore = defineStore('playback', () => {
 
       currentTime.value = newTime;
 
-      // Check if tracks have changed at current time
-      const tracksAtTime = getTracksAtTime(newTime);
-      const activeTrackIds = new Set(activeNodes.map(n => n.trackId));
-      const targetTrackIds = new Set(tracksAtTime.map(t => t.id));
+      // Check if clips have changed at current time
+      const clipsAtTime = getClipsAtTime(newTime);
+      const activeClipIds = new Set(activeNodes.map(n => n.clipId));
+      const targetClipIds = new Set(clipsAtTime.map(c => c.clipId));
 
-      // Start new tracks that weren't playing
-      for (const track of tracksAtTime) {
-        if (!activeTrackIds.has(track.id)) {
-          const offsetInTrack = newTime - track.trackStart;
-          const node = createTrackNode(track, ctx, offsetInTrack);
+      // Start new clips that weren't playing
+      for (const { track, clipId, buffer, clipStart } of clipsAtTime) {
+        if (!activeClipIds.has(clipId)) {
+          const offsetInClip = newTime - clipStart;
+          const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
           if (node) {
             activeNodes.push(node);
-            console.log('[Playback] Started new track:', track.name);
+            console.log('[Playback] Started new clip:', clipId);
           }
         }
       }
 
-      // Stop tracks that ended
+      // Stop clips that ended
       const nodesToRemove: TrackPlaybackNode[] = [];
       for (const node of activeNodes) {
-        if (!targetTrackIds.has(node.trackId)) {
+        if (!targetClipIds.has(node.clipId)) {
           try {
             node.sourceNode.stop();
             node.sourceNode.disconnect();
@@ -445,12 +467,12 @@ export const usePlaybackStore = defineStore('playback', () => {
       if (needsRestart) {
         startTime = ctx.currentTime;
         startOffset = newTime;
-        // Restart all tracks at new position
+        // Restart all clips at new position
         stopAllNodes();
-        const tracksAtNewTime = getTracksAtTime(newTime);
-        for (const track of tracksAtNewTime) {
-          const offsetInTrack = newTime - track.trackStart;
-          const node = createTrackNode(track, ctx, offsetInTrack);
+        const clipsAtNewTime = getClipsAtTime(newTime);
+        for (const { track, clipId, buffer, clipStart } of clipsAtNewTime) {
+          const offsetInClip = newTime - clipStart;
+          const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
           if (node) {
             activeNodes.push(node);
           }

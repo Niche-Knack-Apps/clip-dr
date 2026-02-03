@@ -23,6 +23,9 @@ export const useUIStore = defineStore('ui', () => {
   // Follow playhead in zoomed view
   const followPlayhead = ref(false);
 
+  // Snap clips to edges (prevents overlap)
+  const snapEnabled = ref(true);
+
   // Computed helpers
   const isTrackPanelCollapsed = computed(() => trackPanelWidth.value <= TRACK_PANEL_MIN_WIDTH);
   const isTrackPanelExpanded = computed(() => trackPanelWidth.value >= TRACK_PANEL_MAX_WIDTH * 0.8);
@@ -56,11 +59,20 @@ export const useUIStore = defineStore('ui', () => {
     );
   }
 
+  function toggleSnap(): void {
+    snapEnabled.value = !snapEnabled.value;
+  }
+
+  function setSnapEnabled(enabled: boolean): void {
+    snapEnabled.value = enabled;
+  }
+
   return {
     trackPanelWidth,
     waveformHeight,
     zoomedHeight,
     followPlayhead,
+    snapEnabled,
     isTrackPanelCollapsed,
     isTrackPanelExpanded,
     setTrackPanelWidth,
@@ -68,5 +80,7 @@ export const useUIStore = defineStore('ui', () => {
     setZoomedHeight,
     toggleFollowPlayhead,
     setFollowPlayhead,
+    toggleSnap,
+    setSnapEnabled,
   };
 });
