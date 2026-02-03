@@ -537,24 +537,27 @@ export const useTracksStore = defineStore('tracks', () => {
       }
     }
 
-    // Prevent overlap - find valid position
-    const snappedEnd = snappedStart + clipDuration;
+    // Only prevent overlap when snap is enabled
+    // When snap is disabled, allow clips to overlap freely
+    if (snapEnabled) {
+      const snappedEnd = snappedStart + clipDuration;
 
-    for (const other of sortedClips) {
-      const otherEnd = other.clipStart + other.duration;
+      for (const other of sortedClips) {
+        const otherEnd = other.clipStart + other.duration;
 
-      // Check if we would overlap
-      if (snappedStart < otherEnd && snappedEnd > other.clipStart) {
-        // We overlap - push to nearest edge
-        const distToSnapBefore = Math.abs(snappedStart - otherEnd);
-        const distToSnapAfter = Math.abs(snappedEnd - other.clipStart);
+        // Check if we would overlap
+        if (snappedStart < otherEnd && snappedEnd > other.clipStart) {
+          // We overlap - push to nearest edge
+          const distToSnapBefore = Math.abs(snappedStart - otherEnd);
+          const distToSnapAfter = Math.abs(snappedEnd - other.clipStart);
 
-        if (distToSnapBefore <= distToSnapAfter) {
-          // Snap to just after this clip
-          snappedStart = otherEnd;
-        } else {
-          // Snap to just before this clip
-          snappedStart = other.clipStart - clipDuration;
+          if (distToSnapBefore <= distToSnapAfter) {
+            // Snap to just after this clip
+            snappedStart = otherEnd;
+          } else {
+            // Snap to just before this clip
+            snappedStart = other.clipStart - clipDuration;
+          }
         }
       }
     }

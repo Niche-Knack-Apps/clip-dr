@@ -45,14 +45,38 @@ const clipDragPreviewStart = ref<number>(0);
 const panelWidth = computed(() => uiStore.trackPanelWidth);
 const isAllSelected = computed(() => selectedTrackId.value === 'ALL');
 const snapEnabled = computed(() => uiStore.snapEnabled);
+const trackZoom = computed(() => uiStore.trackZoom);
 
-// Minimum width for timeline to allow horizontal scrolling
-// Use 100 pixels per second as minimum, with a floor of 600px
-const minTimelineWidth = computed(() => {
+// Reference to the scroll container for zoom calculations
+const scrollContainerRef = ref<HTMLDivElement | null>(null);
+
+// Timeline width based on zoom level
+// When zoomed all the way out, show all content plus 10% padding on the right
+const timelineWidth = computed(() => {
   const duration = tracksStore.timelineDuration;
-  const pxPerSecond = 100;
-  return Math.max(600, duration * pxPerSecond) + panelWidth.value;
+  // Add 10% extra duration for padding when zoomed out
+  const paddedDuration = duration * 1.1;
+  return Math.max(600, paddedDuration * trackZoom.value) + panelWidth.value;
 });
+
+// Handle scroll wheel zoom
+function handleWheel(event: WheelEvent) {
+  // Only zoom if not over the track panel (left side)
+  const rect = scrollContainerRef.value?.getBoundingClientRect();
+  if (!rect) return;
+
+  const mouseX = event.clientX - rect.left;
+  if (mouseX < panelWidth.value) return; // Don't zoom when over track controls
+
+  event.preventDefault();
+
+  // Zoom in/out based on scroll direction
+  if (event.deltaY < 0) {
+    uiStore.zoomTrackIn();
+  } else {
+    uiStore.zoomTrackOut();
+  }
+}
 
 // Toggle ALL view on/off
 function toggleAllView() {
@@ -292,9 +316,13 @@ function handleClipDragLeaveTrack() {
       </div>
     </div>
 
-    <div class="max-h-48 overflow-y-auto overflow-x-auto">
+    <div
+      ref="scrollContainerRef"
+      class="max-h-48 overflow-y-auto overflow-x-auto"
+      @wheel="handleWheel"
+    >
       <div
-        :style="{ minWidth: `${minTimelineWidth}px` }"
+        :style="{ minWidth: `${timelineWidth}px` }"
       >
         <div
           v-for="track in tracks"

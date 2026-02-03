@@ -26,6 +26,11 @@ export const useUIStore = defineStore('ui', () => {
   // Snap clips to edges (prevents overlap)
   const snapEnabled = ref(true);
 
+  // Track timeline zoom (pixels per second)
+  const trackZoom = ref(100); // Default 100px per second
+  const TRACK_ZOOM_MIN = 10;  // Minimum zoom (zoomed out)
+  const TRACK_ZOOM_MAX = 500; // Maximum zoom (zoomed in)
+
   // Computed helpers
   const isTrackPanelCollapsed = computed(() => trackPanelWidth.value <= TRACK_PANEL_MIN_WIDTH);
   const isTrackPanelExpanded = computed(() => trackPanelWidth.value >= TRACK_PANEL_MAX_WIDTH * 0.8);
@@ -67,12 +72,35 @@ export const useUIStore = defineStore('ui', () => {
     snapEnabled.value = enabled;
   }
 
+  function setTrackZoom(zoom: number): void {
+    trackZoom.value = Math.max(TRACK_ZOOM_MIN, Math.min(TRACK_ZOOM_MAX, zoom));
+  }
+
+  function zoomTrackIn(): void {
+    setTrackZoom(trackZoom.value * 1.2);
+  }
+
+  function zoomTrackOut(): void {
+    setTrackZoom(trackZoom.value / 1.2);
+  }
+
+  // Zoom to fit all content with padding
+  function zoomTrackToFit(timelineDuration: number, containerWidth: number): void {
+    if (timelineDuration <= 0 || containerWidth <= 0) return;
+    // Add 10% padding on the right
+    const targetZoom = (containerWidth * 0.9) / timelineDuration;
+    setTrackZoom(targetZoom);
+  }
+
   return {
     trackPanelWidth,
     waveformHeight,
     zoomedHeight,
     followPlayhead,
     snapEnabled,
+    trackZoom,
+    TRACK_ZOOM_MIN,
+    TRACK_ZOOM_MAX,
     isTrackPanelCollapsed,
     isTrackPanelExpanded,
     setTrackPanelWidth,
@@ -82,5 +110,9 @@ export const useUIStore = defineStore('ui', () => {
     setFollowPlayhead,
     toggleSnap,
     setSnapEnabled,
+    setTrackZoom,
+    zoomTrackIn,
+    zoomTrackOut,
+    zoomTrackToFit,
   };
 });
