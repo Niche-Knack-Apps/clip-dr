@@ -1,9 +1,62 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { tempDir } from '@tauri-apps/api/path';
 import type { VadResult, VadOptions, SpeechSegment } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
+
+// Helper to encode AudioBuffer to WAV format
+function encodeWav(buffer: AudioBuffer): Uint8Array {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitsPerSample = 16;
+  const bytesPerSample = bitsPerSample / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = buffer.length * blockAlign;
+  const headerSize = 44;
+  const totalSize = headerSize + dataSize;
+
+  const arrayBuffer = new ArrayBuffer(totalSize);
+  const view = new DataView(arrayBuffer);
+
+  writeWavString(view, 0, 'RIFF');
+  view.setUint32(4, totalSize - 8, true);
+  writeWavString(view, 8, 'WAVE');
+  writeWavString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeWavString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(buffer.getChannelData(ch));
+  }
+  for (let i = 0; i < buffer.length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    }
+  }
+  return new Uint8Array(arrayBuffer);
+}
+
+function writeWavString(view: DataView, offset: number, str: string): void {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+}
 
 export const useVadStore = defineStore('vad', () => {
   const audioStore = useAudioStore();
@@ -34,22 +87,75 @@ export const useVadStore = defineStore('vad', () => {
     return (result.value.totalSilenceDuration / total) * 100;
   });
 
+  // Mix track clips into a single buffer
+  function mixTrackClipsToBuffer(trackId: string): AudioBuffer | null {
+    const clips = tracksStore.getTrackClips(trackId);
+    if (clips.length === 0) return null;
+
+    const audioContext = audioStore.getAudioContext();
+    let timelineStart = Infinity;
+    let timelineEnd = 0;
+    let sampleRate = 44100;
+
+    for (const clip of clips) {
+      timelineStart = Math.min(timelineStart, clip.clipStart);
+      timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
+      sampleRate = clip.buffer.sampleRate;
+    }
+
+    const totalDuration = timelineEnd - timelineStart;
+    const totalSamples = Math.ceil(totalDuration * sampleRate);
+    const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
+    const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
+
+    for (const clip of clips) {
+      const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+      for (let ch = 0; ch < numChannels; ch++) {
+        const outputData = mixedBuffer.getChannelData(ch);
+        const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
+        const inputData = clip.buffer.getChannelData(inputCh);
+        for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
+          if (startSample + i >= 0) {
+            outputData[startSample + i] += inputData[i];
+          }
+        }
+      }
+    }
+    return mixedBuffer;
+  }
+
   async function detectSilence(): Promise<void> {
-    // Use the selected track's source path, or fall back to lastImportedPath
     const selectedTrack = tracksStore.selectedTrack;
-    const sourcePath = selectedTrack?.sourcePath ?? audioStore.lastImportedPath;
-    if (!sourcePath) {
-      error.value = 'No audio file loaded. Select a track with a source file.';
+    const trackId = selectedTrack?.id || tracksStore.tracks[0]?.id;
+
+    if (!trackId) {
+      error.value = 'No audio file loaded. Select a track.';
       return;
     }
-    console.log('[VAD] Detecting silence for track:', selectedTrack?.name, 'path:', sourcePath);
+    console.log('[VAD] Detecting silence for track:', selectedTrack?.name);
 
     loading.value = true;
     error.value = null;
 
     try {
+      // Get current buffer state (clips mixed together)
+      const mixedBuffer = mixTrackClipsToBuffer(trackId);
+      if (!mixedBuffer) {
+        error.value = 'No audio clips to analyze';
+        return;
+      }
+
+      // Encode to WAV and write to temp file
+      const wavData = encodeWav(mixedBuffer);
+      const tempFileName = `vad_buffer_${Date.now()}.wav`;
+      await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+      const tempDirPath = await tempDir();
+      const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
+
+      console.log('[VAD] Detecting from current buffer state, temp file:', tempPath);
+
       const vadResult = await invoke<VadResult>('detect_speech_segments', {
-        path: sourcePath,
+        path: tempPath,
         options: options.value,
       });
 

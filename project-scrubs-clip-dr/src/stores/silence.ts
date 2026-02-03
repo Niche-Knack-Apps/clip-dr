@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { tempDir } from '@tauri-apps/api/path';
 import type { SilenceRegion, Track } from '@/shared/types';
 import { useVadStore } from './vad';
 import { useAudioStore } from './audio';
@@ -8,6 +10,57 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+
+// Helper to encode AudioBuffer to WAV format
+function encodeWav(buffer: AudioBuffer): Uint8Array {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitsPerSample = 16;
+  const bytesPerSample = bitsPerSample / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = buffer.length * blockAlign;
+  const headerSize = 44;
+  const totalSize = headerSize + dataSize;
+
+  const arrayBuffer = new ArrayBuffer(totalSize);
+  const view = new DataView(arrayBuffer);
+
+  writeWavString(view, 0, 'RIFF');
+  view.setUint32(4, totalSize - 8, true);
+  writeWavString(view, 8, 'WAVE');
+  writeWavString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeWavString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(buffer.getChannelData(ch));
+  }
+  for (let i = 0; i < buffer.length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    }
+  }
+  return new Uint8Array(arrayBuffer);
+}
+
+function writeWavString(view: DataView, offset: number, str: string): void {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+}
 
 interface CutAudioData {
   path: string;
@@ -250,6 +303,43 @@ export const useSilenceStore = defineStore('silence', () => {
     silenceRegions.value = merged;
   }
 
+  // Mix track clips into a single buffer
+  function mixTrackClipsToBuffer(trackId: string): AudioBuffer | null {
+    const clips = tracksStore.getTrackClips(trackId);
+    if (clips.length === 0) return null;
+
+    const ctx = audioStore.getAudioContext();
+    let timelineStart = Infinity;
+    let timelineEnd = 0;
+    let sampleRate = 44100;
+
+    for (const clip of clips) {
+      timelineStart = Math.min(timelineStart, clip.clipStart);
+      timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
+      sampleRate = clip.buffer.sampleRate;
+    }
+
+    const totalDuration = timelineEnd - timelineStart;
+    const totalSamples = Math.ceil(totalDuration * sampleRate);
+    const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
+    const mixedBuffer = ctx.createBuffer(numChannels, totalSamples, sampleRate);
+
+    for (const clip of clips) {
+      const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+      for (let ch = 0; ch < numChannels; ch++) {
+        const outputData = mixedBuffer.getChannelData(ch);
+        const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
+        const inputData = clip.buffer.getChannelData(inputCh);
+        for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
+          if (startSample + i >= 0) {
+            outputData[startSample + i] += inputData[i];
+          }
+        }
+      }
+    }
+    return mixedBuffer;
+  }
+
   // Cut silence and create a new track (non-destructive)
   async function cutSilenceToNewTrack(): Promise<Track | null> {
     if (!tracksStore.hasAudio) {
@@ -269,25 +359,35 @@ export const useSilenceStore = defineStore('silence', () => {
       return null;
     }
 
-    // Need a file path - check if we have lastImportedPath
-    const sourcePath = audioStore.lastImportedPath;
-    if (!sourcePath) {
-      cutError.value = 'Cannot cut silence: no source file path available';
-      return null;
-    }
-
     cutting.value = true;
     cutError.value = null;
 
     try {
       console.log('[CutSilence] Starting cut for track:', sourceTrack.name);
 
+      // Get current buffer state (clips mixed together)
+      const mixedBuffer = mixTrackClipsToBuffer(sourceTrack.id);
+      if (!mixedBuffer) {
+        cutError.value = 'Cannot cut silence: no audio clips available';
+        cutting.value = false;
+        return null;
+      }
+
+      // Encode to WAV and write to temp file
+      const wavData = encodeWav(mixedBuffer);
+      const sourceFileName = `cut_source_${Date.now()}.wav`;
+      await writeFile(sourceFileName, wavData, { baseDir: BaseDirectory.Temp });
+      const tempDirPath = await tempDir();
+      const sourcePath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${sourceFileName}`;
+
+      console.log('[CutSilence] Using current buffer state, temp file:', sourcePath);
+
       // Get temp path for output
       const outputPath = await invoke<string>('get_temp_audio_path');
       console.log('[CutSilence] Temp output path:', outputPath);
 
       // Build speech segments from gaps between active (enabled) silence regions
-      const duration = sourceTrack.duration;
+      const duration = mixedBuffer.duration;
       const sorted = [...activeSilenceRegions.value].sort((a, b) => a.start - b.start);
 
       console.log('[CutSilence] Total silence regions:', silenceRegions.value.length);

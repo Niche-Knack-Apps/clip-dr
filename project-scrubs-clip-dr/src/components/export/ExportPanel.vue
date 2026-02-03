@@ -31,7 +31,8 @@ const bitrates: { value: Mp3Bitrate; label: string }[] = [
 
 async function handleExport() {
   lastExportedPath.value = null;
-  const path = await exportStore.exportActiveTracks(selectedFormat.value);
+  // Export all active tracks mixed together (toolbar export)
+  const path = await exportStore.exportMixedTracks(selectedFormat.value);
   if (path) {
     lastExportedPath.value = path;
     // Close panel after short delay to show success

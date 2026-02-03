@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import { save } from '@tauri-apps/plugin-dialog';
 import TrackLane from './TrackLane.vue';
 import { useClipping } from '@/composables/useClipping';
 import { useAudioStore } from '@/stores/audio';
 import { useUIStore } from '@/stores/ui';
 import { useTracksStore } from '@/stores/tracks';
 import { useTranscriptionStore } from '@/stores/transcription';
+import { useExportStore } from '@/stores/export';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
 
 const audioStore = useAudioStore();
 const uiStore = useUIStore();
 const tracksStore = useTracksStore();
 const transcriptionStore = useTranscriptionStore();
+const exportStore = useExportStore();
 
 const {
   tracks,
@@ -104,23 +105,14 @@ async function handleExport(trackId: string) {
   if (!track) return;
 
   try {
-    const defaultName = `${track.name}.wav`;
-
-    const savePath = await save({
-      defaultPath: defaultName,
-      filters: [{ name: 'WAV Audio', extensions: ['wav'] }],
-    });
-
-    if (!savePath) return;
-
     exporting.value = true;
-
-    // For track-centric model, we'd export the track's buffer directly
-    // For now, use the track's audio data
-    // TODO: Implement direct buffer export
-    console.log('Export track:', track.name, 'to:', savePath);
+    // Export this specific track only (uses WAV by default)
+    const result = await exportStore.exportTrack(track, 'wav');
+    if (result) {
+      console.log('[TrackList] Exported track:', track.name, 'to:', result);
+    }
   } catch (e) {
-    console.error('Export failed:', e);
+    console.error('[TrackList] Export failed:', e);
   } finally {
     exporting.value = false;
   }

@@ -1,12 +1,73 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { tempDir } from '@tauri-apps/api/path';
 import type { Transcription, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
 import { generateId, binarySearch } from '@/shared/utils';
 import { SEARCH_MIN_WORDS, SEARCH_STOPWORDS } from '@/shared/constants';
+
+// Helper to encode AudioBuffer to WAV format
+function encodeWav(buffer: AudioBuffer): Uint8Array {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitsPerSample = 16;
+  const bytesPerSample = bitsPerSample / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = buffer.length * blockAlign;
+  const headerSize = 44;
+  const totalSize = headerSize + dataSize;
+
+  const arrayBuffer = new ArrayBuffer(totalSize);
+  const view = new DataView(arrayBuffer);
+
+  // RIFF header
+  writeWavString(view, 0, 'RIFF');
+  view.setUint32(4, totalSize - 8, true);
+  writeWavString(view, 8, 'WAVE');
+
+  // fmt chunk
+  writeWavString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+
+  // data chunk
+  writeWavString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // Interleave channels and write samples
+  let offset = 44;
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(buffer.getChannelData(ch));
+  }
+
+  for (let i = 0; i < buffer.length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    }
+  }
+
+  return new Uint8Array(arrayBuffer);
+}
+
+function writeWavString(view: DataView, offset: number, str: string): void {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+}
 
 export const useTranscriptionStore = defineStore('transcription', () => {
   const audioStore = useAudioStore();
@@ -445,7 +506,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  // Force re-transcription (ignores existing JSON, clears words and runs model fresh)
+  // Force re-transcription using CURRENT buffer state (after clips moved/cut)
   async function reTranscribe(): Promise<void> {
     if (!tracksStore.hasAudio) {
       error.value = 'No audio file loaded';
@@ -471,7 +532,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return;
       }
 
-      await runTranscription();
+      // Use current buffer state instead of original file
+      await runTranscriptionFromBuffer();
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
       if (errMsg.includes('not found') || errMsg.includes('model')) {
@@ -530,6 +592,109 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
 
     // Save the transcription to JSON for future loads
+    await saveTranscription();
+  }
+
+  // Mix track clips into a single buffer for transcription
+  function mixTrackClipsToBuffer(trackId: string): AudioBuffer | null {
+    const clips = tracksStore.getTrackClips(trackId);
+    if (clips.length === 0) return null;
+
+    const audioContext = audioStore.getAudioContext();
+
+    // Find bounds
+    let timelineStart = Infinity;
+    let timelineEnd = 0;
+    let sampleRate = 44100;
+
+    for (const clip of clips) {
+      timelineStart = Math.min(timelineStart, clip.clipStart);
+      timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
+      sampleRate = clip.buffer.sampleRate;
+    }
+
+    // Normalize to start at 0
+    const totalDuration = timelineEnd - timelineStart;
+    const totalSamples = Math.ceil(totalDuration * sampleRate);
+    const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
+
+    const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
+
+    for (const clip of clips) {
+      const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+
+      for (let ch = 0; ch < numChannels; ch++) {
+        const outputData = mixedBuffer.getChannelData(ch);
+        const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
+        const inputData = clip.buffer.getChannelData(inputCh);
+
+        for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
+          if (startSample + i >= 0) {
+            outputData[startSample + i] += inputData[i];
+          }
+        }
+      }
+    }
+
+    return mixedBuffer;
+  }
+
+  // Transcribe from current buffer state (used for re-transcription after edits)
+  async function runTranscriptionFromBuffer(): Promise<void> {
+    const selectedTrack = tracksStore.selectedTrack;
+    const trackId = selectedTrack?.id || tracksStore.tracks[0]?.id;
+
+    if (!trackId) {
+      error.value = 'No track available for transcription';
+      return;
+    }
+
+    progress.value = { stage: 'loading', progress: 10, message: 'Preparing current audio state...' };
+
+    // Mix track clips into single buffer
+    const mixedBuffer = mixTrackClipsToBuffer(trackId);
+    if (!mixedBuffer) {
+      error.value = 'No audio clips to transcribe';
+      return;
+    }
+
+    progress.value = { stage: 'loading', progress: 20, message: 'Encoding audio...' };
+
+    // Encode to WAV
+    const wavData = encodeWav(mixedBuffer);
+
+    // Write to temp file
+    const tempFileName = `transcribe_buffer_${Date.now()}.wav`;
+    await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+    const tempDirPath = await tempDir();
+    const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
+
+    console.log('[Transcription] Transcribing from current buffer state, temp file:', tempPath);
+
+    progress.value = { stage: 'transcribing', progress: 30, message: 'Transcribing audio...' };
+
+    const customPath = getCustomPath();
+    const result = await invoke<{ words: Word[]; text: string; language: string }>(
+      'transcribe_audio',
+      {
+        path: tempPath,
+        modelsPath: customPath,
+      }
+    );
+
+    progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
+
+    transcription.value = {
+      audioId: trackId,
+      words: result.words.map((w) => ({ ...w, id: w.id || generateId() })),
+      fullText: result.text,
+      language: result.language,
+      processedAt: Date.now(),
+    };
+
+    progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
+
+    // Save transcription
     await saveTranscription();
   }
 

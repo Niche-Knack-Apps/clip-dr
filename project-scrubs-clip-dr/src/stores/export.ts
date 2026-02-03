@@ -2,6 +2,8 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
+import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { tempDir } from '@tauri-apps/api/path';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useCleaningStore } from './cleaning';
@@ -144,6 +146,47 @@ export const useExportStore = defineStore('export', () => {
     }
   }
 
+  /**
+   * Mix a single track's clips into an AudioBuffer.
+   */
+  function mixSingleTrack(trackId: string, audioContext: AudioContext): AudioBuffer | null {
+    const clips = tracksStore.getTrackClips(trackId);
+    if (clips.length === 0) return null;
+
+    let timelineStart = Infinity;
+    let timelineEnd = 0;
+    let sampleRate = 44100;
+
+    for (const clip of clips) {
+      timelineStart = Math.min(timelineStart, clip.clipStart);
+      timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
+      sampleRate = clip.buffer.sampleRate;
+    }
+
+    const totalDuration = timelineEnd - timelineStart;
+    const totalSamples = Math.ceil(totalDuration * sampleRate);
+    const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
+    const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
+
+    for (const clip of clips) {
+      const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+      for (let ch = 0; ch < numChannels; ch++) {
+        const outputData = mixedBuffer.getChannelData(ch);
+        const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
+        const inputData = clip.buffer.getChannelData(inputCh);
+        for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
+          if (startSample + i >= 0) {
+            outputData[startSample + i] += inputData[i];
+          }
+        }
+      }
+    }
+    return mixedBuffer;
+  }
+
+  /**
+   * Export a single track using its current buffer state (after edits/cuts).
+   */
   async function exportTrack(track: Track, format: ExportFormat = 'wav'): Promise<string | null> {
     if (!tracksStore.hasAudio) {
       error.value = 'No audio loaded';
@@ -177,28 +220,39 @@ export const useExportStore = defineStore('export', () => {
       loading.value = true;
       error.value = null;
 
-      const silenceStore = useSilenceStore();
+      // Get audio context and mix track's clips into single buffer
+      const audioContext = audioStore.getAudioContext();
+      const trackBuffer = mixSingleTrack(track.id, audioContext);
 
-      // Get the appropriate source (cleaned, cut, or original)
-      const source = getTrackSource(track, audioStore, cleaningStore, silenceStore);
+      if (!trackBuffer) {
+        throw new Error('No audio clips to export for this track');
+      }
+
+      // Encode to WAV and write to temp file
+      const wavData = encodeWav(trackBuffer);
+      const tempFileName = `track_export_${Date.now()}.wav`;
+      await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+      const tempDirPath = await tempDir();
+      const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
 
       if (format === 'mp3') {
         await invoke('export_audio_mp3', {
-          sourcePath: source.sourcePath,
+          sourcePath: tempPath,
           outputPath,
-          startTime: source.startTime,
-          endTime: source.endTime,
+          startTime: 0,
+          endTime: trackBuffer.duration,
           bitrate: mp3Bitrate.value,
         });
       } else {
         await invoke('export_audio_region', {
-          sourcePath: source.sourcePath,
+          sourcePath: tempPath,
           outputPath,
-          startTime: source.startTime,
-          endTime: source.endTime,
+          startTime: 0,
+          endTime: trackBuffer.duration,
         });
       }
 
+      console.log('[Export] Track export complete:', track.name, '->', outputPath);
       return outputPath;
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
@@ -314,6 +368,263 @@ export const useExportStore = defineStore('export', () => {
     progress.value = 0;
   }
 
+  /**
+   * Mix all active tracks/clips into a single AudioBuffer.
+   * Handles clip positions on the timeline and respects mute/solo.
+   */
+  function mixActiveTracks(audioContext: AudioContext): AudioBuffer | null {
+    const tracks = activeTracks.value;
+    if (tracks.length === 0) return null;
+
+    // Find timeline bounds
+    let timelineStart = Infinity;
+    let timelineEnd = 0;
+    let sampleRate = 44100;
+
+    // Gather all clips from active tracks
+    const allClips: Array<{
+      buffer: AudioBuffer;
+      clipStart: number;
+      duration: number;
+      volume: number;
+    }> = [];
+
+    for (const track of tracks) {
+      const clips = tracksStore.getTrackClips(track.id);
+      for (const clip of clips) {
+        timelineStart = Math.min(timelineStart, clip.clipStart);
+        timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
+        sampleRate = clip.buffer.sampleRate;
+        allClips.push({
+          buffer: clip.buffer,
+          clipStart: clip.clipStart,
+          duration: clip.duration,
+          volume: track.volume,
+        });
+      }
+    }
+
+    if (allClips.length === 0) return null;
+
+    // Normalize timeline to start at 0
+    const totalDuration = timelineEnd - timelineStart;
+    const totalSamples = Math.ceil(totalDuration * sampleRate);
+    const numChannels = Math.max(...allClips.map(c => c.buffer.numberOfChannels));
+
+    // Create output buffer
+    const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
+
+    // Mix each clip into the output buffer
+    for (const clip of allClips) {
+      const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+
+      for (let ch = 0; ch < numChannels; ch++) {
+        const outputData = mixedBuffer.getChannelData(ch);
+        const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
+        const inputData = clip.buffer.getChannelData(inputCh);
+
+        for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
+          if (startSample + i >= 0) {
+            // Mix (add) with volume applied
+            outputData[startSample + i] += inputData[i] * clip.volume;
+          }
+        }
+      }
+    }
+
+    // Normalize to prevent clipping
+    let maxAbs = 0;
+    for (let ch = 0; ch < numChannels; ch++) {
+      const data = mixedBuffer.getChannelData(ch);
+      for (let i = 0; i < data.length; i++) {
+        maxAbs = Math.max(maxAbs, Math.abs(data[i]));
+      }
+    }
+    if (maxAbs > 1) {
+      const scale = 0.95 / maxAbs;
+      for (let ch = 0; ch < numChannels; ch++) {
+        const data = mixedBuffer.getChannelData(ch);
+        for (let i = 0; i < data.length; i++) {
+          data[i] *= scale;
+        }
+      }
+    }
+
+    return mixedBuffer;
+  }
+
+  /**
+   * Encode AudioBuffer to WAV format.
+   */
+  function encodeWav(buffer: AudioBuffer): Uint8Array {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const bitsPerSample = 16;
+    const bytesPerSample = bitsPerSample / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = buffer.length * blockAlign;
+    const headerSize = 44;
+    const totalSize = headerSize + dataSize;
+
+    const arrayBuffer = new ArrayBuffer(totalSize);
+    const view = new DataView(arrayBuffer);
+
+    // RIFF header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, totalSize - 8, true);
+    writeString(view, 8, 'WAVE');
+
+    // fmt chunk
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // chunk size
+    view.setUint16(20, 1, true); // PCM format
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+
+    // data chunk
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    // Interleave channels and write samples
+    let offset = 44;
+    const channels: Float32Array[] = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      channels.push(buffer.getChannelData(ch));
+    }
+
+    for (let i = 0; i < buffer.length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        view.setInt16(offset, intSample, true);
+        offset += 2;
+      }
+    }
+
+    return new Uint8Array(arrayBuffer);
+  }
+
+  function writeString(view: DataView, offset: number, str: string): void {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+
+  /**
+   * Export all active tracks mixed together (toolbar export).
+   * This mixes all non-muted tracks into a single file.
+   */
+  async function exportMixedTracks(format: ExportFormat = 'wav'): Promise<string | null> {
+    if (!canExport.value) {
+      error.value = 'Nothing to export';
+      return null;
+    }
+
+    const extensions: Record<ExportFormat, string> = {
+      wav: 'wav',
+      mp3: 'mp3',
+      flac: 'flac',
+      ogg: 'ogg',
+    };
+
+    const ext = extensions[format];
+    const defaultName = `mixed_export.${ext}`;
+    const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+
+    try {
+      const outputPath = await save({
+        defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+        filters: [{ name: format.toUpperCase(), extensions: [ext] }],
+      });
+
+      if (!outputPath) {
+        return null;
+      }
+
+      settingsStore.setLastExportFolder(outputPath);
+      loading.value = true;
+      error.value = null;
+      progress.value = 10;
+
+      // Get audio context for mixing
+      const audioContext = audioStore.getAudioContext();
+
+      // Mix all active tracks
+      progress.value = 30;
+      const mixedBuffer = mixActiveTracks(audioContext);
+      if (!mixedBuffer) {
+        throw new Error('Failed to mix tracks');
+      }
+
+      progress.value = 50;
+
+      // Get temp directory path once
+      const tempDirPath = await tempDir();
+      const ensurePath = (fileName: string) => `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${fileName}`;
+
+      if (format === 'wav') {
+        // Encode to WAV and write directly
+        const wavData = encodeWav(mixedBuffer);
+        progress.value = 70;
+
+        // Write to temp file first, then use Rust to move/convert
+        const tempFileName = `mixed_temp_${Date.now()}.wav`;
+        await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+        const tempPath = ensurePath(tempFileName);
+
+        // Use Rust to copy to final location (handles permissions)
+        await invoke('export_audio_region', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: mixedBuffer.duration,
+        });
+      } else if (format === 'mp3') {
+        // For MP3, write temp WAV then convert
+        const wavData = encodeWav(mixedBuffer);
+        const tempFileName = `mixed_temp_${Date.now()}.wav`;
+        await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+        const tempPath = ensurePath(tempFileName);
+
+        progress.value = 70;
+        await invoke('export_audio_mp3', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: mixedBuffer.duration,
+          bitrate: mp3Bitrate.value,
+        });
+      } else {
+        // For other formats, write temp WAV and use Rust to convert
+        const wavData = encodeWav(mixedBuffer);
+        const tempFileName = `mixed_temp_${Date.now()}.wav`;
+        await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+        const tempPath = ensurePath(tempFileName);
+
+        await invoke('export_audio_region', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: mixedBuffer.duration,
+        });
+      }
+
+      progress.value = 100;
+      console.log('[Export] Mixed export complete:', outputPath);
+      return outputPath;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e);
+      console.error('[Export] Mixed export error:', e);
+      return null;
+    } finally {
+      loading.value = false;
+    }
+  }
+
   return {
     loading,
     error,
@@ -322,9 +633,12 @@ export const useExportStore = defineStore('export', () => {
     canExport,
     mp3Bitrate,
     exportActiveTracks,
+    exportMixedTracks,
     exportTrack,
     exportWithSilenceRemoval,
     setMp3Bitrate,
     clear,
+    mixActiveTracks,
+    encodeWav,
   };
 });
