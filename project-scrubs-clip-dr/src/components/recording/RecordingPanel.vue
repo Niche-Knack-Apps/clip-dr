@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue';
+import { watch, onUnmounted } from 'vue';
 import Button from '@/components/ui/Button.vue';
+import Toggle from '@/components/ui/Toggle.vue';
 import LevelMeter from './LevelMeter.vue';
 import LiveWaveform from '@/components/waveform/LiveWaveform.vue';
 import { useRecordingStore, type RecordingSource } from '@/stores/recording';
@@ -84,6 +85,19 @@ async function handleUnmute() {
     await recordingStore.checkMuted();
   }
 }
+
+async function handleTestDevice() {
+  const result = await recordingStore.testDevice();
+  if (result) {
+    const workingCount = result.working_configs.length;
+    const hasSignal = result.working_configs.some(c => c.has_signal);
+    alert(`Device: ${result.device_name}\nWorking configs: ${workingCount}\nHas signal: ${hasSignal ? 'YES' : 'NO'}\n\nConfigs:\n${result.working_configs.map(c => `  ${c.channels}ch ${c.sample_format} @ ${c.sample_rate}Hz ${c.has_signal ? '(signal)' : ''}`).join('\n')}\n\nErrors:\n${result.errors.join('\n') || 'None'}`);
+  }
+}
+
+async function handleResetState() {
+  await recordingStore.resetRecordingState();
+}
 </script>
 
 <template>
@@ -97,11 +111,13 @@ async function handleUnmute() {
         <button
           v-for="src in sources"
           :key="src.value"
+          :disabled="recordingStore.systemAudioProbing"
           :class="[
             'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded border transition-colors',
             recordingStore.source === src.value
               ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
-              : 'border-gray-600 bg-gray-700 text-gray-300 hover:border-gray-500'
+              : 'border-gray-600 bg-gray-700 text-gray-300 hover:border-gray-500',
+            recordingStore.systemAudioProbing ? 'opacity-50 cursor-wait' : ''
           ]"
           @click="recordingStore.setSource(src.value)"
         >
@@ -111,10 +127,25 @@ async function handleUnmute() {
           <span class="text-xs">{{ src.label }}</span>
         </button>
       </div>
+      <!-- System audio method indicator -->
+      <div v-if="recordingStore.source === 'system' && recordingStore.systemAudioInfo" class="mt-2 text-[10px]">
+        <span v-if="recordingStore.systemAudioProbing" class="text-gray-500">
+          Probing system audio...
+        </span>
+        <span v-else-if="recordingStore.systemAudioInfo.available" class="text-green-500">
+          System audio: {{ recordingStore.systemAudioInfo.method }}
+          <span v-if="recordingStore.systemAudioInfo.method === 'cpal-monitor'" class="text-gray-500">
+            (levels + live transcription)
+          </span>
+        </span>
+        <span v-else class="text-red-400">
+          {{ recordingStore.systemAudioInfo.test_result || 'System audio not available' }}
+        </span>
+      </div>
     </div>
 
-    <!-- Device selection -->
-    <div v-if="!recordingStore.isRecording" class="mb-4">
+    <!-- Device selection (show for microphone or CPAL-based system audio) -->
+    <div v-if="!recordingStore.isRecording && (recordingStore.source === 'microphone' || recordingStore.systemAudioInfo?.cpal_monitor_device)" class="mb-4">
       <label class="block text-xs text-gray-400 mb-2">Device</label>
       <select
         :value="recordingStore.selectedDeviceId"
@@ -126,25 +157,73 @@ async function handleUnmute() {
         </option>
       </select>
       <div class="flex justify-between items-center mt-2">
-        <button
-          class="text-xs text-gray-500 hover:text-gray-300"
-          @click="recordingStore.refreshDevices()"
-        >
-          Refresh devices
-        </button>
+        <div class="flex gap-2">
+          <button
+            class="text-xs text-gray-500 hover:text-gray-300"
+            @click="recordingStore.refreshDevices()"
+          >
+            Refresh
+          </button>
+          <button
+            class="text-xs text-cyan-500 hover:text-cyan-300"
+            @click="handleTestDevice"
+          >
+            Test Device
+          </button>
+          <button
+            class="text-xs text-yellow-500 hover:text-yellow-300"
+            @click="handleResetState"
+          >
+            Reset
+          </button>
+        </div>
         <span v-if="recordingStore.isMonitoring" class="text-xs text-green-500">
           Monitoring active
         </span>
       </div>
     </div>
 
-    <!-- Pre-recording level meter (show when NOT recording but monitoring) -->
+    <!-- System audio via PipeWire (no device selection needed) -->
+    <div v-if="!recordingStore.isRecording && recordingStore.source === 'system' && !recordingStore.systemAudioInfo?.cpal_monitor_device && recordingStore.systemAudioInfo?.available" class="mb-4">
+      <label class="block text-xs text-gray-400 mb-2">Audio Source</label>
+      <div class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-300">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          </svg>
+          <span>Default Audio Output (PipeWire)</span>
+        </div>
+      </div>
+      <p class="mt-1 text-[10px] text-gray-500">
+        Will capture all system audio playing through your speakers/headphones.
+        Level meter will show during recording.
+      </p>
+      <div class="flex gap-2 mt-2">
+        <button
+          class="text-xs text-yellow-500 hover:text-yellow-300"
+          @click="handleResetState"
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+
+    <!-- Pre-recording level meter (show when NOT recording but monitoring - only for CPAL devices) -->
     <div v-if="!recordingStore.isRecording && recordingStore.isMonitoring" class="mb-4">
       <label class="block text-xs text-gray-400 mb-2">Input Level</label>
       <LevelMeter :level="recordingStore.currentLevel" />
       <p class="mt-1 text-xs text-gray-500">
         Make sure you see activity above when speaking/playing audio
       </p>
+    </div>
+
+    <!-- Info for system audio via subprocess (no pre-recording level meter) -->
+    <div v-if="!recordingStore.isRecording && recordingStore.source === 'system' && !recordingStore.systemAudioInfo?.cpal_monitor_device && recordingStore.systemAudioInfo?.available && !recordingStore.isMonitoring" class="mb-4">
+      <div class="p-2 bg-blue-900/20 border border-blue-700/50 rounded">
+        <p class="text-xs text-blue-400">
+          Level meter will appear once recording starts.
+        </p>
+      </div>
     </div>
 
     <!-- Muted warning with unmute button -->
@@ -169,12 +248,33 @@ async function handleUnmute() {
       </p>
     </div>
 
+    <!-- Live transcription toggle (before recording starts) -->
+    <div v-if="!recordingStore.isRecording" class="mb-4">
+      <Toggle
+        :model-value="recordingStore.enableLiveTranscription"
+        :disabled="!recordingStore.liveTranscriptionAvailable"
+        label="Live transcription"
+        @update:model-value="recordingStore.setEnableLiveTranscription"
+      />
+      <p class="text-[10px] text-gray-500 mt-1 ml-7">
+        <template v-if="recordingStore.liveTranscriptionAvailable">
+          Transcribe audio in real-time during recording
+        </template>
+        <template v-else>
+          No whisper model found. Configure in Settings.
+        </template>
+      </p>
+    </div>
+
     <!-- Recording status -->
     <div v-if="recordingStore.isRecording" class="mb-4">
       <div class="flex items-center gap-3 mb-3">
         <div class="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
         <span class="text-sm text-gray-200 font-mono">
           {{ formatTime(recordingStore.recordingDuration) }}
+        </span>
+        <span v-if="recordingStore.liveTranscription.isActive" class="text-[10px] text-cyan-400">
+          Transcribing...
         </span>
       </div>
 
@@ -185,6 +285,25 @@ async function handleUnmute() {
 
       <!-- Level meter -->
       <LevelMeter :level="recordingStore.currentLevel" />
+
+      <!-- Live transcription display -->
+      <div
+        v-if="recordingStore.liveTranscription.isActive || recordingStore.liveTranscription.words.length > 0"
+        class="mt-3"
+      >
+        <label class="block text-[10px] text-gray-500 mb-1">Live Transcription</label>
+        <div class="text-sm text-gray-300 bg-gray-900 p-2 rounded max-h-24 overflow-y-auto">
+          <span
+            v-for="word in recordingStore.liveTranscription.words"
+            :key="word.id"
+            class="mr-1"
+          >{{ word.text }}</span>
+          <span v-if="recordingStore.liveTranscription.isActive" class="animate-pulse text-cyan-400">|</span>
+          <span v-if="recordingStore.liveTranscription.words.length === 0 && recordingStore.liveTranscription.isActive" class="text-gray-500 italic">
+            Waiting for speech...
+          </span>
+        </div>
+      </div>
     </div>
 
     <!-- Error display -->

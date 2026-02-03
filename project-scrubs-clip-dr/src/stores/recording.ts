@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
-import type { TrackPlacement, AudioLoadResult } from '@/shared/types';
+import type { TrackPlacement, AudioLoadResult, Word, PartialTranscription, LiveTranscriptionState } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 
 export interface AudioDevice {
@@ -23,7 +24,29 @@ export interface RecordingResult {
   channels: number;
 }
 
+export interface ConfigInfo {
+  channels: number;
+  sample_rate: number;
+  sample_format: string;
+  has_signal: boolean;
+}
+
+export interface DeviceTestResult {
+  device_name: string;
+  working_configs: ConfigInfo[];
+  errors: string[];
+}
+
 export type RecordingSource = 'microphone' | 'system';
+
+export interface SystemAudioInfo {
+  available: boolean;
+  method: string;  // "pw-record", "parecord", "cpal-monitor", or "unavailable"
+  monitor_source: string | null;
+  sink_name: string | null;
+  test_result: string | null;
+  cpal_monitor_device: string | null;
+}
 
 export const useRecordingStore = defineStore('recording', () => {
   const audioStore = useAudioStore();
@@ -42,13 +65,27 @@ export const useRecordingStore = defineStore('recording', () => {
   const error = ref<string | null>(null);
   const isMuted = ref(false);
 
+  // System audio probe result
+  const systemAudioInfo = ref<SystemAudioInfo | null>(null);
+  const systemAudioProbing = ref(false);
+
   // Track placement setting: where new recordings appear on timeline
   const placement = ref<TrackPlacement>('append');
+
+  // Live transcription state
+  const enableLiveTranscription = ref(true);
+  const liveTranscriptionAvailable = ref(false);
+  const liveTranscription = ref<LiveTranscriptionState>({
+    words: [],
+    isActive: false,
+    lastChunkIndex: -1,
+  });
 
   let levelPollInterval: number | null = null;
   let monitorPollInterval: number | null = null;
   let durationInterval: number | null = null;
   let recordingStartTime = 0;
+  let transcriptionUnlisten: UnlistenFn | null = null;
 
   const microphoneDevices = computed(() =>
     devices.value.filter(d => d.is_input && !d.is_loopback)
@@ -85,20 +122,96 @@ export const useRecordingStore = defineStore('recording', () => {
     selectedDeviceId.value = deviceId;
   }
 
-  function setSource(newSource: RecordingSource): void {
+  async function setSource(newSource: RecordingSource): Promise<void> {
     source.value = newSource;
+    error.value = null;
+
     // Auto-select appropriate device
     if (newSource === 'microphone') {
       const mic = microphoneDevices.value.find(d => d.is_default) || microphoneDevices.value[0];
       if (mic) selectedDeviceId.value = mic.id;
+      systemAudioInfo.value = null;
     } else {
-      const loopback = loopbackDevices.value[0];
-      if (loopback) selectedDeviceId.value = loopback.id;
+      // Probe system audio capabilities
+      await probeSystemAudio();
+
+      // Select device based on probe result
+      if (systemAudioInfo.value?.cpal_monitor_device) {
+        // CPAL monitor available - use it (gives us levels + live transcription)
+        selectedDeviceId.value = systemAudioInfo.value.cpal_monitor_device;
+        console.log('[Recording] Using CPAL monitor device:', selectedDeviceId.value);
+      } else {
+        // Will use subprocess recording (pw-record) - no CPAL device needed
+        // The subprocess handles its own audio capture via PipeWire port linking
+        // Don't set a device ID here - the loopback devices in the list are
+        // PipeWire source names that CPAL can't open
+        selectedDeviceId.value = null;
+        console.log('[Recording] Using subprocess recording, no CPAL device');
+      }
+    }
+  }
+
+  async function probeSystemAudio(): Promise<SystemAudioInfo | null> {
+    try {
+      systemAudioProbing.value = true;
+      console.log('[Recording] Probing system audio capabilities...');
+
+      const info = await invoke<SystemAudioInfo>('probe_system_audio');
+      systemAudioInfo.value = info;
+
+      console.log('[Recording] System audio probe result:', info);
+
+      if (!info.available) {
+        error.value = `System audio not available: ${info.test_result || 'Unknown reason'}`;
+      }
+
+      return info;
+    } catch (e) {
+      console.error('[Recording] Failed to probe system audio:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+      return null;
+    } finally {
+      systemAudioProbing.value = false;
     }
   }
 
   function setPlacement(newPlacement: TrackPlacement): void {
     placement.value = newPlacement;
+  }
+
+  function setEnableLiveTranscription(enabled: boolean): void {
+    enableLiveTranscription.value = enabled;
+  }
+
+  // Check if live transcription is available (model exists)
+  async function checkLiveTranscriptionAvailable(): Promise<boolean> {
+    try {
+      const available = await invoke<boolean>('check_live_transcription_available', {
+        modelsPath: settingsStore.settings.modelsPath || null,
+      });
+      liveTranscriptionAvailable.value = available;
+      return available;
+    } catch (e) {
+      console.error('[Recording] Failed to check live transcription:', e);
+      liveTranscriptionAvailable.value = false;
+      return false;
+    }
+  }
+
+  // Merge new words from a transcription chunk with existing words
+  function mergeTranscriptionWords(newWords: Word[], chunkIndex: number): void {
+    if (chunkIndex === 0 || liveTranscription.value.words.length === 0) {
+      // First chunk or empty - just use the new words
+      liveTranscription.value.words = newWords;
+    } else {
+      // Merge with overlap handling
+      const existingEnd = liveTranscription.value.words.at(-1)?.end ?? 0;
+      const overlapBuffer = 0.3; // seconds
+      // Filter out words that overlap with what we already have
+      const filteredNew = newWords.filter(w => w.start > existingEnd - overlapBuffer);
+      liveTranscription.value.words.push(...filteredNew);
+    }
+    liveTranscription.value.lastChunkIndex = chunkIndex;
   }
 
   // Calculate track start position based on placement setting
@@ -128,10 +241,73 @@ export const useRecordingStore = defineStore('recording', () => {
       // Use the last export folder or a temp directory
       const outputDir = settingsStore.settings.lastExportFolder || '/tmp';
 
-      recordingPath.value = await invoke<string>('start_recording', {
-        deviceId: selectedDeviceId.value,
-        outputDir,
+      // Check if we're recording system audio
+      const isSystemAudio = source.value === 'system';
+
+      // Check if we should use live transcription
+      // Now works with both microphone AND system audio (system audio streams to transcription buffer)
+      const useLiveTranscription = enableLiveTranscription.value &&
+        liveTranscriptionAvailable.value;
+
+      console.log('[Recording] Start recording:', {
+        source: source.value,
+        isSystemAudio,
+        useLiveTranscription,
+        selectedDevice: selectedDeviceId.value,
       });
+
+      // Set up live transcription listener if enabled (works for both mic and system audio)
+      if (useLiveTranscription) {
+        transcriptionUnlisten = await listen<PartialTranscription>(
+          'transcription-partial',
+          (event) => {
+            const { words, chunkIndex, isFinal } = event.payload;
+            if (isFinal) {
+              liveTranscription.value.isActive = false;
+            } else {
+              mergeTranscriptionWords(words, chunkIndex);
+            }
+          }
+        );
+        liveTranscription.value = { words: [], isActive: true, lastChunkIndex: -1 };
+      }
+
+      if (isSystemAudio) {
+        // System audio uses pw-record with stdout streaming
+        // This now supports level meter + live transcription via the streaming approach
+        recordingPath.value = await invoke<string>('start_system_audio_recording', {
+          outputDir,
+        });
+        console.log('[Recording] Started system audio recording (streaming), output:', recordingPath.value);
+
+        // For system audio with live transcription, start just the transcription worker
+        // (the audio is already being fed to the transcription buffer by the stream reader)
+        if (useLiveTranscription) {
+          await invoke('start_transcription_worker', {
+            modelsPath: settingsStore.settings.modelsPath || null,
+          }).catch((e) => {
+            console.warn('[Recording] Could not start transcription worker for system audio:', e);
+          });
+        }
+      } else if (useLiveTranscription) {
+        // Event listener and state already set up above
+        // Start recording with transcription
+        recordingPath.value = await invoke<string>('start_recording_with_transcription', {
+          deviceId: selectedDeviceId.value,
+          outputDir,
+          modelsPath: settingsStore.settings.modelsPath || null,
+        });
+
+        console.log('[Recording] Started with live transcription, output:', recordingPath.value);
+      } else {
+        // Standard recording without live transcription
+        recordingPath.value = await invoke<string>('start_recording', {
+          deviceId: selectedDeviceId.value,
+          outputDir,
+        });
+
+        console.log('[Recording] Started, output:', recordingPath.value);
+      }
 
       isRecording.value = true;
       recordingStartTime = Date.now();
@@ -150,11 +326,14 @@ export const useRecordingStore = defineStore('recording', () => {
       durationInterval = window.setInterval(() => {
         recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
       }, 100);
-
-      console.log('[Recording] Started, output:', recordingPath.value);
     } catch (e) {
       console.error('[Recording] Failed to start:', e);
       error.value = e instanceof Error ? e.message : String(e);
+      // Clean up listener if we set one up
+      if (transcriptionUnlisten) {
+        transcriptionUnlisten();
+        transcriptionUnlisten = null;
+      }
     } finally {
       isPreparing.value = false;
     }
@@ -173,10 +352,39 @@ export const useRecordingStore = defineStore('recording', () => {
       durationInterval = null;
     }
 
+    // Clean up transcription listener
+    if (transcriptionUnlisten) {
+      transcriptionUnlisten();
+      transcriptionUnlisten = null;
+    }
+
     try {
-      const result = await invoke<RecordingResult>('stop_recording');
+      // Check what type of recording we were doing
+      const wasUsingLiveTranscription = liveTranscription.value.isActive;
+      const wasSystemAudio = source.value === 'system';
+      // Check if system audio used subprocess (not CPAL)
+      const wasUsingSubprocess = wasSystemAudio &&
+        systemAudioInfo.value?.method !== 'cpal-monitor';
+
+      let result: RecordingResult;
+      if (wasUsingSubprocess) {
+        // Subprocess recording (pw-record/parecord)
+        // Stop transcription worker first if it was running
+        if (wasUsingLiveTranscription) {
+          await invoke('stop_transcription_worker').catch((e) => {
+            console.warn('[Recording] Failed to stop transcription worker:', e);
+          });
+        }
+        result = await invoke<RecordingResult>('stop_system_audio_recording');
+      } else if (wasUsingLiveTranscription) {
+        result = await invoke<RecordingResult>('stop_recording_with_transcription');
+      } else {
+        result = await invoke<RecordingResult>('stop_recording');
+      }
+
       isRecording.value = false;
       currentLevel.value = 0;
+      liveTranscription.value.isActive = false;
 
       console.log('[Recording] Stopped:', result);
 
@@ -190,12 +398,13 @@ export const useRecordingStore = defineStore('recording', () => {
       console.error('[Recording] Failed to stop:', e);
       error.value = e instanceof Error ? e.message : String(e);
       isRecording.value = false;
+      liveTranscription.value.isActive = false;
       return null;
     }
   }
 
   // Create a track from recorded audio file
-  async function createTrackFromRecording(path: string, duration: number): Promise<void> {
+  async function createTrackFromRecording(path: string, _duration: number): Promise<void> {
     try {
       const ctx = audioStore.getAudioContext();
 
@@ -266,12 +475,32 @@ export const useRecordingStore = defineStore('recording', () => {
       durationInterval = null;
     }
 
+    // Clean up transcription listener
+    if (transcriptionUnlisten) {
+      transcriptionUnlisten();
+      transcriptionUnlisten = null;
+    }
+
     try {
-      await invoke('cancel_recording');
+      // For system audio, stop and delete the file
+      if (source.value === 'system') {
+        try {
+          const result = await invoke<RecordingResult>('stop_system_audio_recording');
+          // Delete the file since we're cancelling
+          if (result.path) {
+            // File will be left behind but user cancelled so it's ok
+          }
+        } catch {
+          // Ignore errors when cancelling
+        }
+      } else {
+        await invoke('cancel_recording');
+      }
       isRecording.value = false;
       currentLevel.value = 0;
       recordingDuration.value = 0;
       recordingPath.value = null;
+      liveTranscription.value = { words: [], isActive: false, lastChunkIndex: -1 };
       console.log('[Recording] Cancelled');
     } catch (e) {
       console.error('[Recording] Failed to cancel:', e);
@@ -288,6 +517,37 @@ export const useRecordingStore = defineStore('recording', () => {
     } catch (e) {
       // Ignore errors - mute detection may not be supported
       return false;
+    }
+  }
+
+  // Force reset recording state (for recovery from stuck state)
+  async function resetRecordingState(): Promise<void> {
+    try {
+      await invoke('reset_recording_state');
+      isRecording.value = false;
+      isPreparing.value = false;
+      currentLevel.value = 0;
+      recordingDuration.value = 0;
+      recordingPath.value = null;
+      error.value = null;
+      console.log('[Recording] State reset');
+    } catch (e) {
+      console.error('[Recording] Failed to reset state:', e);
+    }
+  }
+
+  // Test a device to see which configs actually work
+  async function testDevice(deviceId?: string): Promise<DeviceTestResult | null> {
+    try {
+      const result = await invoke<DeviceTestResult>('test_audio_device', {
+        deviceId: deviceId || selectedDeviceId.value,
+      });
+      console.log('[Recording] Device test result:', result);
+      return result;
+    } catch (e) {
+      console.error('[Recording] Device test failed:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+      return null;
     }
   }
 
@@ -358,6 +618,9 @@ export const useRecordingStore = defineStore('recording', () => {
   // Initialize devices on store creation
   refreshDevices();
 
+  // Check if live transcription is available on init
+  checkLiveTranscriptionAvailable();
+
   return {
     isRecording,
     isPreparing,
@@ -375,10 +638,20 @@ export const useRecordingStore = defineStore('recording', () => {
     loopbackDevices,
     selectedDevice,
     defaultDevice,
+    // Live transcription
+    enableLiveTranscription,
+    liveTranscriptionAvailable,
+    liveTranscription,
+    // System audio
+    systemAudioInfo,
+    systemAudioProbing,
     refreshDevices,
     selectDevice,
     setSource,
     setPlacement,
+    setEnableLiveTranscription,
+    checkLiveTranscriptionAvailable,
+    probeSystemAudio,
     startRecording,
     stopRecording,
     cancelRecording,
@@ -386,5 +659,7 @@ export const useRecordingStore = defineStore('recording', () => {
     stopMonitoring,
     checkMuted,
     unmute,
+    resetRecordingState,
+    testDevice,
   };
 });

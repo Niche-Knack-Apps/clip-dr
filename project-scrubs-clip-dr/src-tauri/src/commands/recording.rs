@@ -3,11 +3,14 @@ use cpal::{Sample, SampleFormat};
 use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter, Read};
 use std::panic;
 use std::path::PathBuf;
+use std::process::{ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+
+use super::streaming_transcribe::{append_to_transcription_buffer, set_recording_format};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
@@ -32,6 +35,9 @@ lazy_static::lazy_static! {
     static ref RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ref MONITORING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ref CURRENT_LEVEL: AtomicU32 = AtomicU32::new(0);
+    static ref DEBUG_CALLBACK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    // For streaming system audio - accumulate samples from stdout
+    static ref SYSTEM_AUDIO_SAMPLES: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
 }
 
 struct RecordingState {
@@ -134,8 +140,11 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
 
 #[tauri::command]
 pub async fn start_recording(device_id: Option<String>, output_dir: String) -> Result<String, String> {
+    // Auto-reset any stuck state from previous failed recordings
     if RECORDING_ACTIVE.load(Ordering::SeqCst) {
-        return Err("Recording already in progress".to_string());
+        log::warn!("Recording state was stuck, auto-resetting...");
+        reset_recording_state();
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     let host = cpal::default_host();
@@ -155,19 +164,81 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
     log::info!("Recording from device: {}", device_name);
 
     // Get supported config
-    let config = device
+    let default_config = device
         .default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
+
+    // Try to find a better config - prefer mono with good sample format (F32 > I16 > I32)
+    let supported_configs: Vec<_> = device.supported_input_configs()
+        .map_err(|e| format!("Failed to get supported configs: {}", e))?
+        .collect();
+
+    log::info!("Available input configs:");
+    for cfg in &supported_configs {
+        log::info!("  {} ch, {:?}, {}-{} Hz",
+            cfg.channels(), cfg.sample_format(),
+            cfg.min_sample_rate().0, cfg.max_sample_rate().0);
+    }
+
+    // Score configs: prefer mono, prefer F32/I16, prefer matching sample rate
+    fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
+        let mut score = 0;
+        // Prefer mono (avoids bad channel issues)
+        if cfg.channels() == 1 { score += 100; }
+        // Prefer good sample formats
+        match cfg.sample_format() {
+            SampleFormat::F32 => score += 50,
+            SampleFormat::I16 => score += 40,
+            SampleFormat::I32 => score += 30,
+            SampleFormat::F64 => score += 25,
+            SampleFormat::U16 => score += 20,
+            _ => {} // U8 and others get no bonus
+        }
+        // Prefer configs that support the target sample rate
+        let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
+        if rate_range.contains(&target_rate) { score += 10; }
+        if rate_range.contains(&44100) { score += 5; }
+        score
+    }
+
+    let target_rate = default_config.sample_rate().0;
+    let best_supported = supported_configs.iter()
+        .max_by_key(|cfg| config_score(cfg, target_rate));
+
+    let config = if let Some(best) = best_supported {
+        let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
+        let sample_rate = if rate_range.contains(&target_rate) {
+            target_rate
+        } else if rate_range.contains(&44100) {
+            44100
+        } else {
+            best.max_sample_rate().0.min(48000)
+        };
+        let cfg = best.clone().with_sample_rate(cpal::SampleRate(sample_rate));
+        log::info!("Selected config: {} ch, {:?}, {} Hz (score: {})",
+            cfg.channels(), cfg.sample_format(), sample_rate, config_score(best, target_rate));
+        cfg
+    } else {
+        log::info!("Using default config");
+        default_config
+    };
 
     let sample_rate = config.sample_rate().0;
     let channels = config.channels();
 
+    let sample_format = config.sample_format();
     log::info!(
         "Recording config: {} Hz, {} channels, {:?}",
         sample_rate,
         channels,
-        config.sample_format()
+        sample_format
     );
+
+    // Set recording format for transcription resampling
+    set_recording_format(sample_rate, channels);
+
+    // Debug: Log more details about the device config
+    log::info!("Buffer size: {:?}", config.buffer_size());
 
     // Generate output filename
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -186,13 +257,16 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
     }
 
     RECORDING_ACTIVE.store(true, Ordering::SeqCst);
+    DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
 
     // Build stream based on sample format
     let stream = match config.sample_format() {
         SampleFormat::F32 => build_input_stream::<f32>(&device, &config.into())?,
         SampleFormat::I16 => build_input_stream::<i16>(&device, &config.into())?,
         SampleFormat::U16 => build_input_stream::<u16>(&device, &config.into())?,
-        _ => return Err("Unsupported sample format".to_string()),
+        SampleFormat::I32 => build_input_stream::<i32>(&device, &config.into())?,
+        SampleFormat::U8 => build_input_stream::<u8>(&device, &config.into())?,
+        fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
     stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
@@ -225,16 +299,93 @@ where
 
                 // Wrap in catch_unwind to prevent ALSA timing panics from crashing
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    // Convert samples to f32 and calculate level
-                    let mut max_level: f32 = 0.0;
-                    let samples: Vec<f32> = data
+                    // Convert samples to f32
+                    let raw_samples: Vec<f32> = data
                         .iter()
-                        .map(|s| {
-                            let f = f32::from_sample(*s);
-                            max_level = max_level.max(f.abs());
-                            f
-                        })
+                        .map(|s| f32::from_sample(*s))
                         .collect();
+
+                    // For stereo input, check if one channel is bad (clipped/saturated)
+                    // and extract only the good channel if needed
+                    let samples: Vec<f32> = if let Ok(state) = RECORDING_STATE.lock() {
+                        if let Some(ref s) = *state {
+                            if s.channels == 2 && raw_samples.len() >= 20 {
+                                // Check first 10 samples of each channel for clipping
+                                let mut ch0_clipped = 0;
+                                let mut ch1_clipped = 0;
+                                for i in 0..10 {
+                                    let idx = i * 2;
+                                    if idx + 1 < raw_samples.len() {
+                                        if raw_samples[idx].abs() >= 0.999 {
+                                            ch0_clipped += 1;
+                                        }
+                                        if raw_samples[idx + 1].abs() >= 0.999 {
+                                            ch1_clipped += 1;
+                                        }
+                                    }
+                                }
+
+                                // If one channel is mostly clipped, use only the other
+                                if ch0_clipped >= 8 && ch1_clipped < 3 {
+                                    // Channel 0 is bad, use channel 1 only
+                                    let mono: Vec<f32> = raw_samples.chunks(2)
+                                        .filter_map(|chunk| chunk.get(1).copied())
+                                        .collect();
+                                    let count = DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst);
+                                    if count < 3 {
+                                        log::info!("Detected bad channel 0, using channel 1 only");
+                                    }
+                                    // Duplicate to stereo for WAV output
+                                    mono.iter().flat_map(|&s| [s, s]).collect()
+                                } else if ch1_clipped >= 8 && ch0_clipped < 3 {
+                                    // Channel 1 is bad, use channel 0 only
+                                    let mono: Vec<f32> = raw_samples.chunks(2)
+                                        .filter_map(|chunk| chunk.first().copied())
+                                        .collect();
+                                    let count = DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst);
+                                    if count < 3 {
+                                        log::info!("Detected bad channel 1, using channel 0 only");
+                                    }
+                                    // Duplicate to stereo for WAV output
+                                    mono.iter().flat_map(|&s| [s, s]).collect()
+                                } else {
+                                    raw_samples
+                                }
+                            } else {
+                                raw_samples
+                            }
+                        } else {
+                            raw_samples
+                        }
+                    } else {
+                        raw_samples
+                    };
+
+                    // Calculate level
+                    let mut max_level: f32 = 0.0;
+                    let mut min_sample: f32 = 0.0;
+                    let mut max_sample: f32 = 0.0;
+                    for &s in &samples {
+                        max_level = max_level.max(s.abs());
+                        min_sample = min_sample.min(s);
+                        max_sample = max_sample.max(s);
+                    }
+
+                    // Debug logging every ~1 second
+                    let count = DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+                    if count % 43 == 0 {
+                        log::info!(
+                            "Recording callback #{}: {} samples, range [{:.4}, {:.4}], max_level={:.4}",
+                            count, samples.len(), min_sample, max_sample, max_level
+                        );
+                        if samples.len() >= 10 {
+                            log::info!(
+                                "  First 10 samples: {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}",
+                                samples[0], samples[1], samples[2], samples[3], samples[4],
+                                samples[5], samples[6], samples[7], samples[8], samples[9]
+                            );
+                        }
+                    }
 
                     // Update level (convert to 0-1000 range for AtomicU32)
                     let level_int = (max_level * 1000.0) as u32;
@@ -243,9 +394,12 @@ where
                     // Append to recording buffer
                     if let Ok(mut state) = RECORDING_STATE.lock() {
                         if let Some(ref mut s) = *state {
-                            s.samples.extend(samples);
+                            s.samples.extend(samples.iter().copied());
                         }
                     }
+
+                    // Also append to transcription buffer for live transcription
+                    append_to_transcription_buffer(&samples);
                 }));
 
                 if result.is_err() {
@@ -358,6 +512,11 @@ pub async fn cancel_recording() -> Result<(), String> {
 pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
     // Stop any existing monitoring and give the old stream callback time to see the flag
     stop_monitoring_internal();
+    // Also reset any stuck recording state that might interfere
+    if RECORDING_ACTIVE.load(Ordering::SeqCst) {
+        log::warn!("Recording state was stuck during monitor start, resetting...");
+        reset_recording_state();
+    }
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let host = cpal::default_host();
@@ -389,7 +548,9 @@ pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
         SampleFormat::F32 => build_monitor_stream::<f32>(&device, &config.into())?,
         SampleFormat::I16 => build_monitor_stream::<i16>(&device, &config.into())?,
         SampleFormat::U16 => build_monitor_stream::<u16>(&device, &config.into())?,
-        _ => return Err("Unsupported sample format".to_string()),
+        SampleFormat::I32 => build_monitor_stream::<i32>(&device, &config.into())?,
+        SampleFormat::U8 => build_monitor_stream::<u8>(&device, &config.into())?,
+        fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
     stream.play().map_err(|e| format!("Failed to start monitor stream: {}", e))?;
@@ -465,6 +626,155 @@ pub fn is_monitoring() -> bool {
     MONITORING_ACTIVE.load(Ordering::SeqCst)
 }
 
+/// Force reset recording state (for recovery from stuck state)
+#[tauri::command]
+pub fn reset_recording_state() {
+    log::info!("Force resetting recording state");
+    RECORDING_ACTIVE.store(false, Ordering::SeqCst);
+    MONITORING_ACTIVE.store(false, Ordering::SeqCst);
+    CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    if let Ok(mut state) = RECORDING_STATE.lock() {
+        *state = None;
+    }
+}
+
+/// Test if a device can actually capture audio - returns info about working configs
+#[tauri::command]
+pub fn test_audio_device(device_id: Option<String>) -> Result<DeviceTestResult, String> {
+    let host = cpal::default_host();
+
+    let device = if let Some(ref id) = device_id {
+        host.input_devices()
+            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
+            .find(|d| d.name().ok().as_ref() == Some(id))
+            .ok_or_else(|| format!("Device not found: {}", id))?
+    } else {
+        host.default_input_device()
+            .ok_or("No default input device available")?
+    };
+
+    let device_name = device.name().unwrap_or_default();
+    log::info!("Testing device: {}", device_name);
+
+    let mut working_configs: Vec<ConfigInfo> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Get all supported configs
+    let supported = match device.supported_input_configs() {
+        Ok(configs) => configs.collect::<Vec<_>>(),
+        Err(e) => {
+            return Err(format!("Failed to get supported configs: {}", e));
+        }
+    };
+
+    for cfg_range in supported {
+        let sample_rate = if cfg_range.min_sample_rate().0 <= 44100 && cfg_range.max_sample_rate().0 >= 44100 {
+            44100
+        } else {
+            cfg_range.max_sample_rate().0.min(48000)
+        };
+
+        let cfg = cfg_range.with_sample_rate(cpal::SampleRate(sample_rate));
+        let stream_config: cpal::StreamConfig = cfg.clone().into();
+
+        // Try to build a test stream
+        let test_result = match cfg.sample_format() {
+            SampleFormat::F32 => test_stream::<f32>(&device, &stream_config),
+            SampleFormat::I16 => test_stream::<i16>(&device, &stream_config),
+            SampleFormat::U16 => test_stream::<u16>(&device, &stream_config),
+            SampleFormat::I32 => test_stream::<i32>(&device, &stream_config),
+            SampleFormat::U8 => test_stream::<u8>(&device, &stream_config),
+            fmt => Err(format!("Unsupported format: {:?}", fmt)),
+        };
+
+        match test_result {
+            Ok(has_signal) => {
+                working_configs.push(ConfigInfo {
+                    channels: cfg.channels(),
+                    sample_rate,
+                    sample_format: format!("{:?}", cfg.sample_format()),
+                    has_signal,
+                });
+            }
+            Err(e) => {
+                errors.push(format!("{} ch {:?} @ {} Hz: {}",
+                    cfg.channels(), cfg.sample_format(), sample_rate, e));
+            }
+        }
+    }
+
+    Ok(DeviceTestResult {
+        device_name,
+        working_configs,
+        errors,
+    })
+}
+
+fn test_stream<T: Sample + cpal::SizedSample + Send + 'static>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+) -> Result<bool, String>
+where
+    f32: cpal::FromSample<T>,
+{
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    let has_signal = Arc::new(AtomicBool::new(false));
+    let has_signal_clone = has_signal.clone();
+    let got_callback = Arc::new(AtomicBool::new(false));
+    let got_callback_clone = got_callback.clone();
+
+    let stream = device
+        .build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                got_callback_clone.store(true, Ordering::SeqCst);
+                // Check if we have any non-zero signal
+                for sample in data.iter() {
+                    let f = f32::from_sample(*sample);
+                    if f.abs() > 0.001 {
+                        has_signal_clone.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            },
+            |err| {
+                log::warn!("Test stream error: {}", err);
+            },
+            None,
+        )
+        .map_err(|e| format!("Failed to build stream: {}", e))?;
+
+    stream.play().map_err(|e| format!("Failed to play: {}", e))?;
+
+    // Wait a short time to see if we get callbacks and signal
+    std::thread::sleep(Duration::from_millis(200));
+
+    drop(stream);
+
+    if !got_callback.load(Ordering::SeqCst) {
+        return Err("No audio callbacks received".to_string());
+    }
+
+    Ok(has_signal.load(Ordering::SeqCst))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigInfo {
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub sample_format: String,
+    pub has_signal: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceTestResult {
+    pub device_name: String,
+    pub working_configs: Vec<ConfigInfo>,
+    pub errors: Vec<String>,
+}
+
 /// Check if the default audio input is muted (Linux only, via PipeWire/PulseAudio)
 #[tauri::command]
 pub fn check_input_muted() -> Result<bool, String> {
@@ -510,6 +820,520 @@ pub fn check_input_muted() -> Result<bool, String> {
     }
 }
 
+/// Record system audio using pw-record with stdout streaming (Linux only)
+/// This captures audio and streams it back for level monitoring and live transcription
+#[tauri::command]
+pub async fn start_system_audio_recording(output_dir: String) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        // Auto-reset any stuck state from previous failed recordings
+        if RECORDING_ACTIVE.load(Ordering::SeqCst) {
+            log::warn!("Recording state was stuck, auto-resetting...");
+            reset_recording_state();
+            let pid = SYSTEM_RECORD_PID.load(Ordering::SeqCst);
+            if pid != 0 {
+                let _ = std::process::Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status();
+                SYSTEM_RECORD_PID.store(0, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Generate output filename
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("recording_{}.wav", timestamp);
+        let output_path = PathBuf::from(&output_dir).join(&filename);
+
+        log::info!("Starting system audio recording (streaming) to: {:?}", output_path);
+
+        // Find the default sink monitor
+        let monitor_source = get_default_monitor_source()?;
+        log::info!("Using monitor source: {}", monitor_source);
+
+        // Check which tool is available
+        if !which_exists("pw-record") || !which_exists("pw-link") {
+            return Err("pw-record and pw-link required for system audio. Install pipewire.".to_string());
+        }
+
+        // Clear accumulated samples
+        {
+            let mut samples = SYSTEM_AUDIO_SAMPLES.lock().unwrap();
+            samples.clear();
+        }
+
+        // Set recording format for transcription buffer
+        set_recording_format(44100, 2);
+
+        // Start pw-record streaming to stdout (using "-" as output)
+        log::info!("Starting pw-record with stdout streaming");
+        let mut child = std::process::Command::new("pw-record")
+            .args([
+                "--target", "0",  // Don't auto-link
+                "--format", "f32",
+                "--rate", "44100",
+                "--channels", "2",
+                "-",  // Output to stdout for streaming
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw-record: {}", e))?;
+
+        let child_id = child.id();
+
+        // Get stdout for streaming
+        let stdout = child.stdout.take()
+            .ok_or("Failed to capture pw-record stdout")?;
+
+        // Store recording state
+        {
+            let mut state = RECORDING_STATE.lock().unwrap();
+            *state = Some(RecordingState {
+                samples: Vec::new(),
+                sample_rate: 44100,
+                channels: 2,
+                output_path: output_path.clone(),
+            });
+        }
+
+        SYSTEM_RECORD_PID.store(child_id as usize, Ordering::SeqCst);
+        RECORDING_ACTIVE.store(true, Ordering::SeqCst);
+        DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+
+        // Keep child process alive
+        std::mem::forget(child);
+
+        // Give pw-record time to create its ports
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Query available monitor ports and link appropriately
+        link_monitor_to_pw_record(&monitor_source)?;
+
+        // Spawn thread to read audio stream from stdout
+        std::thread::spawn(move || {
+            system_audio_stream_reader(stdout);
+        });
+
+        Ok(output_path.to_string_lossy().to_string())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("System audio recording only supported on Linux".to_string())
+    }
+}
+
+/// Background thread that reads audio from pw-record stdout
+#[cfg(target_os = "linux")]
+fn system_audio_stream_reader(stdout: ChildStdout) {
+    let mut reader = BufReader::with_capacity(8192, stdout);
+    let mut buffer = [0u8; 8192]; // ~46ms of stereo f32 @ 44.1kHz
+
+    log::info!("System audio stream reader started");
+
+    while RECORDING_ACTIVE.load(Ordering::SeqCst) {
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                log::info!("System audio stream EOF");
+                break;
+            }
+            Ok(n) => {
+                // Parse f32 samples from raw bytes (little-endian)
+                let samples: Vec<f32> = buffer[..n]
+                    .chunks(4)
+                    .filter_map(|chunk| {
+                        if chunk.len() == 4 {
+                            Some(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if samples.is_empty() {
+                    continue;
+                }
+
+                // Update level meter
+                let max_level = samples.iter()
+                    .map(|s| s.abs())
+                    .fold(0.0f32, f32::max);
+                CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+
+                // Feed transcription buffer for live transcription
+                append_to_transcription_buffer(&samples);
+
+                // Accumulate samples for final WAV file
+                if let Ok(mut accumulated) = SYSTEM_AUDIO_SAMPLES.lock() {
+                    accumulated.extend(&samples);
+                }
+
+                // Update callback count for debugging
+                DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(e) => {
+                log::warn!("System audio stream read error: {}", e);
+                break;
+            }
+        }
+    }
+
+    log::info!("System audio stream reader finished, {} callbacks",
+               DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst));
+}
+
+#[cfg(target_os = "linux")]
+fn get_default_monitor_source() -> Result<String, String> {
+    // Try wpctl first (PipeWire)
+    let output = std::process::Command::new("wpctl")
+        .args(["inspect", "@DEFAULT_AUDIO_SINK@"])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("node.name") {
+                    if let Some(name) = line.split('=').nth(1) {
+                        let sink_name = name.trim().trim_matches('"');
+                        log::info!("Found default sink via wpctl: {}", sink_name);
+                        // For pw-record, we use the sink name directly with --target
+                        return Ok(sink_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: try pactl (PulseAudio)
+    let output = std::process::Command::new("pactl")
+        .args(["get-default-sink"])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let sink = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !sink.is_empty() {
+                return Ok(format!("{}.monitor", sink));
+            }
+        }
+    }
+
+    // Last fallback: try to find any monitor source via pactl
+    let output = std::process::Command::new("pactl")
+        .args(["list", "short", "sources"])
+        .output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(".monitor") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    return Ok(parts[1].to_string());
+                }
+            }
+        }
+    }
+
+    Err("Could not find a monitor source for system audio. Make sure PipeWire or PulseAudio is running.".to_string())
+}
+
+/// Link monitor ports to pw-record, handling both stereo and mono devices
+#[cfg(target_os = "linux")]
+fn link_monitor_to_pw_record(monitor_source: &str) -> Result<(), String> {
+    // Query available output ports to find monitor ports for this device
+    let output = std::process::Command::new("pw-link")
+        .args(["-o"])
+        .output()
+        .map_err(|e| format!("Failed to run pw-link -o: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    log::info!("Available output ports:\n{}", stdout);
+
+    // Find monitor ports for our device
+    let mut has_fl = false;
+    let mut has_fr = false;
+    let mut has_mono = false;
+    let mut actual_device_prefix = String::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        // Check if this line contains our monitor source
+        if line.contains(monitor_source) || line.starts_with(&format!("{}:", monitor_source)) {
+            if line.ends_with(":monitor_FL") {
+                has_fl = true;
+                actual_device_prefix = line.trim_end_matches(":monitor_FL").to_string();
+            } else if line.ends_with(":monitor_FR") {
+                has_fr = true;
+                actual_device_prefix = line.trim_end_matches(":monitor_FR").to_string();
+            } else if line.ends_with(":monitor_MONO") {
+                has_mono = true;
+                actual_device_prefix = line.trim_end_matches(":monitor_MONO").to_string();
+            }
+        }
+    }
+
+    // If we didn't find ports with the exact name, search more broadly
+    if !has_fl && !has_fr && !has_mono {
+        // Try to find any monitor ports that might match (partial match on sink name)
+        let sink_short = monitor_source
+            .trim_start_matches("alsa_output.")
+            .split('.')
+            .next()
+            .unwrap_or(monitor_source);
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.contains(sink_short) && line.contains(":monitor_") {
+                if line.ends_with(":monitor_FL") {
+                    has_fl = true;
+                    actual_device_prefix = line.trim_end_matches(":monitor_FL").to_string();
+                } else if line.ends_with(":monitor_FR") {
+                    has_fr = true;
+                    actual_device_prefix = line.trim_end_matches(":monitor_FR").to_string();
+                } else if line.ends_with(":monitor_MONO") {
+                    has_mono = true;
+                    actual_device_prefix = line.trim_end_matches(":monitor_MONO").to_string();
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "Monitor port detection for '{}': FL={}, FR={}, MONO={}, prefix='{}'",
+        monitor_source, has_fl, has_fr, has_mono, actual_device_prefix
+    );
+
+    if actual_device_prefix.is_empty() {
+        // Last resort: use the original monitor_source as prefix
+        actual_device_prefix = monitor_source.to_string();
+        log::warn!("Could not find monitor ports, using source name directly: {}", monitor_source);
+    }
+
+    let mut links_created = 0;
+
+    if has_fl && has_fr {
+        // Stereo device - link FL->input_FL and FR->input_FR
+        let monitor_fl = format!("{}:monitor_FL", actual_device_prefix);
+        let monitor_fr = format!("{}:monitor_FR", actual_device_prefix);
+
+        log::info!("Linking stereo: {} -> pw-record:input_FL", monitor_fl);
+        let fl_result = std::process::Command::new("pw-link")
+            .args([&monitor_fl, "pw-record:input_FL"])
+            .output();
+        match fl_result {
+            Ok(output) if output.status.success() => {
+                links_created += 1;
+                log::info!("Successfully linked FL channel");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to link FL channel: {}", stderr.trim());
+            }
+            Err(e) => log::warn!("Failed to run pw-link for FL: {}", e),
+        }
+
+        log::info!("Linking stereo: {} -> pw-record:input_FR", monitor_fr);
+        let fr_result = std::process::Command::new("pw-link")
+            .args([&monitor_fr, "pw-record:input_FR"])
+            .output();
+        match fr_result {
+            Ok(output) if output.status.success() => {
+                links_created += 1;
+                log::info!("Successfully linked FR channel");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to link FR channel: {}", stderr.trim());
+            }
+            Err(e) => log::warn!("Failed to run pw-link for FR: {}", e),
+        }
+    } else if has_mono {
+        // Mono device - link MONO to both input channels
+        let monitor_mono = format!("{}:monitor_MONO", actual_device_prefix);
+
+        log::info!("Linking mono: {} -> pw-record:input_FL", monitor_mono);
+        let fl_result = std::process::Command::new("pw-link")
+            .args([&monitor_mono, "pw-record:input_FL"])
+            .output();
+        match fl_result {
+            Ok(output) if output.status.success() => {
+                links_created += 1;
+                log::info!("Successfully linked MONO to FL channel");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to link MONO to FL: {}", stderr.trim());
+            }
+            Err(e) => log::warn!("Failed to run pw-link for MONO->FL: {}", e),
+        }
+
+        log::info!("Linking mono: {} -> pw-record:input_FR", monitor_mono);
+        let fr_result = std::process::Command::new("pw-link")
+            .args([&monitor_mono, "pw-record:input_FR"])
+            .output();
+        match fr_result {
+            Ok(output) if output.status.success() => {
+                links_created += 1;
+                log::info!("Successfully linked MONO to FR channel");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to link MONO to FR: {}", stderr.trim());
+            }
+            Err(e) => log::warn!("Failed to run pw-link for MONO->FR: {}", e),
+        }
+    } else {
+        // No specific ports found - try the old method as fallback
+        log::warn!("No monitor_FL/FR/MONO ports found, trying generic linking");
+
+        let monitor_fl = format!("{}:monitor_FL", monitor_source);
+        let monitor_fr = format!("{}:monitor_FR", monitor_source);
+
+        let fl_result = std::process::Command::new("pw-link")
+            .args([&monitor_fl, "pw-record:input_FL"])
+            .output();
+        if let Ok(output) = fl_result {
+            if output.status.success() {
+                links_created += 1;
+            }
+        }
+
+        let fr_result = std::process::Command::new("pw-link")
+            .args([&monitor_fr, "pw-record:input_FR"])
+            .output();
+        if let Ok(output) = fr_result {
+            if output.status.success() {
+                links_created += 1;
+            }
+        }
+    }
+
+    if links_created == 0 {
+        log::error!("Failed to create any audio links! Recording will have no audio.");
+        return Err("Failed to link monitor ports to pw-record. Check if the audio device has monitor ports.".to_string());
+    }
+
+    log::info!("Created {} audio link(s)", links_created);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn which_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+lazy_static::lazy_static! {
+    static ref SYSTEM_RECORD_PID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+}
+
+/// Stop system audio recording and write accumulated samples to WAV file
+#[tauri::command]
+pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
+            return Err("No recording in progress".to_string());
+        }
+
+        log::info!("Stopping system audio recording...");
+
+        // Signal the reader thread to stop
+        RECORDING_ACTIVE.store(false, Ordering::SeqCst);
+
+        // Kill the pw-record process
+        let pid = SYSTEM_RECORD_PID.load(Ordering::SeqCst);
+        if pid != 0 {
+            log::info!("Terminating pw-record process {}", pid);
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+            // Wait for reader thread to finish
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            SYSTEM_RECORD_PID.store(0, Ordering::SeqCst);
+        }
+
+        // Get recording state
+        let state = {
+            let mut state_guard = RECORDING_STATE.lock().unwrap();
+            state_guard.take()
+        };
+        let state = state.ok_or("Recording state not found")?;
+
+        // Get accumulated samples
+        let samples = {
+            let mut samples_guard = SYSTEM_AUDIO_SAMPLES.lock().unwrap();
+            std::mem::take(&mut *samples_guard)
+        };
+
+        log::info!("Writing {} samples to WAV file: {:?}", samples.len(), state.output_path);
+
+        // Write samples to WAV file
+        let duration = write_system_audio_wav(&state.output_path, &samples, state.sample_rate, state.channels)?;
+
+        log::info!("System audio recording complete: {:?}, {:.2}s", state.output_path, duration);
+
+        // Reset level
+        CURRENT_LEVEL.store(0, Ordering::SeqCst);
+
+        Ok(RecordingResult {
+            path: state.output_path.to_string_lossy().to_string(),
+            duration,
+            sample_rate: state.sample_rate,
+            channels: state.channels,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("System audio recording only supported on Linux".to_string())
+    }
+}
+
+/// Write accumulated samples to a WAV file
+#[cfg(target_os = "linux")]
+fn write_system_audio_wav(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u16) -> Result<f64, String> {
+    let spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    let file = File::create(path)
+        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+    let writer = BufWriter::new(file);
+    let mut wav_writer = WavWriter::new(writer, spec)
+        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+
+    for sample in samples {
+        wav_writer.write_sample(*sample)
+            .map_err(|e| format!("Failed to write sample: {}", e))?;
+    }
+
+    wav_writer.finalize()
+        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+
+    // Calculate duration
+    let duration = samples.len() as f64 / channels as f64 / sample_rate as f64;
+    Ok(duration)
+}
+
+#[cfg(target_os = "linux")]
+fn get_wav_duration(path: &PathBuf) -> Option<f64> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = hound::WavReader::new(file).ok()?;
+    let spec = reader.spec();
+    let samples = reader.len() as f64;
+    Some(samples / spec.channels as f64 / spec.sample_rate as f64)
+}
+
 /// Unmute the default audio input (Linux only)
 #[tauri::command]
 pub fn unmute_input() -> Result<(), String> {
@@ -546,4 +1370,306 @@ pub fn unmute_input() -> Result<(), String> {
     {
         Err("Unmute not implemented for this platform".to_string())
     }
+}
+
+/// System audio capability information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemAudioInfo {
+    pub available: bool,
+    pub method: String,  // "pw-record", "parecord", "cpal-monitor", or "unavailable"
+    pub monitor_source: Option<String>,
+    pub sink_name: Option<String>,
+    pub test_result: Option<String>,  // Result of test recording
+    pub cpal_monitor_device: Option<String>,  // CPAL monitor device if available
+}
+
+/// Probe system audio capabilities - tests all available methods
+#[tauri::command]
+pub fn probe_system_audio() -> Result<SystemAudioInfo, String> {
+    log::info!("Probing system audio capabilities...");
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut info = SystemAudioInfo {
+            available: false,
+            method: "unavailable".to_string(),
+            monitor_source: None,
+            sink_name: None,
+            test_result: None,
+            cpal_monitor_device: None,
+        };
+
+        // First, check if we have a CPAL monitor device (preferred if available)
+        // Wrap in catch_unwind to prevent crashes
+        let cpal_result = std::panic::catch_unwind(|| {
+            find_cpal_monitor_device()
+        });
+
+        if let Ok(Ok(cpal_device)) = cpal_result {
+            log::info!("Found CPAL monitor device: {}", cpal_device);
+            info.cpal_monitor_device = Some(cpal_device.clone());
+
+            // Test if the CPAL monitor works (also with panic protection)
+            let test_result = std::panic::catch_unwind(|| {
+                test_cpal_monitor(&cpal_device)
+            });
+
+            if let Ok(true) = test_result {
+                info.available = true;
+                info.method = "cpal-monitor".to_string();
+                info.test_result = Some("CPAL monitor device working".to_string());
+                log::info!("CPAL monitor device works - using native recording");
+                return Ok(info);
+            } else {
+                log::info!("CPAL monitor test failed or panicked, trying subprocess methods");
+            }
+        } else {
+            log::info!("No CPAL monitor device found or panic occurred");
+        }
+
+        // Try to find the default sink
+        match get_default_monitor_source() {
+            Ok(source) => {
+                info.monitor_source = Some(source.clone());
+                info.sink_name = Some(source.clone());
+                log::info!("Found monitor source: {}", source);
+            }
+            Err(e) => {
+                log::warn!("Failed to find monitor source: {}", e);
+                info.test_result = Some(format!("No monitor source: {}", e));
+                return Ok(info);
+            }
+        }
+
+        // Test pw-record
+        if which_exists("pw-record") {
+            if let Some(ref source) = info.monitor_source {
+                match test_pw_record(source) {
+                    Ok(result) => {
+                        info.available = true;
+                        info.method = "pw-record".to_string();
+                        info.test_result = Some(result);
+                        log::info!("pw-record works with monitor source");
+                        return Ok(info);
+                    }
+                    Err(e) => {
+                        log::warn!("pw-record test failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Test parecord as fallback
+        if which_exists("parecord") {
+            if let Some(ref source) = info.monitor_source {
+                let monitor_name = if source.ends_with(".monitor") {
+                    source.clone()
+                } else {
+                    format!("{}.monitor", source)
+                };
+
+                match test_parecord(&monitor_name) {
+                    Ok(result) => {
+                        info.available = true;
+                        info.method = "parecord".to_string();
+                        info.monitor_source = Some(monitor_name);
+                        info.test_result = Some(result);
+                        log::info!("parecord works with monitor source");
+                        return Ok(info);
+                    }
+                    Err(e) => {
+                        log::warn!("parecord test failed: {}", e);
+                        info.test_result = Some(format!("Both pw-record and parecord failed: {}", e));
+                    }
+                }
+            }
+        }
+
+        if !which_exists("pw-record") && !which_exists("parecord") {
+            info.test_result = Some("No recording tools available (need pw-record or parecord)".to_string());
+        }
+
+        Ok(info)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(SystemAudioInfo {
+            available: false,
+            method: "unavailable".to_string(),
+            monitor_source: None,
+            sink_name: None,
+            test_result: Some("System audio only supported on Linux".to_string()),
+            cpal_monitor_device: None,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn find_cpal_monitor_device() -> Result<String, String> {
+    let host = cpal::default_host();
+
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                let name_lower = name.to_lowercase();
+                if name_lower.contains("monitor") {
+                    // Verify device can be opened
+                    if device.default_input_config().is_ok() {
+                        return Ok(name);
+                    }
+                }
+            }
+        }
+    }
+
+    Err("No CPAL monitor device found".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn test_cpal_monitor(device_name: &str) -> bool {
+    use std::time::Duration;
+    use std::result::Result as StdResult;
+
+    let host = cpal::default_host();
+
+    let device = host.input_devices()
+        .ok()
+        .and_then(|mut devices| devices.find(|d| d.name().ok().as_ref() == Some(&device_name.to_string())));
+
+    let device = match device {
+        Some(d) => d,
+        None => return false,
+    };
+
+    let supported_config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let sample_format = supported_config.sample_format();
+    let config: cpal::StreamConfig = supported_config.into();
+
+    let got_callback = Arc::new(AtomicBool::new(false));
+    let got_callback_clone = got_callback.clone();
+
+    // Build stream with correct sample format
+    let stream_result: StdResult<cpal::Stream, _> = match sample_format {
+        SampleFormat::F32 => {
+            let cb = got_callback_clone.clone();
+            device.build_input_stream(
+                &config,
+                move |_data: &[f32], _: &cpal::InputCallbackInfo| {
+                    cb.store(true, Ordering::SeqCst);
+                },
+                |err| { log::warn!("Monitor test stream error: {}", err); },
+                None,
+            )
+        }
+        SampleFormat::I16 => {
+            let cb = got_callback_clone.clone();
+            device.build_input_stream(
+                &config,
+                move |_data: &[i16], _: &cpal::InputCallbackInfo| {
+                    cb.store(true, Ordering::SeqCst);
+                },
+                |err| { log::warn!("Monitor test stream error: {}", err); },
+                None,
+            )
+        }
+        SampleFormat::I32 => {
+            let cb = got_callback_clone.clone();
+            device.build_input_stream(
+                &config,
+                move |_data: &[i32], _: &cpal::InputCallbackInfo| {
+                    cb.store(true, Ordering::SeqCst);
+                },
+                |err| { log::warn!("Monitor test stream error: {}", err); },
+                None,
+            )
+        }
+        _ => {
+            log::warn!("Unsupported sample format for monitor test: {:?}", sample_format);
+            return false;
+        }
+    };
+
+    let stream = match stream_result {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("Failed to build monitor test stream: {}", e);
+            return false;
+        }
+    };
+
+    if stream.play().is_err() {
+        return false;
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    drop(stream);
+
+    got_callback.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+fn test_pw_record(sink_name: &str) -> Result<String, String> {
+    let temp_file = std::env::temp_dir().join("clip_dr_sys_test.wav");
+
+    // Record for 0.5 seconds
+    let _output = std::process::Command::new("timeout")
+        .args(["0.5", "pw-record", "--target", sink_name,
+               "--format", "f32", "--rate", "44100", "--channels", "2",
+               temp_file.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("Failed to run pw-record: {}", e))?;
+
+    // Check if file was created
+    if temp_file.exists() {
+        let metadata = std::fs::metadata(&temp_file)
+            .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+        let size = metadata.len();
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_file);
+
+        if size > 1000 {  // File has some content
+            return Ok(format!("Test recorded {} bytes", size));
+        } else {
+            return Err("Test file too small".to_string());
+        }
+    }
+
+    Err("Test file not created".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn test_parecord(monitor_source: &str) -> Result<String, String> {
+    let temp_file = std::env::temp_dir().join("clip_dr_sys_test_pa.wav");
+
+    // Record for 0.5 seconds
+    let _output = std::process::Command::new("timeout")
+        .args(["0.5", "parecord", "-d", monitor_source,
+               "--file-format=wav", "--rate=44100", "--channels=2",
+               temp_file.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("Failed to run parecord: {}", e))?;
+
+    // Check if file was created
+    if temp_file.exists() {
+        let metadata = std::fs::metadata(&temp_file)
+            .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+        let size = metadata.len();
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_file);
+
+        if size > 1000 {
+            return Ok(format!("Test recorded {} bytes", size));
+        } else {
+            return Err("Test file too small".to_string());
+        }
+    }
+
+    Err("Test file not created".to_string())
 }

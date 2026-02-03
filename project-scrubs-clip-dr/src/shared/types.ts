@@ -268,3 +268,17 @@ export interface SilenceRegion {
   end: number;        // End time in seconds (original timeline)
   enabled: boolean;   // If false, this region is "restored" (not cut)
 }
+
+/** Partial transcription result from streaming transcription */
+export interface PartialTranscription {
+  words: Word[];
+  chunkIndex: number;
+  isFinal: boolean;
+}
+
+/** Live transcription state during recording */
+export interface LiveTranscriptionState {
+  words: Word[];
+  isActive: boolean;
+  lastChunkIndex: number;
+}

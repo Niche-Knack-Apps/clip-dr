@@ -80,8 +80,9 @@ onUnmounted(() => {
 });
 
 // Watch for props changes and waveform data changes (when selected track switches)
-// Use waveformDataHash to detect actual content changes, not just reference changes
-watch([() => props.startTime, () => props.endTime, () => props.color, waveformDataHash, duration], render, { immediate: true });
+// Use waveformDataHash AND waveformDataLength to detect actual content changes
+// Both are needed: length for new data arrival, hash for content changes
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformDataHash, waveformDataLength, duration], render, { immediate: true });
 </script>
 
 <template>

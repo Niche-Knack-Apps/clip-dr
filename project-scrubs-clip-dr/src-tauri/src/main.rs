@@ -3,7 +3,7 @@
 mod commands;
 mod audio_clean;
 
-use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording};
+use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, streaming_transcribe};
 use std::panic;
 
 fn main() {
@@ -57,6 +57,17 @@ fn main() {
             recording::is_monitoring,
             recording::check_input_muted,
             recording::unmute_input,
+            recording::reset_recording_state,
+            recording::test_audio_device,
+            recording::start_system_audio_recording,
+            recording::stop_system_audio_recording,
+            recording::probe_system_audio,
+            streaming_transcribe::start_recording_with_transcription,
+            streaming_transcribe::stop_recording_with_transcription,
+            streaming_transcribe::get_bundled_model_info,
+            streaming_transcribe::check_live_transcription_available,
+            streaming_transcribe::start_transcription_worker,
+            streaming_transcribe::stop_transcription_worker,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
