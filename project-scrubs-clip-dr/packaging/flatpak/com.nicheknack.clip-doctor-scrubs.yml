@@ -1,0 +1,74 @@
+app-id: com.nicheknack.clip-doctor-scrubs
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node22
+
+command: clip-doctor-scrubs
+
+finish-args:
+  # Display access
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+
+  # Audio access (PulseAudio/PipeWire)
+  - --socket=pulseaudio
+
+  # File access for opening/saving audio files
+  - --filesystem=home
+  - --filesystem=xdg-documents
+  - --filesystem=xdg-music
+  - --filesystem=xdg-download
+
+  # GPU acceleration
+  - --device=dri
+
+  # Network access (for downloading whisper models on first run)
+  - --share=network
+
+  # Intel GPU workaround - fixes EGL initialization on Alder Lake+ iGPUs
+  - --env=WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+  env:
+    CARGO_HOME: /run/build/clip-doctor-scrubs/cargo
+    npm_config_nodedir: /usr/lib/sdk/node22
+
+modules:
+  - name: clip-doctor-scrubs
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/clip-doctor-scrubs/cargo
+        HOME: /run/build/clip-doctor-scrubs
+    build-commands:
+      # Install npm dependencies (use install instead of ci for sandbox compatibility)
+      - HOME=/run/build/clip-doctor-scrubs npm install --legacy-peer-deps
+
+      # Build frontend
+      - HOME=/run/build/clip-doctor-scrubs npm run build
+
+      # Build Rust backend
+      - cd src-tauri && cargo build --release
+
+      # Install binary
+      - install -Dm755 src-tauri/target/release/clip-doctor-scrubs /app/bin/clip-doctor-scrubs
+
+      # Install icons
+      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.nicheknack.clip-doctor-scrubs.png
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.nicheknack.clip-doctor-scrubs.png
+      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.nicheknack.clip-doctor-scrubs.png
+
+      # Install desktop file
+      - install -Dm644 packaging/flatpak/com.nicheknack.clip-doctor-scrubs.desktop /app/share/applications/com.nicheknack.clip-doctor-scrubs.desktop
+
+      # Install metainfo
+      - install -Dm644 packaging/flatpak/com.nicheknack.clip-doctor-scrubs.metainfo.xml /app/share/metainfo/com.nicheknack.clip-doctor-scrubs.metainfo.xml
+
+    sources:
+      - type: dir
+        path: ../..

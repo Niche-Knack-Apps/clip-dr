@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Project Scrubs: The Clip Dr.
+GenericName=Audio Editor
+Comment=Audio cleaning and clip-making application with CPU-only speech recognition
+Exec=clip-doctor-scrubs %F
+Icon=com.nicheknack.clip-doctor-scrubs
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;AudioVideoEditing;
+MimeType=audio/mpeg;audio/x-wav;audio/x-flac;audio/ogg;audio/aac;audio/mp4;
+Keywords=audio;clip;clean;transcribe;whisper;speech;recognition;
+StartupNotify=true
+StartupWMClass=clip-doctor-scrubs

@@ -1,0 +1,14 @@
+[Application]
+name=com.nicheknack.clip-doctor-scrubs
+runtime=org.gnome.Platform/x86_64/48
+sdk=org.gnome.Sdk/x86_64/48
+command=clip-doctor-scrubs
+
+[Context]
+shared=network;ipc;
+sockets=x11;wayland;pulseaudio;fallback-x11;
+devices=dri;
+filesystems=home;xdg-documents;xdg-music;xdg-download;
+
+[Environment]
+WEBKIT_DISABLE_DMABUF_RENDERER=1

@@ -1,0 +1,80 @@
+<script setup lang="ts">
+import { computed } from 'vue';
+import type { Track, TrackClip } from '@/shared/types';
+
+interface Props {
+  track: Track;
+  clip?: TrackClip;
+  containerWidth: number;
+  duration: number;
+  isDragging?: boolean;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  isDragging: false,
+});
+
+const emit = defineEmits<{
+  dragStart: [event: MouseEvent];
+}>();
+
+// Use clip position if provided, otherwise fall back to track position
+const clipStart = computed(() => props.clip?.clipStart ?? props.track.trackStart);
+const clipDuration = computed(() => props.clip?.duration ?? props.track.duration);
+
+// Calculate pixel position and width
+const left = computed(() => {
+  if (props.duration <= 0) return 0;
+  return (clipStart.value / props.duration) * props.containerWidth;
+});
+
+const width = computed(() => {
+  if (props.duration <= 0) return 0;
+  return (clipDuration.value / props.duration) * props.containerWidth;
+});
+
+// Use track's color with opacity
+const bgColor = computed(() => {
+  if (props.track.muted) return 'rgba(75, 85, 99, 0.5)'; // gray-600/50
+  return `${props.track.color}30`; // 30 = ~19% opacity
+});
+
+const borderColor = computed(() => {
+  if (props.track.muted) return 'rgb(75, 85, 99)'; // gray-600
+  return props.track.color;
+});
+
+function handleMouseDown(event: MouseEvent) {
+  // Prevent default to avoid text selection during drag
+  event.preventDefault();
+  emit('dragStart', event);
+}
+</script>
+
+<template>
+  <div
+    class="absolute top-1 bottom-1 rounded cursor-grab active:cursor-grabbing select-none"
+    :class="[
+      track.solo ? 'ring-2 ring-yellow-500' : '',
+      isDragging ? 'opacity-70 ring-2 ring-cyan-400' : '',
+    ]"
+    :style="{
+      left: `${left}px`,
+      width: `${Math.max(2, width)}px`,
+      backgroundColor: bgColor,
+    }"
+    @mousedown="handleMouseDown"
+  >
+    <div
+      class="absolute inset-0 border rounded pointer-events-none"
+      :style="{ borderColor: borderColor }"
+    />
+    <!-- Drag indicator when dragging -->
+    <div
+      v-if="isDragging"
+      class="absolute inset-0 flex items-center justify-center text-[10px] text-cyan-400 font-medium"
+    >
+      {{ clipStart.toFixed(2) }}s
+    </div>
+  </div>
+</template>
