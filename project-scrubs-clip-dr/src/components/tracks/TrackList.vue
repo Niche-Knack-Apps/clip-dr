@@ -6,11 +6,13 @@ import { useClipping } from '@/composables/useClipping';
 import { useAudioStore } from '@/stores/audio';
 import { useUIStore } from '@/stores/ui';
 import { useTracksStore } from '@/stores/tracks';
+import { useTranscriptionStore } from '@/stores/transcription';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
 
 const audioStore = useAudioStore();
 const uiStore = useUIStore();
 const tracksStore = useTracksStore();
+const transcriptionStore = useTranscriptionStore();
 
 const {
   tracks,
@@ -218,6 +220,14 @@ function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number
   if (clipDragTargetTrackId.value && clipDragTargetTrackId.value !== trackId) {
     const ctx = audioStore.getAudioContext();
     tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
+  }
+
+  // Re-run transcription since audio positions have changed
+  if (transcriptionStore.hasTranscription) {
+    console.log('[TrackList] Clip moved, re-running transcription...');
+    transcriptionStore.reTranscribe().catch((e) => {
+      console.error('[TrackList] Failed to re-transcribe after clip move:', e);
+    });
   }
 
   // Reset state
