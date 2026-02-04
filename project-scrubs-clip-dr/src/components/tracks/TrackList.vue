@@ -271,7 +271,7 @@ function handleClipDragLeaveTrack() {
 </script>
 
 <template>
-  <div class="bg-waveform-bg rounded-lg overflow-hidden relative">
+  <div class="bg-waveform-bg rounded-lg overflow-hidden relative h-full flex flex-col">
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-700">
       <div class="flex items-center gap-2">
         <span class="text-xs text-gray-400">Tracks</span>
@@ -315,7 +315,7 @@ function handleClipDragLeaveTrack() {
     <div
       ref="scrollContainerRef"
       data-track-scroll
-      class="max-h-48 overflow-y-auto overflow-x-auto"
+      class="flex-1 min-h-0 overflow-y-auto overflow-x-auto"
       @wheel="handleWheel"
     >
       <div

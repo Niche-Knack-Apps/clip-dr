@@ -62,11 +62,14 @@ watch(
   }
 );
 
-// Clamp selection and re-zoom when timeline shrinks (after cut/delete)
+// Clamp selection and re-zoom only when timeline SHRINKS (after cut/delete)
 watch(
   () => tracksStore.timelineDuration,
-  (newDuration) => {
+  (newDuration, oldDuration) => {
     if (newDuration <= 0) return;
+    // Only act when duration decreased — ignore growth (e.g. during recording)
+    if (newDuration >= (oldDuration ?? 0)) return;
+
     const sel = selectionStore.selection;
     if (sel.end > newDuration || sel.start >= newDuration) {
       selectionStore.selection = {
