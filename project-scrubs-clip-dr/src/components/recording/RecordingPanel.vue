@@ -89,18 +89,7 @@ async function handleUnmute() {
   }
 }
 
-async function handleTestDevice() {
-  const result = await recordingStore.testDevice();
-  if (result) {
-    const workingCount = result.working_configs.length;
-    const hasSignal = result.working_configs.some(c => c.has_signal);
-    alert(`Device: ${result.device_name}\nWorking configs: ${workingCount}\nHas signal: ${hasSignal ? 'YES' : 'NO'}\n\nConfigs:\n${result.working_configs.map(c => `  ${c.channels}ch ${c.sample_format} @ ${c.sample_rate}Hz ${c.has_signal ? '(signal)' : ''}`).join('\n')}\n\nErrors:\n${result.errors.join('\n') || 'None'}`);
-  }
-}
 
-async function handleResetState() {
-  await recordingStore.resetRecordingState();
-}
 </script>
 
 <template>
@@ -160,26 +149,12 @@ async function handleResetState() {
         </option>
       </select>
       <div class="flex justify-between items-center mt-2">
-        <div class="flex gap-2">
-          <button
-            class="text-xs text-gray-500 hover:text-gray-300"
-            @click="recordingStore.refreshDevices()"
-          >
-            Refresh
-          </button>
-          <button
-            class="text-xs text-cyan-500 hover:text-cyan-300"
-            @click="handleTestDevice"
-          >
-            Test Device
-          </button>
-          <button
-            class="text-xs text-yellow-500 hover:text-yellow-300"
-            @click="handleResetState"
-          >
-            Reset
-          </button>
-        </div>
+        <button
+          class="text-xs text-gray-500 hover:text-gray-300"
+          @click="recordingStore.refreshDevices()"
+        >
+          Refresh
+        </button>
         <span v-if="recordingStore.isMonitoring" class="text-xs text-green-500">
           Monitoring active
         </span>
@@ -200,14 +175,6 @@ async function handleResetState() {
       <p class="mt-1 text-[10px] text-gray-500">
         Captures all system audio playing through your speakers/headphones.
       </p>
-      <div class="flex gap-2 mt-2">
-        <button
-          class="text-xs text-yellow-500 hover:text-yellow-300"
-          @click="handleResetState"
-        >
-          Reset
-        </button>
-      </div>
     </div>
 
     <!-- Pre-recording level meter (show when NOT recording but monitoring) -->

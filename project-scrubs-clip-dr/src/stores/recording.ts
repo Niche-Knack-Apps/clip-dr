@@ -25,19 +25,6 @@ export interface RecordingResult {
   channels: number;
 }
 
-export interface ConfigInfo {
-  channels: number;
-  sample_rate: number;
-  sample_format: string;
-  has_signal: boolean;
-}
-
-export interface DeviceTestResult {
-  device_name: string;
-  working_configs: ConfigInfo[];
-  errors: string[];
-}
-
 export type RecordingSource = 'microphone' | 'system';
 
 export interface SystemAudioInfo {
@@ -552,37 +539,6 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
-  // Force reset recording state (for recovery from stuck state)
-  async function resetRecordingState(): Promise<void> {
-    try {
-      await invoke('reset_recording_state');
-      isRecording.value = false;
-      isPreparing.value = false;
-      currentLevel.value = 0;
-      recordingDuration.value = 0;
-      recordingPath.value = null;
-      error.value = null;
-      console.log('[Recording] State reset');
-    } catch (e) {
-      console.error('[Recording] Failed to reset state:', e);
-    }
-  }
-
-  // Test a device to see which configs actually work
-  async function testDevice(deviceId?: string): Promise<DeviceTestResult | null> {
-    try {
-      const result = await invoke<DeviceTestResult>('test_audio_device', {
-        deviceId: deviceId || selectedDeviceId.value,
-      });
-      console.log('[Recording] Device test result:', result);
-      return result;
-    } catch (e) {
-      console.error('[Recording] Device test failed:', e);
-      error.value = e instanceof Error ? e.message : String(e);
-      return null;
-    }
-  }
-
   // Unmute the input (Linux only)
   async function unmute(): Promise<boolean> {
     try {
@@ -710,7 +666,5 @@ export const useRecordingStore = defineStore('recording', () => {
     stopMonitoring,
     checkMuted,
     unmute,
-    resetRecordingState,
-    testDevice,
   };
 });
