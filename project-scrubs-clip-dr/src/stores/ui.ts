@@ -20,8 +20,8 @@ export const useUIStore = defineStore('ui', () => {
   const waveformHeight = ref(WAVEFORM_HEIGHT);
   const zoomedHeight = ref(ZOOMED_HEIGHT);
 
-  // Follow playhead in zoomed view
-  const followPlayhead = ref(false);
+  // Follow playhead in zoomed view (on by default)
+  const followPlayhead = ref(true);
 
   // Snap clips to edges (prevents overlap)
   const snapEnabled = ref(true);
