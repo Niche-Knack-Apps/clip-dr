@@ -42,32 +42,21 @@ watch(
   }
 );
 
-// Auto-zoom to show all tracks when a new track is added
+// Set selection to full timeline when a new track is added
 watch(
   () => tracksStore.tracks.length,
   (newLen, oldLen) => {
     if (newLen > (oldLen ?? 0) && tracksStore.timelineDuration > 0) {
-      // Directly set selection to full timeline, bypassing setSelection()
-      // which clamps to the selected track's duration (the new track is auto-selected
-      // so getEffectiveDuration() would return just that track, not the full timeline)
       selectionStore.selection = { start: 0, end: tracksStore.timelineDuration };
-
-      // Also zoom track list to fit all content
-      const container = document.querySelector('[data-track-scroll]');
-      if (container) {
-        const containerWidth = container.clientWidth - uiStore.trackPanelWidth;
-        uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerWidth);
-      }
     }
   }
 );
 
-// Clamp selection and re-zoom only when timeline SHRINKS (after cut/delete)
+// Clamp selection when timeline shrinks (after cut/delete)
 watch(
   () => tracksStore.timelineDuration,
   (newDuration, oldDuration) => {
     if (newDuration <= 0) return;
-    // Only act when duration decreased — ignore growth (e.g. during recording)
     if (newDuration >= (oldDuration ?? 0)) return;
 
     const sel = selectionStore.selection;
@@ -76,12 +65,6 @@ watch(
         start: Math.min(sel.start, Math.max(0, newDuration - (sel.end - sel.start))),
         end: Math.min(sel.end, newDuration),
       };
-    }
-    // Re-zoom track list to fit updated content
-    const container = document.querySelector('[data-track-scroll]');
-    if (container) {
-      const containerWidth = container.clientWidth - uiStore.trackPanelWidth;
-      uiStore.zoomTrackToFit(newDuration, containerWidth);
     }
   }
 );
