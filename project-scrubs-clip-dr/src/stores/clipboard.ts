@@ -30,9 +30,20 @@ export const useClipboardStore = defineStore('clipboard', () => {
   const hasClipboard = computed(() => clipboard.value !== null);
   const clipboardDuration = computed(() => clipboard.value?.duration ?? 0);
 
+  // Get the target track for operations: selected track, or first track when in ALL view
+  function getTargetTrack(): ReturnType<typeof tracksStore.selectedTrack> {
+    const selected = tracksStore.selectedTrack;
+    if (selected) return selected;
+    // In ALL view, fall back to first track
+    if (tracksStore.selectedTrackId === 'ALL' && tracksStore.tracks.length > 0) {
+      return tracksStore.tracks[0];
+    }
+    return null;
+  }
+
   // Get the region to copy based on settings and I/O points
   function getCopyRegion(): { start: number; end: number; trackId: string; buffer: AudioBuffer } | null {
-    const selectedTrack = tracksStore.selectedTrack;
+    const selectedTrack = getTargetTrack();
     if (!selectedTrack) return null;
 
     const buffer = selectedTrack.audioData.buffer;
@@ -130,7 +141,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
   // Cut the selected region (copy + delete + slide tracks left to fill gap)
   function cut(): boolean {
-    const selectedTrack = tracksStore.selectedTrack;
+    const selectedTrack = getTargetTrack();
     if (!selectedTrack) return false;
 
     // Check if we're cutting a region (I/O points) or whole track
@@ -206,8 +217,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
       clonedBuffer.getChannelData(ch).set(sourceBuffer.getChannelData(ch));
     }
 
-    // Check if a specific track is selected (not 'ALL' view)
-    const selectedTrack = tracksStore.selectedTrack;
+    // Check if a specific track is selected (or first track in ALL view)
+    const selectedTrack = getTargetTrack();
 
     if (selectedTrack) {
       // Append to selected track
@@ -246,7 +257,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
   // Delete in-place: no track → nothing; track + I/O → split and remove segment; track alone → delete track
   function deleteSelected(): boolean {
-    const selectedTrack = tracksStore.selectedTrack;
+    const selectedTrack = getTargetTrack();
     if (!selectedTrack) return false; // No track selected → do nothing
 
     const { inPoint, outPoint } = selectionStore.inOutPoints;
