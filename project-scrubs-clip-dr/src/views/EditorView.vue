@@ -52,6 +52,24 @@ watch(
   }
 );
 
+// When a specific track is selected, move the selection window to show its audio
+watch(
+  () => tracksStore.selectedTrackId,
+  (newId) => {
+    if (!newId || newId === 'ALL') return;
+    const track = tracksStore.tracks.find(t => t.id === newId);
+    if (!track) return;
+
+    const trackStart = track.trackStart;
+    const trackEnd = trackStart + track.duration;
+
+    // Move selection to encompass this track's audio
+    selectionStore.setSelection(trackStart, trackEnd);
+
+    console.log(`[EditorView] Track selected: "${track.name}", moving selection to ${trackStart.toFixed(2)}-${trackEnd.toFixed(2)}s`);
+  }
+);
+
 // Clamp selection when timeline shrinks (after cut/delete)
 watch(
   () => tracksStore.timelineDuration,

@@ -21,7 +21,7 @@ const props = withDefaults(defineProps<Props>(), {
   height: ZOOMED_HEIGHT,
 });
 
-const { effectiveDuration, effectiveTrackStart } = useEffectiveAudio();
+const { effectiveDuration } = useEffectiveAudio();
 const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const settingsStore = useSettingsStore();
@@ -49,21 +49,8 @@ const ZOOM_FACTOR = 0.15; // 15% zoom per scroll step
 const selection = computed(() => selectionStore.selection);
 const currentTime = computed(() => playbackStore.currentTime);
 
-// In/out points are stored in timeline coordinates
-// Convert to track-relative for display in the zoomed waveform
-const trackOffset = computed(() => effectiveTrackStart.value);
-const inPoint = computed(() => {
-  const point = selectionStore.inOutPoints.inPoint;
-  if (point === null) return null;
-  // Convert from timeline to track-relative
-  return point - trackOffset.value;
-});
-const outPoint = computed(() => {
-  const point = selectionStore.inOutPoints.outPoint;
-  if (point === null) return null;
-  // Convert from timeline to track-relative
-  return point - trackOffset.value;
-});
+const inPoint = computed(() => selectionStore.inOutPoints.inPoint);
+const outPoint = computed(() => selectionStore.inOutPoints.outPoint);
 
 const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
@@ -145,11 +132,6 @@ function getClickTarget(clientX: number): DragMode {
   return 'select';
 }
 
-// Convert track-relative time to timeline time for in/out points
-function toTimelineTime(trackRelativeTime: number): number {
-  return trackRelativeTime + trackOffset.value;
-}
-
 function handleMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
 
@@ -165,9 +147,9 @@ function handleMouseDown(event: MouseEvent) {
     // Dragging a marker - update it immediately
     hasDragged.value = true; // Marker drags count as drags
     if (target === 'in') {
-      selectionStore.setInPoint(toTimelineTime(time));
+      selectionStore.setInPoint(time);
     } else {
-      selectionStore.setOutPoint(toTimelineTime(time));
+      selectionStore.setOutPoint(time);
     }
   }
   // For 'select' mode, we wait to see if user actually drags before setting in/out
@@ -187,7 +169,7 @@ function handleMouseMove(event: MouseEvent) {
     hasDragged.value = true;
     // Starting a selection drag - set initial in point
     if (dragMode.value === 'select') {
-      selectionStore.setInPoint(toTimelineTime(dragStartTime.value));
+      selectionStore.setInPoint(dragStartTime.value);
     }
   }
 
@@ -196,25 +178,25 @@ function handleMouseMove(event: MouseEvent) {
   if (dragMode.value === 'in') {
     // Dragging in point - ensure it stays before out point
     if (outPoint.value !== null && time >= outPoint.value) {
-      selectionStore.setInPoint(toTimelineTime(outPoint.value - 0.001));
+      selectionStore.setInPoint(outPoint.value - 0.001);
     } else {
-      selectionStore.setInPoint(toTimelineTime(time));
+      selectionStore.setInPoint(time);
     }
   } else if (dragMode.value === 'out') {
     // Dragging out point - ensure it stays after in point
     if (inPoint.value !== null && time <= inPoint.value) {
-      selectionStore.setOutPoint(toTimelineTime(inPoint.value + 0.001));
+      selectionStore.setOutPoint(inPoint.value + 0.001);
     } else {
-      selectionStore.setOutPoint(toTimelineTime(time));
+      selectionStore.setOutPoint(time);
     }
   } else if (dragMode.value === 'select') {
     // Selecting a range - set out point (swap if needed)
     if (time < dragStartTime.value) {
-      selectionStore.setInPoint(toTimelineTime(time));
-      selectionStore.setOutPoint(toTimelineTime(dragStartTime.value));
+      selectionStore.setInPoint(time);
+      selectionStore.setOutPoint(dragStartTime.value);
     } else {
-      selectionStore.setInPoint(toTimelineTime(dragStartTime.value));
-      selectionStore.setOutPoint(toTimelineTime(time));
+      selectionStore.setInPoint(dragStartTime.value);
+      selectionStore.setOutPoint(time);
     }
   }
 }

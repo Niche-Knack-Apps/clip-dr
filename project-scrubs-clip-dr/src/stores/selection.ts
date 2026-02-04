@@ -6,40 +6,11 @@ import { DEFAULT_SELECTION_DURATION, MIN_SELECTION_DURATION } from '@/shared/con
 import { clamp } from '@/shared/utils';
 
 export const useSelectionStore = defineStore('selection', () => {
-  // Helper to get effective duration based on current selection/view mode
-  // Returns track-relative duration (0 to duration) for zoom/selection window
+  // Always return full timeline duration so the selection window's
+  // coordinate space matches the composite waveform
   function getEffectiveDuration(): number {
     const tracksStore = useTracksStore();
-
-    // If a specific track is selected, use its duration
-    const selectedTrack = tracksStore.selectedTrack;
-    if (selectedTrack) {
-      return selectedTrack.duration;
-    }
-
-    // Otherwise use the full timeline duration
     return tracksStore.timelineDuration;
-  }
-
-  // Helper to get timeline range for in/out points
-  // Returns [minTime, maxTime] in timeline coordinates
-  function getTimelineRange(): { min: number; max: number } {
-    const tracksStore = useTracksStore();
-
-    // If a specific track is selected, use its timeline range
-    const selectedTrack = tracksStore.selectedTrack;
-    if (selectedTrack) {
-      return {
-        min: selectedTrack.trackStart,
-        max: selectedTrack.trackStart + selectedTrack.duration,
-      };
-    }
-
-    // Otherwise use the full timeline [0, duration]
-    return {
-      min: 0,
-      max: tracksStore.timelineDuration,
-    };
   }
 
   const selection = ref<Selection>({
@@ -141,19 +112,23 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function setInPoint(time: number): void {
-    const range = getTimelineRange();
-    inOutPoints.value.inPoint = clamp(time, range.min, range.max);
+    // Always clamp to full timeline range (not selected track) so I/O points
+    // work correctly regardless of which track is selected
+    const tracksStore = useTracksStore();
+    inOutPoints.value.inPoint = clamp(time, 0, tracksStore.timelineDuration);
     if (inOutPoints.value.outPoint !== null && inOutPoints.value.outPoint < time) {
       inOutPoints.value.outPoint = null;
     }
+    console.log(`[Selection] In point set: ${inOutPoints.value.inPoint?.toFixed(3)}s`);
   }
 
   function setOutPoint(time: number): void {
-    const range = getTimelineRange();
-    inOutPoints.value.outPoint = clamp(time, range.min, range.max);
+    const tracksStore = useTracksStore();
+    inOutPoints.value.outPoint = clamp(time, 0, tracksStore.timelineDuration);
     if (inOutPoints.value.inPoint !== null && inOutPoints.value.inPoint > time) {
       inOutPoints.value.inPoint = null;
     }
+    console.log(`[Selection] Out point set: ${inOutPoints.value.outPoint?.toFixed(3)}s (in: ${inOutPoints.value.inPoint?.toFixed(3) ?? 'none'})`);
   }
 
   function clearInPoint(): void {
