@@ -35,7 +35,7 @@ lazy_static::lazy_static! {
     static ref RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ref MONITORING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ref SYSTEM_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static ref SYSTEM_MONITOR_PID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static ref SYSTEM_MONITOR_CHILD: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
     static ref CURRENT_LEVEL: AtomicU32 = AtomicU32::new(0);
     static ref DEBUG_CALLBACK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static ref RECORDING_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -643,23 +643,58 @@ pub fn is_monitoring() -> bool {
     MONITORING_ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Start system audio monitoring (level meter only, no recording)
-/// Uses pw-record to capture system audio and update CURRENT_LEVEL
-#[tauri::command]
-pub async fn start_system_audio_monitoring() -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        // Stop any existing monitoring first
-        stop_system_audio_monitoring_internal();
-        stop_monitoring_internal();
+/// Kill any stale pw-record or parec processes from previous runs
+#[cfg(target_os = "linux")]
+fn kill_all_stale_processes() {
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "pw-record --target"])
+        .status();
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "parec -d"])
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
 
-        let monitor_source = get_default_monitor_source()?;
-        log::info!("Starting system audio monitoring with monitor source: {}", monitor_source);
+/// Internal implementation for starting system audio monitoring.
+/// Uses parec (preferred) or pw-record as fallback to capture system audio.
+/// The reader thread handles both level metering (always) and sample
+/// accumulation (when RECORDING_ACTIVE is true), so a single process
+/// serves both monitoring and recording.
+#[cfg(target_os = "linux")]
+fn start_system_audio_monitoring_impl() -> Result<(), String> {
+    // Stop any existing monitoring first
+    stop_system_audio_monitoring_internal();
+    kill_all_stale_processes();
 
-        // Start pw-record streaming to stdout (level metering only)
-        let mut child = std::process::Command::new("pw-record")
+    let monitor_source = get_default_monitor_source()?;
+    log::info!("Starting system audio monitoring with monitor source: {}", monitor_source);
+
+    // Append .monitor for PulseAudio API if not already present
+    let pa_monitor = if monitor_source.ends_with(".monitor") {
+        monitor_source.clone()
+    } else {
+        format!("{}.monitor", monitor_source)
+    };
+
+    // Try parec first (most reliable), fall back to pw-record
+    let child_result = if which_exists("parec") {
+        log::info!("Using parec with monitor source: {}", pa_monitor);
+        std::process::Command::new("parec")
             .args([
-                "--target", "0",
+                "-d", &pa_monitor,
+                "--format=float32le",
+                "--rate=44100",
+                "--channels=2",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    } else if which_exists("pw-record") {
+        log::info!("Using pw-record with stream.capture.sink for: {}", monitor_source);
+        std::process::Command::new("pw-record")
+            .args([
+                "-P", "{ stream.capture.sink = true }",
+                "--target", &monitor_source,
                 "--format", "f32",
                 "--rate", "44100",
                 "--channels", "2",
@@ -668,29 +703,35 @@ pub async fn start_system_audio_monitoring() -> Result<(), String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to start pw-record for monitoring: {}", e))?;
+    } else {
+        return Err("No audio capture tool available (need parec or pw-record)".to_string());
+    };
 
-        let child_id = child.id();
-        let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut child = child_result.map_err(|e| format!("Failed to start audio capture: {}", e))?;
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
 
-        SYSTEM_MONITOR_PID.store(child_id as usize, Ordering::SeqCst);
-        SYSTEM_MONITOR_ACTIVE.store(true, Ordering::SeqCst);
-        CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    // Store the Child properly for cleanup (not mem::forget)
+    *SYSTEM_MONITOR_CHILD.lock().unwrap() = Some(child);
+    SYSTEM_MONITOR_ACTIVE.store(true, Ordering::SeqCst);
+    CURRENT_LEVEL.store(0, Ordering::SeqCst);
 
-        // Keep child process alive
-        std::mem::forget(child);
+    // Spawn reader thread: updates level meter always, accumulates samples when recording
+    std::thread::spawn(move || {
+        system_audio_monitor_reader(stdout);
+    });
 
-        // Give pw-record time to create its ports then link
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        link_monitor_to_pw_record(&monitor_source)?;
+    log::info!("System audio monitoring started");
+    Ok(())
+}
 
-        // Spawn thread to read audio and update level only (no accumulation)
-        std::thread::spawn(move || {
-            system_audio_monitor_reader(stdout);
-        });
-
-        log::info!("System audio monitoring started");
-        Ok(())
+/// Start system audio monitoring (level meter only, no recording)
+/// Uses parec or pw-record to capture system audio and update CURRENT_LEVEL
+#[tauri::command]
+pub async fn start_system_audio_monitoring() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        stop_monitoring_internal();
+        start_system_audio_monitoring_impl()
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -709,46 +750,68 @@ pub fn stop_system_audio_monitoring() {
 fn stop_system_audio_monitoring_internal() {
     SYSTEM_MONITOR_ACTIVE.store(false, Ordering::SeqCst);
 
-    let pid = SYSTEM_MONITOR_PID.load(Ordering::SeqCst);
-    if pid != 0 {
-        log::info!("Terminating monitor pw-record process {}", pid);
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        SYSTEM_MONITOR_PID.store(0, Ordering::SeqCst);
+    if let Ok(mut guard) = SYSTEM_MONITOR_CHILD.lock() {
+        if let Some(ref mut child) = *guard {
+            log::info!("Killing system audio capture process (pid {})", child.id());
+            let _ = child.kill();     // Send SIGKILL
+            let _ = child.wait();     // Reap zombie
+        }
+        *guard = None;
     }
 
     CURRENT_LEVEL.store(0, Ordering::SeqCst);
 }
 
-/// Lightweight stream reader for system audio monitoring (level only, no sample accumulation)
+/// Unified stream reader for system audio: handles both monitoring and recording.
+/// Always updates the level meter. When RECORDING_ACTIVE is true, also accumulates
+/// samples for the WAV file and feeds the transcription buffer.
 #[cfg(target_os = "linux")]
 fn system_audio_monitor_reader(stdout: ChildStdout) {
-    let mut reader = BufReader::with_capacity(4096, stdout);
-    let mut buffer = [0u8; 4096];
+    let mut reader = BufReader::with_capacity(8192, stdout);
+    let mut buffer = [0u8; 8192];
 
     while SYSTEM_MONITOR_ACTIVE.load(Ordering::SeqCst) {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                let max_level = buffer[..n]
+                let samples: Vec<f32> = buffer[..n]
                     .chunks(4)
                     .filter_map(|chunk| {
                         if chunk.len() == 4 {
-                            Some(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs())
+                            Some(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                         } else {
                             None
                         }
                     })
-                    .fold(0.0f32, f32::max);
+                    .collect();
 
+                if samples.is_empty() {
+                    continue;
+                }
+
+                // Always update level meter
+                let max_level = samples.iter()
+                    .map(|s| s.abs())
+                    .fold(0.0f32, f32::max);
                 CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+
+                // When recording is active, also accumulate samples and feed transcription
+                if RECORDING_ACTIVE.load(Ordering::SeqCst) {
+                    append_to_transcription_buffer(&samples);
+
+                    if let Ok(mut accumulated) = SYSTEM_AUDIO_SAMPLES.lock() {
+                        accumulated.extend(&samples);
+                    }
+
+                    DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
             }
             Err(_) => break,
         }
     }
 
+    // Signal that monitoring has stopped (reader died or EOF)
+    SYSTEM_MONITOR_ACTIVE.store(false, Ordering::SeqCst);
     log::info!("System audio monitor reader finished");
 }
 
@@ -946,27 +1009,27 @@ pub fn check_input_muted() -> Result<bool, String> {
     }
 }
 
-/// Record system audio using pw-record with stdout streaming (Linux only)
-/// This captures audio and streams it back for level monitoring and live transcription
+/// Record system audio using parec/pw-record with stdout streaming (Linux only)
+/// Reuses the monitoring capture process — does NOT spawn a new process.
+/// The monitor reader thread accumulates samples when RECORDING_ACTIVE is set.
 #[tauri::command]
 pub async fn start_system_audio_recording(output_dir: String) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
-        // Stop system audio monitoring if running (frees up the pw-record process)
-        stop_system_audio_monitoring_internal();
-
         // Auto-reset any stuck state from previous failed recordings
         if RECORDING_ACTIVE.load(Ordering::SeqCst) {
             log::warn!("Recording state was stuck, auto-resetting...");
             reset_recording_state();
-            let pid = SYSTEM_RECORD_PID.load(Ordering::SeqCst);
-            if pid != 0 {
-                let _ = std::process::Command::new("kill")
-                    .args(["-TERM", &pid.to_string()])
-                    .status();
-                SYSTEM_RECORD_PID.store(0, Ordering::SeqCst);
-            }
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Ensure system audio monitoring is running (reuse existing pw-record process).
+        // The monitor reader thread handles both level metering and sample accumulation.
+        if !SYSTEM_MONITOR_ACTIVE.load(Ordering::SeqCst) {
+            log::info!("Starting system audio monitoring for recording...");
+            start_system_audio_monitoring_impl()?;
+        } else {
+            log::info!("System audio monitoring already active, reusing for recording");
         }
 
         // Ensure output directory exists
@@ -979,46 +1042,13 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
         let filename = format!("recording_{}.wav", timestamp);
         let output_path = output_dir_path.join(&filename);
 
-        log::info!("Starting system audio recording (streaming) to: {:?}", output_path);
-
-        // Find the default sink monitor
-        let monitor_source = get_default_monitor_source()?;
-        log::info!("Using monitor source: {}", monitor_source);
-
-        // Check which tool is available
-        if !which_exists("pw-record") || !which_exists("pw-link") {
-            return Err("pw-record and pw-link required for system audio. Install pipewire.".to_string());
-        }
+        log::info!("Starting system audio recording to: {:?}", output_path);
 
         // Clear accumulated samples
         {
             let mut samples = SYSTEM_AUDIO_SAMPLES.lock().unwrap();
             samples.clear();
         }
-
-        // Set recording format for transcription buffer
-        set_recording_format(44100, 2);
-
-        // Start pw-record streaming to stdout (using "-" as output)
-        log::info!("Starting pw-record with stdout streaming");
-        let mut child = std::process::Command::new("pw-record")
-            .args([
-                "--target", "0",  // Don't auto-link
-                "--format", "f32",
-                "--rate", "44100",
-                "--channels", "2",
-                "-",  // Output to stdout for streaming
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to start pw-record: {}", e))?;
-
-        let child_id = child.id();
-
-        // Get stdout for streaming
-        let stdout = child.stdout.take()
-            .ok_or("Failed to capture pw-record stdout")?;
 
         // Store recording state
         {
@@ -1031,24 +1061,14 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
             });
         }
 
-        SYSTEM_RECORD_PID.store(child_id as usize, Ordering::SeqCst);
+        // Set recording format for transcription buffer
+        set_recording_format(44100, 2);
+
+        // Activate recording — the monitor reader thread will start accumulating samples
         RECORDING_ACTIVE.store(true, Ordering::SeqCst);
         DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
 
-        // Keep child process alive
-        std::mem::forget(child);
-
-        // Give pw-record time to create its ports
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Query available monitor ports and link appropriately
-        link_monitor_to_pw_record(&monitor_source)?;
-
-        // Spawn thread to read audio stream from stdout
-        std::thread::spawn(move || {
-            system_audio_stream_reader(stdout);
-        });
-
+        log::info!("System audio recording active (reusing monitor process)");
         Ok(output_path.to_string_lossy().to_string())
     }
 
@@ -1056,65 +1076,6 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
     {
         Err("System audio recording only supported on Linux".to_string())
     }
-}
-
-/// Background thread that reads audio from pw-record stdout
-#[cfg(target_os = "linux")]
-fn system_audio_stream_reader(stdout: ChildStdout) {
-    let mut reader = BufReader::with_capacity(8192, stdout);
-    let mut buffer = [0u8; 8192]; // ~46ms of stereo f32 @ 44.1kHz
-
-    log::info!("System audio stream reader started");
-
-    while RECORDING_ACTIVE.load(Ordering::SeqCst) {
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                log::info!("System audio stream EOF");
-                break;
-            }
-            Ok(n) => {
-                // Parse f32 samples from raw bytes (little-endian)
-                let samples: Vec<f32> = buffer[..n]
-                    .chunks(4)
-                    .filter_map(|chunk| {
-                        if chunk.len() == 4 {
-                            Some(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                if samples.is_empty() {
-                    continue;
-                }
-
-                // Update level meter
-                let max_level = samples.iter()
-                    .map(|s| s.abs())
-                    .fold(0.0f32, f32::max);
-                CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
-
-                // Feed transcription buffer for live transcription
-                append_to_transcription_buffer(&samples);
-
-                // Accumulate samples for final WAV file
-                if let Ok(mut accumulated) = SYSTEM_AUDIO_SAMPLES.lock() {
-                    accumulated.extend(&samples);
-                }
-
-                // Update callback count for debugging
-                DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
-            }
-            Err(e) => {
-                log::warn!("System audio stream read error: {}", e);
-                break;
-            }
-        }
-    }
-
-    log::info!("System audio stream reader finished, {} callbacks",
-               DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst));
 }
 
 #[cfg(target_os = "linux")]
@@ -1174,185 +1135,6 @@ fn get_default_monitor_source() -> Result<String, String> {
     Err("Could not find a monitor source for system audio. Make sure PipeWire or PulseAudio is running.".to_string())
 }
 
-/// Link monitor ports to pw-record, handling both stereo and mono devices
-#[cfg(target_os = "linux")]
-fn link_monitor_to_pw_record(monitor_source: &str) -> Result<(), String> {
-    // Query available output ports to find monitor ports for this device
-    let output = std::process::Command::new("pw-link")
-        .args(["-o"])
-        .output()
-        .map_err(|e| format!("Failed to run pw-link -o: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    log::info!("Available output ports:\n{}", stdout);
-
-    // Find monitor ports for our device
-    let mut has_fl = false;
-    let mut has_fr = false;
-    let mut has_mono = false;
-    let mut actual_device_prefix = String::new();
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        // Check if this line contains our monitor source
-        if line.contains(monitor_source) || line.starts_with(&format!("{}:", monitor_source)) {
-            if line.ends_with(":monitor_FL") {
-                has_fl = true;
-                actual_device_prefix = line.trim_end_matches(":monitor_FL").to_string();
-            } else if line.ends_with(":monitor_FR") {
-                has_fr = true;
-                actual_device_prefix = line.trim_end_matches(":monitor_FR").to_string();
-            } else if line.ends_with(":monitor_MONO") {
-                has_mono = true;
-                actual_device_prefix = line.trim_end_matches(":monitor_MONO").to_string();
-            }
-        }
-    }
-
-    // If we didn't find ports with the exact name, search more broadly
-    if !has_fl && !has_fr && !has_mono {
-        // Try to find any monitor ports that might match (partial match on sink name)
-        let sink_short = monitor_source
-            .trim_start_matches("alsa_output.")
-            .split('.')
-            .next()
-            .unwrap_or(monitor_source);
-
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.contains(sink_short) && line.contains(":monitor_") {
-                if line.ends_with(":monitor_FL") {
-                    has_fl = true;
-                    actual_device_prefix = line.trim_end_matches(":monitor_FL").to_string();
-                } else if line.ends_with(":monitor_FR") {
-                    has_fr = true;
-                    actual_device_prefix = line.trim_end_matches(":monitor_FR").to_string();
-                } else if line.ends_with(":monitor_MONO") {
-                    has_mono = true;
-                    actual_device_prefix = line.trim_end_matches(":monitor_MONO").to_string();
-                }
-            }
-        }
-    }
-
-    log::info!(
-        "Monitor port detection for '{}': FL={}, FR={}, MONO={}, prefix='{}'",
-        monitor_source, has_fl, has_fr, has_mono, actual_device_prefix
-    );
-
-    if actual_device_prefix.is_empty() {
-        // Last resort: use the original monitor_source as prefix
-        actual_device_prefix = monitor_source.to_string();
-        log::warn!("Could not find monitor ports, using source name directly: {}", monitor_source);
-    }
-
-    let mut links_created = 0;
-
-    if has_fl && has_fr {
-        // Stereo device - link FL->input_FL and FR->input_FR
-        let monitor_fl = format!("{}:monitor_FL", actual_device_prefix);
-        let monitor_fr = format!("{}:monitor_FR", actual_device_prefix);
-
-        log::info!("Linking stereo: {} -> pw-record:input_FL", monitor_fl);
-        let fl_result = std::process::Command::new("pw-link")
-            .args([&monitor_fl, "pw-record:input_FL"])
-            .output();
-        match fl_result {
-            Ok(output) if output.status.success() => {
-                links_created += 1;
-                log::info!("Successfully linked FL channel");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to link FL channel: {}", stderr.trim());
-            }
-            Err(e) => log::warn!("Failed to run pw-link for FL: {}", e),
-        }
-
-        log::info!("Linking stereo: {} -> pw-record:input_FR", monitor_fr);
-        let fr_result = std::process::Command::new("pw-link")
-            .args([&monitor_fr, "pw-record:input_FR"])
-            .output();
-        match fr_result {
-            Ok(output) if output.status.success() => {
-                links_created += 1;
-                log::info!("Successfully linked FR channel");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to link FR channel: {}", stderr.trim());
-            }
-            Err(e) => log::warn!("Failed to run pw-link for FR: {}", e),
-        }
-    } else if has_mono {
-        // Mono device - link MONO to both input channels
-        let monitor_mono = format!("{}:monitor_MONO", actual_device_prefix);
-
-        log::info!("Linking mono: {} -> pw-record:input_FL", monitor_mono);
-        let fl_result = std::process::Command::new("pw-link")
-            .args([&monitor_mono, "pw-record:input_FL"])
-            .output();
-        match fl_result {
-            Ok(output) if output.status.success() => {
-                links_created += 1;
-                log::info!("Successfully linked MONO to FL channel");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to link MONO to FL: {}", stderr.trim());
-            }
-            Err(e) => log::warn!("Failed to run pw-link for MONO->FL: {}", e),
-        }
-
-        log::info!("Linking mono: {} -> pw-record:input_FR", monitor_mono);
-        let fr_result = std::process::Command::new("pw-link")
-            .args([&monitor_mono, "pw-record:input_FR"])
-            .output();
-        match fr_result {
-            Ok(output) if output.status.success() => {
-                links_created += 1;
-                log::info!("Successfully linked MONO to FR channel");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to link MONO to FR: {}", stderr.trim());
-            }
-            Err(e) => log::warn!("Failed to run pw-link for MONO->FR: {}", e),
-        }
-    } else {
-        // No specific ports found - try the old method as fallback
-        log::warn!("No monitor_FL/FR/MONO ports found, trying generic linking");
-
-        let monitor_fl = format!("{}:monitor_FL", monitor_source);
-        let monitor_fr = format!("{}:monitor_FR", monitor_source);
-
-        let fl_result = std::process::Command::new("pw-link")
-            .args([&monitor_fl, "pw-record:input_FL"])
-            .output();
-        if let Ok(output) = fl_result {
-            if output.status.success() {
-                links_created += 1;
-            }
-        }
-
-        let fr_result = std::process::Command::new("pw-link")
-            .args([&monitor_fr, "pw-record:input_FR"])
-            .output();
-        if let Ok(output) = fr_result {
-            if output.status.success() {
-                links_created += 1;
-            }
-        }
-    }
-
-    if links_created == 0 {
-        log::warn!("No explicit audio links created - PipeWire --target 0 should auto-link");
-    } else {
-        log::info!("Created {} audio link(s)", links_created);
-    }
-
-    Ok(())
-}
 
 #[cfg(target_os = "linux")]
 fn which_exists(cmd: &str) -> bool {
@@ -1363,11 +1145,9 @@ fn which_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-lazy_static::lazy_static! {
-    static ref SYSTEM_RECORD_PID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-}
 
-/// Stop system audio recording and write accumulated samples to WAV file
+/// Stop system audio recording and write accumulated samples to WAV file.
+/// Does NOT kill the pw-record process — monitoring continues after recording stops.
 #[tauri::command]
 pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
     #[cfg(target_os = "linux")]
@@ -1378,20 +1158,14 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
 
         log::info!("Stopping system audio recording...");
 
-        // Signal the reader thread to stop
+        // Signal recording stop — monitor reader stops accumulating but continues level metering
         RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 
-        // Kill the pw-record process
-        let pid = SYSTEM_RECORD_PID.load(Ordering::SeqCst);
-        if pid != 0 {
-            log::info!("Terminating pw-record process {}", pid);
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status();
-            // Wait for reader thread to finish
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            SYSTEM_RECORD_PID.store(0, Ordering::SeqCst);
-        }
+        // Brief pause to let the reader finish any in-flight data
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // NOTE: Don't kill the pw-record process — monitoring continues.
+        // The process will be killed when the user stops monitoring or leaves the screen.
 
         // Get recording state
         let state = {
@@ -1408,13 +1182,17 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
 
         log::info!("Writing {} samples to WAV file: {:?}", samples.len(), state.output_path);
 
+        if samples.is_empty() {
+            return Err("No audio recorded".to_string());
+        }
+
         // Write samples to WAV file
         let duration = write_system_audio_wav(&state.output_path, &samples, state.sample_rate, state.channels)?;
 
-        log::info!("System audio recording complete: {:?}, {:.2}s", state.output_path, duration);
+        log::info!("System audio recording complete: {:?}, {:.2}s, {} callbacks",
+            state.output_path, duration, DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst));
 
-        // Reset level
-        CURRENT_LEVEL.store(0, Ordering::SeqCst);
+        // Don't reset CURRENT_LEVEL — monitoring is still running and will keep updating it
 
         Ok(RecordingResult {
             path: state.output_path.to_string_lossy().to_string(),
@@ -1575,7 +1353,31 @@ pub fn probe_system_audio() -> Result<SystemAudioInfo, String> {
             }
         }
 
-        // Test pw-record
+        // Test parec first (preferred — handles monitor auto-connection internally)
+        if which_exists("parec") {
+            if let Some(ref source) = info.monitor_source {
+                let pa_monitor = if source.ends_with(".monitor") {
+                    source.clone()
+                } else {
+                    format!("{}.monitor", source)
+                };
+
+                match test_parec(&pa_monitor) {
+                    Ok(result) => {
+                        info.available = true;
+                        info.method = "parec".to_string();
+                        info.test_result = Some(result);
+                        log::info!("parec works with monitor source");
+                        return Ok(info);
+                    }
+                    Err(e) => {
+                        log::warn!("parec test failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Test pw-record as fallback (with stream.capture.sink property)
         if which_exists("pw-record") {
             if let Some(ref source) = info.monitor_source {
                 match test_pw_record(source) {
@@ -1593,7 +1395,7 @@ pub fn probe_system_audio() -> Result<SystemAudioInfo, String> {
             }
         }
 
-        // Test parecord as fallback
+        // Test parecord as last fallback
         if which_exists("parecord") {
             if let Some(ref source) = info.monitor_source {
                 let monitor_name = if source.ends_with(".monitor") {
@@ -1613,14 +1415,14 @@ pub fn probe_system_audio() -> Result<SystemAudioInfo, String> {
                     }
                     Err(e) => {
                         log::warn!("parecord test failed: {}", e);
-                        info.test_result = Some(format!("Both pw-record and parecord failed: {}", e));
+                        info.test_result = Some(format!("All capture tools failed: {}", e));
                     }
                 }
             }
         }
 
-        if !which_exists("pw-record") && !which_exists("parecord") {
-            info.test_result = Some("No recording tools available (need pw-record or parecord)".to_string());
+        if !which_exists("parec") && !which_exists("pw-record") && !which_exists("parecord") {
+            info.test_result = Some("No recording tools available (need parec, pw-record, or parecord)".to_string());
         }
 
         Ok(info)
@@ -1744,6 +1546,22 @@ fn test_cpal_monitor(device_name: &str) -> bool {
     drop(stream);
 
     got_callback.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+fn test_parec(monitor_source: &str) -> Result<String, String> {
+    let output = std::process::Command::new("timeout")
+        .args(["0.5", "parec", "-d", monitor_source,
+               "--format=float32le", "--rate=44100", "--channels=2"])
+        .output()
+        .map_err(|e| format!("Failed to run parec: {}", e))?;
+
+    if output.stdout.len() > 1000 {
+        Ok(format!("Test captured {} bytes", output.stdout.len()))
+    } else {
+        Err(format!("Captured too little data: {} bytes (stderr: {})",
+            output.stdout.len(), String::from_utf8_lossy(&output.stderr).trim()))
+    }
 }
 
 #[cfg(target_os = "linux")]

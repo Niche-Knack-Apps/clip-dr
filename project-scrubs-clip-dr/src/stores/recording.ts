@@ -42,7 +42,7 @@ export type RecordingSource = 'microphone' | 'system';
 
 export interface SystemAudioInfo {
   available: boolean;
-  method: string;  // "pw-record", "parecord", "cpal-monitor", or "unavailable"
+  method: string;  // "parec", "pw-record", "parecord", "cpal-monitor", or "unavailable"
   monitor_source: string | null;
   sink_name: string | null;
   test_result: string | null;
@@ -238,6 +238,16 @@ export const useRecordingStore = defineStore('recording', () => {
 
     error.value = null;
     isPreparing.value = true;
+
+    // For system audio subprocess recording, keep monitoring running — the same
+    // pw-record process is reused for recording (monitor reader accumulates samples).
+    // For microphone/CPAL recording, stop monitoring to avoid device conflicts.
+    const isSystemSubprocess = source.value === 'system' &&
+      systemAudioInfo.value?.method !== 'cpal-monitor';
+
+    if (isMonitoring.value && !isSystemSubprocess) {
+      await stopMonitoring();
+    }
 
     try {
       // Use the project folder for recordings
