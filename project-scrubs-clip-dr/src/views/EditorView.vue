@@ -253,6 +253,8 @@ useKeyboardShortcuts({
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">I</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">O</kbd> In/Out</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">C</kbd> Clip</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">X</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">V</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Del</kbd> Cut/Paste/Delete</span>
+      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Tab</kbd> Next Track</span>
+      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">+</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">-</kbd> Zoom</span>
       <span v-if="playbackStore.playbackSpeed !== 1" class="text-cyan-400">{{ playbackStore.playbackSpeed > 0 ? '' : '-' }}{{ Math.abs(playbackStore.playbackSpeed) }}x</span>
     </div>
   </div>
