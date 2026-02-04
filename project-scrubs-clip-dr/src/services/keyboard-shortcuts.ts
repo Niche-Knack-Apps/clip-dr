@@ -29,6 +29,12 @@ export interface KeyboardActions {
   onCutDirect?: () => void;
   onPasteDirect?: () => void;
   onDeleteDirect?: () => void;
+  // Zoom shortcuts (+/-)
+  onZoomIn?: () => void;
+  onZoomOut?: () => void;
+  // Track selection cycling (Tab/Shift+Tab)
+  onSelectNextTrack?: () => void;
+  onSelectPrevTrack?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -132,6 +138,29 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
         updateJklPlayback();
         return;
       }
+    }
+
+    // Tab / Shift+Tab for track selection cycling
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      if (event.shiftKey) {
+        actions.onSelectPrevTrack?.();
+      } else {
+        actions.onSelectNextTrack?.();
+      }
+      return;
+    }
+
+    // +/- for zoom (Shift+= produces '+', - is literal)
+    if (event.key === '+' || (event.key === '=' && event.shiftKey)) {
+      event.preventDefault();
+      actions.onZoomIn?.();
+      return;
+    }
+    if (event.key === '-' && !isCtrlOrCmd) {
+      event.preventDefault();
+      actions.onZoomOut?.();
+      return;
     }
 
     switch (event.key) {
