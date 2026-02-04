@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useWaveform } from '@/composables/useWaveform';
 import type { WaveformBucket } from '@/shared/types';
 
@@ -25,15 +25,11 @@ const { getBucketsForRange, renderWaveform, waveformData, duration } = useWavefo
 
 let resizeObserver: ResizeObserver | null = null;
 
-// Track when waveform data changes to force re-render
-const waveformDataLength = computed(() => waveformData.value.length);
-const waveformDataHash = computed(() => {
-  // Create a simple hash to detect when waveform content changes
-  const data = waveformData.value;
-  if (data.length === 0) return 0;
-  // Sample a few values to create a hash
-  return data[0] + (data[Math.floor(data.length / 2)] || 0) + (data[data.length - 1] || 0);
-});
+// Version counter that increments whenever waveform data reference changes.
+// Watching the array reference directly ensures re-render on any track
+// manipulation (cut, delete, drag) since computed arrays return new refs.
+const waveformVersion = ref(0);
+watch(waveformData, () => { waveformVersion.value++; });
 
 function render() {
   const canvas = canvasRef.value;
@@ -79,10 +75,8 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
 });
 
-// Watch for props changes and waveform data changes (when selected track switches)
-// Use waveformDataHash AND waveformDataLength to detect actual content changes
-// Both are needed: length for new data arrival, hash for content changes
-watch([() => props.startTime, () => props.endTime, () => props.color, waveformDataHash, waveformDataLength, duration], render, { immediate: true });
+// Watch for props changes and waveform data changes (when tracks are modified)
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformVersion, duration], render, { immediate: true });
 </script>
 
 <template>

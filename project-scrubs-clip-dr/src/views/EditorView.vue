@@ -62,6 +62,27 @@ watch(
   }
 );
 
+// Clamp selection and re-zoom when timeline shrinks (after cut/delete)
+watch(
+  () => tracksStore.timelineDuration,
+  (newDuration) => {
+    if (newDuration <= 0) return;
+    const sel = selectionStore.selection;
+    if (sel.end > newDuration || sel.start >= newDuration) {
+      selectionStore.selection = {
+        start: Math.min(sel.start, Math.max(0, newDuration - (sel.end - sel.start))),
+        end: Math.min(sel.end, newDuration),
+      };
+    }
+    // Re-zoom track list to fit updated content
+    const container = document.querySelector('[data-track-scroll]');
+    if (container) {
+      const containerWidth = container.clientWidth - uiStore.trackPanelWidth;
+      uiStore.zoomTrackToFit(newDuration, containerWidth);
+    }
+  }
+);
+
 // Section resize state
 const isResizingWaveform = ref(false);
 const isResizingZoomed = ref(false);
@@ -255,6 +276,7 @@ useKeyboardShortcuts({
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">X</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">V</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Del</kbd> Cut/Paste/Delete</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Tab</kbd> Next Track</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">+</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">-</kbd> Zoom</span>
+      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Ctrl</kbd>+Scroll Zoom Tracks</span>
       <span v-if="playbackStore.playbackSpeed !== 1" class="text-cyan-400">{{ playbackStore.playbackSpeed > 0 ? '' : '-' }}{{ Math.abs(playbackStore.playbackSpeed) }}x</span>
     </div>
   </div>
