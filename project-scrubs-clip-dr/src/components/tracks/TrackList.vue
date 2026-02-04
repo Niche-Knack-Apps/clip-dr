@@ -60,8 +60,11 @@ const timelineWidth = computed(() => {
   return Math.max(600, paddedDuration * trackZoom.value) + panelWidth.value;
 });
 
-// Handle scroll wheel zoom (allows native scroll in right margin)
+// Handle scroll wheel: Ctrl+wheel zooms, plain wheel scrolls natively
 function handleWheel(event: WheelEvent) {
+  // Only zoom with Ctrl/Cmd held - let plain wheel scroll naturally
+  if (!event.ctrlKey && !event.metaKey) return;
+
   const rect = scrollContainerRef.value?.getBoundingClientRect();
   if (!rect) return;
 
@@ -69,11 +72,6 @@ function handleWheel(event: WheelEvent) {
 
   // Don't zoom when over track controls (left panel)
   if (mouseX < panelWidth.value) return;
-
-  // Allow native vertical scroll in the right 40px margin or past clip content
-  const contentEnd = tracksStore.timelineDuration * trackZoom.value + panelWidth.value;
-  const scrollZoneStart = Math.min(contentEnd, rect.width - 40);
-  if (mouseX > scrollZoneStart) return; // Let native scroll happen
 
   event.preventDefault();
 
