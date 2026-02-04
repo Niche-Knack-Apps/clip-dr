@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch, onUnmounted } from 'vue';
+import { watch, onUnmounted, computed } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import LevelMeter from './LevelMeter.vue';
@@ -13,31 +13,34 @@ const emit = defineEmits<{
 
 const recordingStore = useRecordingStore();
 
+// Show only the most recent words (~one line worth)
+const recentWords = computed(() => {
+  const words = recordingStore.liveTranscription.words;
+  return words.slice(-12);
+});
+
 const sources: { value: RecordingSource; label: string; icon: string }[] = [
   { value: 'microphone', label: 'Microphone', icon: 'M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z' },
   { value: 'system', label: 'System Audio', icon: 'M9.348 14.651a3.75 3.75 0 010-5.303m5.304 0a3.75 3.75 0 010 5.303m-7.425 2.122a6.75 6.75 0 010-9.546m9.546 0a6.75 6.75 0 010 9.546M5.106 18.894c-3.808-3.808-3.808-9.98 0-13.789m13.788 0c3.808 3.808 3.808 9.981 0 13.79M12 12h.008v.007H12V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z' },
 ];
 
-// Auto-start monitoring when device is selected
+// Auto-start monitoring when device or source changes
 watch(
-  () => recordingStore.selectedDeviceId,
-  async (newId, oldId) => {
-    if (newId && !recordingStore.isRecording) {
-      // Stop previous monitoring if running
-      if (recordingStore.isMonitoring) {
-        await recordingStore.stopMonitoring();
-      }
-      // Start monitoring new device
-      await recordingStore.startMonitoring();
-    }
-  }
-);
+  () => ({ deviceId: recordingStore.selectedDeviceId, source: recordingStore.source }),
+  async (newVal, oldVal) => {
+    if (recordingStore.isRecording) return;
 
-// Start monitoring when panel opens if device is selected
-watch(
-  () => recordingStore.selectedDeviceId,
-  async (deviceId) => {
-    if (deviceId && !recordingStore.isRecording && !recordingStore.isMonitoring) {
+    // Stop previous monitoring if running
+    if (recordingStore.isMonitoring) {
+      await recordingStore.stopMonitoring();
+    }
+
+    // Start monitoring for the new source/device
+    const isSystemPwRecord = newVal.source === 'system' &&
+      recordingStore.systemAudioInfo?.available &&
+      !recordingStore.systemAudioInfo?.cpal_monitor_device;
+
+    if (newVal.deviceId || isSystemPwRecord) {
       await recordingStore.startMonitoring();
     }
   },
@@ -101,7 +104,7 @@ async function handleResetState() {
 </script>
 
 <template>
-  <div class="p-4 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[320px]">
+  <div class="p-4 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[320px] max-h-[calc(100vh-6rem)] overflow-y-auto">
     <h3 class="text-sm font-medium text-gray-200 mb-4">Record Audio</h3>
 
     <!-- Source selection -->
@@ -195,8 +198,7 @@ async function handleResetState() {
         </div>
       </div>
       <p class="mt-1 text-[10px] text-gray-500">
-        Will capture all system audio playing through your speakers/headphones.
-        Level meter will show during recording.
+        Captures all system audio playing through your speakers/headphones.
       </p>
       <div class="flex gap-2 mt-2">
         <button
@@ -208,44 +210,10 @@ async function handleResetState() {
       </div>
     </div>
 
-    <!-- Pre-recording level meter (show when NOT recording but monitoring - only for CPAL devices) -->
+    <!-- Pre-recording level meter (show when NOT recording but monitoring) -->
     <div v-if="!recordingStore.isRecording && recordingStore.isMonitoring" class="mb-4">
       <label class="block text-xs text-gray-400 mb-2">Input Level</label>
       <LevelMeter :level="recordingStore.currentLevel" />
-      <p class="mt-1 text-xs text-gray-500">
-        Make sure you see activity above when speaking/playing audio
-      </p>
-    </div>
-
-    <!-- Info for system audio via subprocess (no pre-recording level meter) -->
-    <div v-if="!recordingStore.isRecording && recordingStore.source === 'system' && !recordingStore.systemAudioInfo?.cpal_monitor_device && recordingStore.systemAudioInfo?.available && !recordingStore.isMonitoring" class="mb-4">
-      <div class="p-2 bg-blue-900/20 border border-blue-700/50 rounded">
-        <p class="text-xs text-blue-400">
-          Level meter will appear once recording starts.
-        </p>
-      </div>
-    </div>
-
-    <!-- Muted warning with unmute button -->
-    <div v-if="!recordingStore.isRecording && recordingStore.isMuted" class="mb-4 p-2 bg-red-900/30 border border-red-700 rounded">
-      <div class="flex items-center justify-between">
-        <p class="text-xs text-red-400">
-          Microphone is muted in system settings.
-        </p>
-        <button
-          class="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded"
-          @click="handleUnmute"
-        >
-          Unmute
-        </button>
-      </div>
-    </div>
-
-    <!-- No signal warning (when not muted) -->
-    <div v-else-if="!recordingStore.isRecording && recordingStore.isMonitoring && recordingStore.currentLevel < 0.01" class="mb-4 p-2 bg-yellow-900/30 border border-yellow-700 rounded">
-      <p class="text-xs text-yellow-400">
-        No signal detected. Check that the correct input device is selected and not muted.
-      </p>
     </div>
 
     <!-- Live transcription toggle (before recording starts) -->
@@ -286,15 +254,15 @@ async function handleResetState() {
       <!-- Level meter -->
       <LevelMeter :level="recordingStore.currentLevel" />
 
-      <!-- Live transcription display -->
+      <!-- Live transcription display - single line, most recent words only -->
       <div
         v-if="recordingStore.liveTranscription.isActive || recordingStore.liveTranscription.words.length > 0"
         class="mt-3"
       >
         <label class="block text-[10px] text-gray-500 mb-1">Live Transcription</label>
-        <div class="text-sm text-gray-300 bg-gray-900 p-2 rounded max-h-24 overflow-y-auto">
+        <div class="text-sm text-gray-300 bg-gray-900 p-2 rounded whitespace-nowrap overflow-hidden text-ellipsis">
           <span
-            v-for="word in recordingStore.liveTranscription.words"
+            v-for="word in recentWords"
             :key="word.id"
             class="mr-1"
           >{{ word.text }}</span>

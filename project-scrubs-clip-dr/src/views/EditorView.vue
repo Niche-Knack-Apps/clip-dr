@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, computed, ref } from 'vue';
+import { inject, computed, ref, watch } from 'vue';
 import FullWaveform from '@/components/waveform/FullWaveform.vue';
 import ZoomedWaveform from '@/components/waveform/ZoomedWaveform.vue';
 import WordTimeline from '@/components/transcription/WordTimeline.vue';
@@ -25,6 +25,19 @@ const clipboardStore = useClipboardStore();
 const uiStore = useUIStore();
 
 const focusSearch = inject<() => void>('focusSearch');
+
+// Auto-zoom to show all tracks when a new track is added
+watch(
+  () => tracksStore.tracks.length,
+  (newLen, oldLen) => {
+    if (newLen > (oldLen ?? 0) && tracksStore.timelineDuration > 0) {
+      // Directly set selection to full timeline, bypassing setSelection()
+      // which clamps to the selected track's duration (the new track is auto-selected
+      // so getEffectiveDuration() would return just that track, not the full timeline)
+      selectionStore.selection = { start: 0, end: tracksStore.timelineDuration };
+    }
+  }
+);
 
 // Section resize state
 const isResizingWaveform = ref(false);

@@ -197,6 +197,13 @@ fn extract_words_from_state(
 
         for j in 0..num_tokens {
             let token_text = state.full_get_token_text(i, j).unwrap_or_default();
+
+            // Skip special tokens (timestamps like [_TT_1501_], language tags like <|en|>, etc.)
+            let trimmed_check = token_text.trim();
+            if trimmed_check.starts_with('[') || trimmed_check.starts_with("<|") {
+                continue;
+            }
+
             let token_data = state.full_get_token_data(i, j).ok();
 
             let starts_new_word = token_text.starts_with(' ') || token_text.starts_with('\n');
@@ -423,18 +430,32 @@ pub fn find_model_path_with_bundled(
         }
     }
 
-    // 2. Check bundled resources
+    // 2. Check bundled resources (production)
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
         let bundled = resource_dir.join("models").join("ggml-tiny.bin");
         if bundled.exists() {
             log::info!("Found bundled model: {:?}", bundled);
             return Ok(bundled);
         }
-        // Also check for ggml-tiny.en.bin
         let bundled_en = resource_dir.join("models").join("ggml-tiny.en.bin");
         if bundled_en.exists() {
             log::info!("Found bundled model: {:?}", bundled_en);
             return Ok(bundled_en);
+        }
+    }
+
+    // 2b. Dev mode fallback: check src-tauri/resources/models via CARGO_MANIFEST_DIR
+    let dev_models_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("models");
+    if dev_models_dir.exists() {
+        let model_files = get_model_filenames(model_name);
+        for model_file in &model_files {
+            let dev_model = dev_models_dir.join(model_file);
+            if dev_model.exists() {
+                log::info!("Found model at dev path: {:?}", dev_model);
+                return Ok(dev_model);
+            }
         }
     }
 
@@ -542,6 +563,7 @@ pub async fn stop_recording_with_transcription(
 /// Check if a bundled model exists
 #[tauri::command]
 pub fn get_bundled_model_info(app_handle: AppHandle) -> Result<Option<String>, String> {
+    // Production: Tauri resource dir
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
         let bundled = resource_dir.join("models").join("ggml-tiny.bin");
         if bundled.exists() {
@@ -552,6 +574,18 @@ pub fn get_bundled_model_info(app_handle: AppHandle) -> Result<Option<String>, S
             return Ok(Some(bundled_en.to_string_lossy().to_string()));
         }
     }
+
+    // Dev mode fallback
+    let dev_models_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("models");
+    for model_file in &["ggml-tiny.bin", "ggml-tiny.en.bin"] {
+        let dev_model = dev_models_dir.join(model_file);
+        if dev_model.exists() {
+            return Ok(Some(dev_model.to_string_lossy().to_string()));
+        }
+    }
+
     Ok(None)
 }
 

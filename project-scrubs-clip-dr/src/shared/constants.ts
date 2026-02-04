@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS = {
   modelsPath: '',
   lastImportFolder: '',
   lastExportFolder: '',
+  projectFolder: '',
   // Playback controls
   holdToPlay: false,          // true = hold Space to play, false = toggle (JKL mode)
   reverseWithAudio: true,     // true = actual audio, false = visual-only scrub
@@ -76,7 +77,7 @@ export const ZOOMED_HEIGHT = 200;
 // Track panel dimensions
 export const TRACK_PANEL_MIN_WIDTH = 80;
 export const TRACK_PANEL_MAX_WIDTH = 300;
-export const TRACK_PANEL_DEFAULT_WIDTH = 128;
+export const TRACK_PANEL_DEFAULT_WIDTH = 240;
 
 export type LoopMode = 'full' | 'zoom' | 'inout' | 'active' | 'clip';
 export const LOOP_MODES: { value: LoopMode; label: string }[] = [

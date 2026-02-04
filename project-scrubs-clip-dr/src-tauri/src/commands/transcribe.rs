@@ -8,6 +8,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use tauri::{AppHandle, Manager};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,15 @@ fn get_model_filenames(model_name: &str) -> Vec<String> {
 
 /// Get path to the whisper model, checking common locations
 fn find_model_path(model_name: &str, custom_path: Option<&str>) -> Result<std::path::PathBuf, String> {
+    find_model_path_internal(model_name, custom_path, None)
+}
+
+/// Internal model path finder with optional bundled resources check
+fn find_model_path_internal(
+    model_name: &str,
+    custom_path: Option<&str>,
+    resource_dir: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
     let model_files = get_model_filenames(model_name);
 
     // Check custom path first if provided
@@ -97,6 +107,31 @@ fn find_model_path(model_name: &str, custom_path: Option<&str>) -> Result<std::p
                     log::info!("Found model at custom path: {:?}", custom_model);
                     return Ok(custom_model);
                 }
+            }
+        }
+    }
+
+    // Check bundled resources if available (production builds)
+    if let Some(res_dir) = resource_dir {
+        for model_file in &model_files {
+            let bundled = res_dir.join("models").join(model_file);
+            if bundled.exists() {
+                log::info!("Found bundled model: {:?}", bundled);
+                return Ok(bundled);
+            }
+        }
+    }
+
+    // Dev mode fallback: check src-tauri/resources/models via CARGO_MANIFEST_DIR
+    let dev_models_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("models");
+    if dev_models_dir.exists() {
+        for model_file in &model_files {
+            let dev_model = dev_models_dir.join(model_file);
+            if dev_model.exists() {
+                log::info!("Found model at dev path: {:?}", dev_model);
+                return Ok(dev_model);
             }
         }
     }
@@ -409,6 +444,12 @@ pub async fn transcribe_audio(path: String, models_path: Option<String>) -> Resu
             let token_text = state.full_get_token_text(i, j)
                 .unwrap_or_default();
 
+            // Skip special tokens (timestamps like [_TT_1501_], language tags like <|en|>, etc.)
+            let trimmed_check = token_text.trim();
+            if trimmed_check.starts_with('[') || trimmed_check.starts_with("<|") {
+                continue;
+            }
+
             let token_data = state.full_get_token_data(i, j)
                 .ok();
 
@@ -496,11 +537,42 @@ pub async fn transcribe_audio(path: String, models_path: Option<String>) -> Resu
 
 /// Check if whisper model is available
 #[tauri::command]
-pub async fn check_whisper_model(custom_path: Option<String>) -> Result<String, String> {
+pub async fn check_whisper_model(app_handle: AppHandle, custom_path: Option<String>) -> Result<String, String> {
     let path_ref = custom_path.as_deref();
     log::info!("Checking for whisper model, custom path: {:?}", path_ref);
-    find_any_model(path_ref)
-        .map(|p| p.to_string_lossy().to_string())
+
+    // Try find_any_model first (custom path, app data, system locations)
+    if let Ok(path) = find_any_model(path_ref) {
+        return Ok(path.to_string_lossy().to_string());
+    }
+
+    // Also check bundled resources (production)
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        let bundled = resource_dir.join("models").join("ggml-tiny.bin");
+        if bundled.exists() {
+            log::info!("Found bundled model: {:?}", bundled);
+            return Ok(bundled.to_string_lossy().to_string());
+        }
+        let bundled_en = resource_dir.join("models").join("ggml-tiny.en.bin");
+        if bundled_en.exists() {
+            log::info!("Found bundled model: {:?}", bundled_en);
+            return Ok(bundled_en.to_string_lossy().to_string());
+        }
+    }
+
+    // Dev mode fallback
+    let dev_models_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("models");
+    for model_file in &["ggml-tiny.bin", "ggml-tiny.en.bin"] {
+        let dev_model = dev_models_dir.join(model_file);
+        if dev_model.exists() {
+            log::info!("Found model at dev path: {:?}", dev_model);
+            return Ok(dev_model.to_string_lossy().to_string());
+        }
+    }
+
+    Err("Whisper model not found".to_string())
 }
 
 /// Get the models directory path
@@ -542,9 +614,12 @@ pub async fn debug_list_directory(path: String) -> Result<Vec<String>, String> {
 
 /// List all available whisper models with their status
 #[tauri::command]
-pub async fn list_available_models(custom_path: Option<String>) -> Result<Vec<ModelInfo>, String> {
+pub async fn list_available_models(app_handle: AppHandle, custom_path: Option<String>) -> Result<Vec<ModelInfo>, String> {
     let path_ref = custom_path.as_deref();
     let mut models = Vec::new();
+
+    // Get bundled resource directory for checking bundled models
+    let resource_dir = app_handle.path().resource_dir().ok();
 
     // Also scan custom directory for additional models
     let mut found_in_custom: Vec<(String, std::path::PathBuf)> = Vec::new();
@@ -556,7 +631,7 @@ pub async fn list_available_models(custom_path: Option<String>) -> Result<Vec<Mo
     }
 
     for (name, filenames, size_mb) in WHISPER_MODELS {
-        let found_path = find_model_path(name, path_ref).ok();
+        let found_path = find_model_path_internal(name, path_ref, resource_dir.as_deref()).ok();
         let available = found_path.is_some();
 
         models.push(ModelInfo {

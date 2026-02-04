@@ -36,6 +36,9 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
+    "resources": {
+      "resources/models/*": "models/"
+    },
     "linux": {
       "appimage": {
         "bundleMediaFramework": true

@@ -34,8 +34,11 @@ lazy_static::lazy_static! {
     static ref RECORDING_STATE: Arc<Mutex<Option<RecordingState>>> = Arc::new(Mutex::new(None));
     static ref RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ref MONITORING_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static ref SYSTEM_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static ref SYSTEM_MONITOR_PID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static ref CURRENT_LEVEL: AtomicU32 = AtomicU32::new(0);
     static ref DEBUG_CALLBACK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static ref RECORDING_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     // For streaming system audio - accumulate samples from stdout
     static ref SYSTEM_AUDIO_SAMPLES: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
 }
@@ -240,10 +243,15 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
     // Debug: Log more details about the device config
     log::info!("Buffer size: {:?}", config.buffer_size());
 
+    // Ensure output directory exists
+    let output_dir_path = PathBuf::from(&output_dir);
+    std::fs::create_dir_all(&output_dir_path)
+        .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir_path, e))?;
+
     // Generate output filename
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("recording_{}.wav", timestamp);
-    let output_path = PathBuf::from(&output_dir).join(&filename);
+    let output_path = output_dir_path.join(&filename);
 
     // Initialize recording state
     {
@@ -259,13 +267,16 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
     RECORDING_ACTIVE.store(true, Ordering::SeqCst);
     DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
 
+    // Increment epoch so any leaked streams from previous recordings stop writing
+    let epoch = RECORDING_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+
     // Build stream based on sample format
     let stream = match config.sample_format() {
-        SampleFormat::F32 => build_input_stream::<f32>(&device, &config.into())?,
-        SampleFormat::I16 => build_input_stream::<i16>(&device, &config.into())?,
-        SampleFormat::U16 => build_input_stream::<u16>(&device, &config.into())?,
-        SampleFormat::I32 => build_input_stream::<i32>(&device, &config.into())?,
-        SampleFormat::U8 => build_input_stream::<u8>(&device, &config.into())?,
+        SampleFormat::F32 => build_input_stream::<f32>(&device, &config.into(), epoch)?,
+        SampleFormat::I16 => build_input_stream::<i16>(&device, &config.into(), epoch)?,
+        SampleFormat::U16 => build_input_stream::<u16>(&device, &config.into(), epoch)?,
+        SampleFormat::I32 => build_input_stream::<i32>(&device, &config.into(), epoch)?,
+        SampleFormat::U8 => build_input_stream::<u8>(&device, &config.into(), epoch)?,
         fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
@@ -280,6 +291,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
 fn build_input_stream<T: Sample + cpal::SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    epoch: usize,
 ) -> Result<cpal::Stream, String>
 where
     f32: cpal::FromSample<T>,
@@ -294,6 +306,11 @@ where
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
                 if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
+                    return;
+                }
+                // Check epoch to prevent leaked streams from previous recordings
+                // from writing to the current recording's buffer
+                if RECORDING_EPOCH.load(Ordering::SeqCst) != epoch {
                     return;
                 }
 
@@ -626,6 +643,115 @@ pub fn is_monitoring() -> bool {
     MONITORING_ACTIVE.load(Ordering::SeqCst)
 }
 
+/// Start system audio monitoring (level meter only, no recording)
+/// Uses pw-record to capture system audio and update CURRENT_LEVEL
+#[tauri::command]
+pub async fn start_system_audio_monitoring() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        // Stop any existing monitoring first
+        stop_system_audio_monitoring_internal();
+        stop_monitoring_internal();
+
+        let monitor_source = get_default_monitor_source()?;
+        log::info!("Starting system audio monitoring with monitor source: {}", monitor_source);
+
+        // Start pw-record streaming to stdout (level metering only)
+        let mut child = std::process::Command::new("pw-record")
+            .args([
+                "--target", "0",
+                "--format", "f32",
+                "--rate", "44100",
+                "--channels", "2",
+                "-",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw-record for monitoring: {}", e))?;
+
+        let child_id = child.id();
+        let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+
+        SYSTEM_MONITOR_PID.store(child_id as usize, Ordering::SeqCst);
+        SYSTEM_MONITOR_ACTIVE.store(true, Ordering::SeqCst);
+        CURRENT_LEVEL.store(0, Ordering::SeqCst);
+
+        // Keep child process alive
+        std::mem::forget(child);
+
+        // Give pw-record time to create its ports then link
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        link_monitor_to_pw_record(&monitor_source)?;
+
+        // Spawn thread to read audio and update level only (no accumulation)
+        std::thread::spawn(move || {
+            system_audio_monitor_reader(stdout);
+        });
+
+        log::info!("System audio monitoring started");
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("System audio monitoring only supported on Linux".to_string())
+    }
+}
+
+/// Stop system audio monitoring
+#[tauri::command]
+pub fn stop_system_audio_monitoring() {
+    log::info!("Stopping system audio monitoring");
+    stop_system_audio_monitoring_internal();
+}
+
+fn stop_system_audio_monitoring_internal() {
+    SYSTEM_MONITOR_ACTIVE.store(false, Ordering::SeqCst);
+
+    let pid = SYSTEM_MONITOR_PID.load(Ordering::SeqCst);
+    if pid != 0 {
+        log::info!("Terminating monitor pw-record process {}", pid);
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        SYSTEM_MONITOR_PID.store(0, Ordering::SeqCst);
+    }
+
+    CURRENT_LEVEL.store(0, Ordering::SeqCst);
+}
+
+/// Lightweight stream reader for system audio monitoring (level only, no sample accumulation)
+#[cfg(target_os = "linux")]
+fn system_audio_monitor_reader(stdout: ChildStdout) {
+    let mut reader = BufReader::with_capacity(4096, stdout);
+    let mut buffer = [0u8; 4096];
+
+    while SYSTEM_MONITOR_ACTIVE.load(Ordering::SeqCst) {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                let max_level = buffer[..n]
+                    .chunks(4)
+                    .filter_map(|chunk| {
+                        if chunk.len() == 4 {
+                            Some(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs())
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(0.0f32, f32::max);
+
+                CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+            }
+            Err(_) => break,
+        }
+    }
+
+    log::info!("System audio monitor reader finished");
+}
+
 /// Force reset recording state (for recovery from stuck state)
 #[tauri::command]
 pub fn reset_recording_state() {
@@ -826,6 +952,9 @@ pub fn check_input_muted() -> Result<bool, String> {
 pub async fn start_system_audio_recording(output_dir: String) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
+        // Stop system audio monitoring if running (frees up the pw-record process)
+        stop_system_audio_monitoring_internal();
+
         // Auto-reset any stuck state from previous failed recordings
         if RECORDING_ACTIVE.load(Ordering::SeqCst) {
             log::warn!("Recording state was stuck, auto-resetting...");
@@ -840,10 +969,15 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
+        // Ensure output directory exists
+        let output_dir_path = PathBuf::from(&output_dir);
+        std::fs::create_dir_all(&output_dir_path)
+            .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir_path, e))?;
+
         // Generate output filename
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let filename = format!("recording_{}.wav", timestamp);
-        let output_path = PathBuf::from(&output_dir).join(&filename);
+        let output_path = output_dir_path.join(&filename);
 
         log::info!("Starting system audio recording (streaming) to: {:?}", output_path);
 

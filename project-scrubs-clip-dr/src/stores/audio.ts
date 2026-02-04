@@ -101,7 +101,8 @@ export const useAudioStore = defineStore('audio', () => {
       const selectionStore = useSelectionStore();
 
       const fileName = getFileName(path);
-      tracksStore.createTrackFromBuffer(buffer, waveformData, fileName, 0, path);
+      const trackStart = tracksStore.timelineDuration;
+      tracksStore.createTrackFromBuffer(buffer, waveformData, fileName, trackStart, path);
 
       selectionStore.resetSelection();
 

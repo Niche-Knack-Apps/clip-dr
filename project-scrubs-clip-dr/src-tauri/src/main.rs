@@ -61,6 +61,8 @@ fn main() {
             recording::test_audio_device,
             recording::start_system_audio_recording,
             recording::stop_system_audio_recording,
+            recording::start_system_audio_monitoring,
+            recording::stop_system_audio_monitoring,
             recording::probe_system_audio,
             streaming_transcribe::start_recording_with_transcription,
             streaming_transcribe::stop_recording_with_transcription,

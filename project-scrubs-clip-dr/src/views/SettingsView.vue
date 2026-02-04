@@ -22,6 +22,7 @@ const debugFiles = ref<string[]>([]);
 const debugError = ref<string | null>(null);
 const downloadingModel = ref<string | null>(null);
 const downloadError = ref<string | null>(null);
+const bundledModelPath = ref<string | null>(null);
 
 const displayPath = computed(() => {
   const path = settingsStore.settings.modelsPath;
@@ -53,6 +54,13 @@ async function refreshModels() {
   try {
     await transcriptionStore.loadAvailableModels();
     await transcriptionStore.checkModel();
+
+    // Check for bundled model
+    try {
+      bundledModelPath.value = await invoke<string | null>('get_bundled_model_info');
+    } catch (e) {
+      bundledModelPath.value = null;
+    }
 
     // Debug: list files in custom directory
     const customPath = settingsStore.settings.modelsPath;
@@ -174,6 +182,38 @@ onMounted(() => {
           </div>
         </div>
 
+        <!-- Project Folder -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Project Folder</h3>
+          <div class="space-y-2">
+            <div class="flex gap-2">
+              <div class="flex-1 h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-300 flex items-center overflow-hidden">
+                <span class="truncate" :class="{ 'text-gray-500 italic': !settingsStore.settings.projectFolder }">
+                  {{ settingsStore.settings.projectFolder || 'Using default location' }}
+                </span>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                @click="settingsStore.browseProjectFolder()"
+              >
+                Browse
+              </Button>
+              <Button
+                v-if="settingsStore.settings.projectFolder"
+                variant="ghost"
+                size="sm"
+                @click="settingsStore.resetProjectFolder()"
+              >
+                Reset
+              </Button>
+            </div>
+            <p class="text-[10px] text-gray-500">
+              Recordings and project files are saved here. Default: ~/.local/share/com.niche-knack.clip-doctor-scrubs/
+            </p>
+          </div>
+        </div>
+
         <!-- Recording -->
         <div>
           <h3 class="text-sm font-medium text-gray-300 mb-3">Recording</h3>
@@ -283,12 +323,23 @@ onMounted(() => {
               </p>
             </div>
 
+            <!-- Bundled model status -->
+            <div v-if="bundledModelPath" class="p-2 bg-green-900/20 border border-green-700/50 rounded">
+              <div class="flex items-center gap-2 text-xs">
+                <span class="text-green-400">Bundled Model</span>
+                <span class="text-gray-400">tiny (~75MB)</span>
+              </div>
+              <p class="text-[10px] text-gray-500 mt-1 truncate" :title="bundledModelPath">
+                {{ bundledModelPath }}
+              </p>
+            </div>
+
             <div>
               <label class="block text-xs text-gray-400 mb-2">Available Models</label>
               <div v-if="loadingModels" class="text-xs text-gray-500 italic">
                 Loading models...
               </div>
-              <div v-else-if="transcriptionStore.availableModels.length === 0" class="text-xs text-gray-500 italic">
+              <div v-else-if="transcriptionStore.availableModels.length === 0 && !bundledModelPath" class="text-xs text-gray-500 italic">
                 No models configured
               </div>
               <div v-else class="space-y-1 max-h-32 overflow-y-auto">

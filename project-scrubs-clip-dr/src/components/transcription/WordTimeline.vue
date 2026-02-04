@@ -17,7 +17,7 @@ const playbackStore = usePlaybackStore();
 const audioStore = useAudioStore();
 const { getHighlightedWordIndices } = useSearch();
 
-const hasAudio = computed(() => audioStore.hasFile);
+const hasAudio = computed(() => audioStore.hasAudio);
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);

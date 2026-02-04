@@ -6,6 +6,7 @@ import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
+import { useTranscriptionStore } from './transcription';
 import type { TrackPlacement, AudioLoadResult, Word, PartialTranscription, LiveTranscriptionState } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 
@@ -86,6 +87,7 @@ export const useRecordingStore = defineStore('recording', () => {
   let durationInterval: number | null = null;
   let recordingStartTime = 0;
   let transcriptionUnlisten: UnlistenFn | null = null;
+  let startedWithLiveTranscription = false;
 
   const microphoneDevices = computed(() =>
     devices.value.filter(d => d.is_input && !d.is_loopback)
@@ -238,8 +240,8 @@ export const useRecordingStore = defineStore('recording', () => {
     isPreparing.value = true;
 
     try {
-      // Use the last export folder or a temp directory
-      const outputDir = settingsStore.settings.lastExportFolder || '/tmp';
+      // Use the project folder for recordings
+      const outputDir = await settingsStore.getProjectFolder();
 
       // Check if we're recording system audio
       const isSystemAudio = source.value === 'system';
@@ -248,6 +250,8 @@ export const useRecordingStore = defineStore('recording', () => {
       // Now works with both microphone AND system audio (system audio streams to transcription buffer)
       const useLiveTranscription = enableLiveTranscription.value &&
         liveTranscriptionAvailable.value;
+
+      startedWithLiveTranscription = useLiveTranscription;
 
       console.log('[Recording] Start recording:', {
         source: source.value,
@@ -352,39 +356,38 @@ export const useRecordingStore = defineStore('recording', () => {
       durationInterval = null;
     }
 
-    // Clean up transcription listener
-    if (transcriptionUnlisten) {
-      transcriptionUnlisten();
-      transcriptionUnlisten = null;
-    }
-
     try {
-      // Check what type of recording we were doing
-      const wasUsingLiveTranscription = liveTranscription.value.isActive;
+      // Use the tracked flag from startRecording, not the reactive isActive
+      // (isActive may have been set to false by a premature isFinal event)
       const wasSystemAudio = source.value === 'system';
-      // Check if system audio used subprocess (not CPAL)
       const wasUsingSubprocess = wasSystemAudio &&
         systemAudioInfo.value?.method !== 'cpal-monitor';
 
       let result: RecordingResult;
       if (wasUsingSubprocess) {
         // Subprocess recording (pw-record/parecord)
-        // Stop transcription worker first if it was running
-        if (wasUsingLiveTranscription) {
+        if (startedWithLiveTranscription) {
           await invoke('stop_transcription_worker').catch((e) => {
             console.warn('[Recording] Failed to stop transcription worker:', e);
           });
         }
         result = await invoke<RecordingResult>('stop_system_audio_recording');
-      } else if (wasUsingLiveTranscription) {
+      } else if (startedWithLiveTranscription) {
         result = await invoke<RecordingResult>('stop_recording_with_transcription');
       } else {
         result = await invoke<RecordingResult>('stop_recording');
       }
 
+      // Clean up transcription listener AFTER stop commands complete
+      if (transcriptionUnlisten) {
+        transcriptionUnlisten();
+        transcriptionUnlisten = null;
+      }
+
       isRecording.value = false;
       currentLevel.value = 0;
       liveTranscription.value.isActive = false;
+      startedWithLiveTranscription = false;
 
       console.log('[Recording] Stopped:', result);
 
@@ -399,6 +402,12 @@ export const useRecordingStore = defineStore('recording', () => {
       error.value = e instanceof Error ? e.message : String(e);
       isRecording.value = false;
       liveTranscription.value.isActive = false;
+      startedWithLiveTranscription = false;
+      // Clean up transcription listener on error too
+      if (transcriptionUnlisten) {
+        transcriptionUnlisten();
+        transcriptionUnlisten = null;
+      }
       return null;
     }
   }
@@ -456,6 +465,19 @@ export const useRecordingStore = defineStore('recording', () => {
       audioStore.lastImportedPath = path;
 
       console.log('[Recording] Created track at position:', trackStart);
+
+      // Clear live transcription state (was display-only during recording)
+      liveTranscription.value = { words: [], isActive: false, lastChunkIndex: -1 };
+
+      // Re-transcribe the new track from the audio file for accurate timing
+      // Live transcription was for display only; this ensures words align with the track
+      const transcriptionStore = useTranscriptionStore();
+      if (path) {
+        console.log('[Recording] Triggering re-transcription for accurate timing');
+        transcriptionStore.reTranscribe().catch((e) => {
+          console.warn('[Recording] Re-transcription failed:', e);
+        });
+      }
     } catch (e) {
       console.error('[Recording] Failed to create track:', e);
       error.value = e instanceof Error ? e.message : String(e);
@@ -564,19 +586,35 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  // Track whether monitoring is using system audio (pw-record) or CPAL
+  let monitoringIsSystemAudio = false;
+
   // Start monitoring input level (without recording)
   async function startMonitoring(): Promise<void> {
     if (isMonitoring.value || isRecording.value) return;
 
     error.value = null;
 
-    // Check if input is muted first
-    await checkMuted();
+    // Determine if we should use system audio monitoring
+    const useSystemAudioMonitoring = source.value === 'system' &&
+      systemAudioInfo.value?.available &&
+      !systemAudioInfo.value?.cpal_monitor_device;
 
     try {
-      await invoke('start_monitoring', {
-        deviceId: selectedDeviceId.value,
-      });
+      if (useSystemAudioMonitoring) {
+        // System audio via pw-record: use dedicated system audio monitoring
+        await invoke('start_system_audio_monitoring');
+        monitoringIsSystemAudio = true;
+        console.log('[Recording] System audio monitoring started (pw-record)');
+      } else {
+        // Microphone or CPAL monitor device
+        await checkMuted();
+        await invoke('start_monitoring', {
+          deviceId: selectedDeviceId.value,
+        });
+        monitoringIsSystemAudio = false;
+        console.log('[Recording] CPAL monitoring started');
+      }
 
       isMonitoring.value = true;
 
@@ -588,8 +626,6 @@ export const useRecordingStore = defineStore('recording', () => {
           // Ignore polling errors
         }
       }, 50);
-
-      console.log('[Recording] Monitoring started');
     } catch (e) {
       console.error('[Recording] Failed to start monitoring:', e);
       error.value = e instanceof Error ? e.message : String(e);
@@ -606,8 +642,13 @@ export const useRecordingStore = defineStore('recording', () => {
     }
 
     try {
-      await invoke('stop_monitoring');
+      if (monitoringIsSystemAudio) {
+        await invoke('stop_system_audio_monitoring');
+      } else {
+        await invoke('stop_monitoring');
+      }
       isMonitoring.value = false;
+      monitoringIsSystemAudio = false;
       currentLevel.value = 0;
       console.log('[Recording] Monitoring stopped');
     } catch (e) {

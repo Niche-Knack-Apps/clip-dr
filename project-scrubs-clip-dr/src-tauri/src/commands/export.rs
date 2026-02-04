@@ -232,9 +232,20 @@ pub async fn export_audio_mp3(
         }
     }
 
+    // InterleavedPcm uses lame_encode_buffer_interleaved which always expects
+    // stereo interleaved data (divides sample count by 2). For mono audio,
+    // we must duplicate samples to stereo to avoid double-speed encoding.
+    let (encode_samples, encode_channels) = if channels == 1 {
+        log::info!("Converting mono ({} samples) to stereo for LAME encoding", all_samples.len());
+        let stereo: Vec<i16> = all_samples.iter().flat_map(|&s| [s, s]).collect();
+        (stereo, 2u16)
+    } else {
+        (all_samples, channels)
+    };
+
     // Set up LAME encoder
     let mut mp3_encoder = Builder::new().ok_or("Failed to create MP3 encoder")?;
-    mp3_encoder.set_num_channels(channels as u8).map_err(|e| format!("Failed to set channels: {:?}", e))?;
+    mp3_encoder.set_num_channels(encode_channels as u8).map_err(|e| format!("Failed to set channels: {:?}", e))?;
     mp3_encoder.set_sample_rate(sample_rate).map_err(|e| format!("Failed to set sample rate: {:?}", e))?;
 
     // Map bitrate to enum variant (LAME supports specific bitrates)
@@ -261,8 +272,8 @@ pub async fn export_audio_mp3(
 
     // Encode to MP3
     // Pre-allocate buffer: LAME needs roughly 1.25x input + 7200 bytes for safety
-    let input = InterleavedPcm(&all_samples);
-    let estimated_size = (all_samples.len() * 5 / 4) + 7200;
+    let input = InterleavedPcm(&encode_samples);
+    let estimated_size = (encode_samples.len() * 5 / 4) + 7200;
     let mut mp3_out: Vec<u8> = Vec::with_capacity(estimated_size);
 
     // Encode - uses spare_capacity_mut which returns MaybeUninit slice

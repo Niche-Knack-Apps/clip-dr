@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
+import { appLocalDataDir } from '@tauri-apps/api/path';
 import type { Settings, ASRModel, RecordingSource, Mp3Bitrate } from '@/shared/types';
 import { DEFAULT_SETTINGS } from '@/shared/constants';
 
@@ -139,6 +140,46 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setProjectFolder(path: string): void {
+    settings.value.projectFolder = path;
+    saveSettings();
+  }
+
+  async function browseProjectFolder(): Promise<string | null> {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select Project Folder',
+        defaultPath: settings.value.projectFolder || undefined,
+      });
+
+      if (selected && typeof selected === 'string') {
+        setProjectFolder(selected);
+        return selected;
+      }
+      return null;
+    } catch (e) {
+      console.error('Failed to browse for project folder:', e);
+      return null;
+    }
+  }
+
+  function resetProjectFolder(): void {
+    settings.value.projectFolder = '';
+    saveSettings();
+  }
+
+  /** Get the resolved project folder path (custom or app data dir) */
+  async function getProjectFolder(): Promise<string> {
+    const custom = settings.value.projectFolder;
+    if (custom && custom.trim() !== '') {
+      return custom;
+    }
+    // Default: app local data dir (~/.local/share/com.niche-knack.clip-doctor-scrubs/)
+    return await appLocalDataDir();
+  }
+
   loadSettings();
 
   return {
@@ -162,5 +203,10 @@ export const useSettingsStore = defineStore('settings', () => {
     setClipboardUsesInOutPoints,
     setDefaultRecordingSource,
     setDefaultMp3Bitrate,
+    // Project folder
+    setProjectFolder,
+    browseProjectFolder,
+    resetProjectFolder,
+    getProjectFolder,
   };
 });

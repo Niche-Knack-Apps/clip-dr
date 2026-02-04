@@ -41,6 +41,11 @@ export const usePlaybackStore = defineStore('playback', () => {
   let startOffset = 0;
   let rafId: number | null = null;
 
+  // Reverse scrub state - plays short audio snippets as playhead moves backward
+  let reverseScrubInterval: number | null = null;
+  let scrubSource: AudioBufferSourceNode | null = null;
+  let scrubGainNode: GainNode | null = null;
+
   const playbackTime = computed(() => currentTime.value);
   const loopStart = computed(() => selectionStore.selection.start);
   const loopEnd = computed(() => selectionStore.selection.end);
@@ -200,6 +205,9 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   async function play(): Promise<void> {
+    // Guard against double-calls (race condition when button + Space pressed quickly)
+    if (isPlaying.value) return;
+
     const activeTracks = getActiveTracks();
     console.log('[Playback] play() called, activeTracks:', activeTracks.length);
 
@@ -207,6 +215,9 @@ export const usePlaybackStore = defineStore('playback', () => {
       console.log('[Playback] No playable tracks');
       return;
     }
+
+    // Set playing flag immediately to prevent race conditions
+    isPlaying.value = true;
 
     await audioStore.resumeAudioContext();
     const ctx = audioStore.getAudioContext();
@@ -249,13 +260,13 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     startTime = ctx.currentTime;
     startOffset = playStart;
-    isPlaying.value = true;
 
     startTimeUpdate();
   }
 
   function pause(): void {
     stopAllNodes();
+    stopReverseScrub();
     stopTimeUpdate();
     isPlaying.value = false;
   }
@@ -272,9 +283,9 @@ export const usePlaybackStore = defineStore('playback', () => {
     if (isPlaying.value) {
       pause();
     } else {
-      if (playbackSpeed.value === 0) {
-        playbackSpeed.value = playDirection.value;
-      }
+      // Always resume in forward direction at normal speed
+      playbackSpeed.value = 1;
+      playDirection.value = 1;
       await play();
     }
   }
@@ -344,8 +355,8 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     if (wasPlaying) {
       pause();
-      startReversePlayback();
     }
+    startReversePlayback();
   }
 
   async function resetSpeed(): Promise<void> {
@@ -430,53 +441,61 @@ export const usePlaybackStore = defineStore('playback', () => {
 
       currentTime.value = newTime;
 
-      // Check if clips have changed at current time
-      const clipsAtTime = getClipsAtTime(newTime);
-      const activeClipIds = new Set(activeNodes.map(n => n.clipId));
-      const targetClipIds = new Set(clipsAtTime.map(c => c.clipId));
+      // Only manage continuous clip playback for forward direction.
+      // Reverse playback uses scrub snippets instead (handled by startReverseScrub).
+      if (playbackSpeed.value > 0) {
+        // Check if clips have changed at current time
+        const clipsAtTime = getClipsAtTime(newTime);
+        const activeClipIds = new Set(activeNodes.map(n => n.clipId));
+        const targetClipIds = new Set(clipsAtTime.map(c => c.clipId));
 
-      // Start new clips that weren't playing
-      for (const { track, clipId, buffer, clipStart } of clipsAtTime) {
-        if (!activeClipIds.has(clipId)) {
-          const offsetInClip = newTime - clipStart;
-          const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
-          if (node) {
-            activeNodes.push(node);
-            console.log('[Playback] Started new clip:', clipId);
+        // Start new clips that weren't playing
+        for (const { track, clipId, buffer, clipStart } of clipsAtTime) {
+          if (!activeClipIds.has(clipId)) {
+            const offsetInClip = newTime - clipStart;
+            const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
+            if (node) {
+              activeNodes.push(node);
+              console.log('[Playback] Started new clip:', clipId);
+            }
           }
         }
-      }
 
-      // Stop clips that ended
-      const nodesToRemove: TrackPlaybackNode[] = [];
-      for (const node of activeNodes) {
-        if (!targetClipIds.has(node.clipId)) {
-          try {
-            node.sourceNode.stop();
-            node.sourceNode.disconnect();
-            node.gainNode.disconnect();
-          } catch (e) {
-            // Ignore
+        // Stop clips that ended
+        const nodesToRemove: TrackPlaybackNode[] = [];
+        for (const node of activeNodes) {
+          if (!targetClipIds.has(node.clipId)) {
+            try {
+              node.sourceNode.stop();
+              node.sourceNode.disconnect();
+              node.gainNode.disconnect();
+            } catch (e) {
+              // Ignore
+            }
+            nodesToRemove.push(node);
           }
-          nodesToRemove.push(node);
         }
-      }
-      activeNodes = activeNodes.filter(n => !nodesToRemove.includes(n));
+        activeNodes = activeNodes.filter(n => !nodesToRemove.includes(n));
 
-      // Restart if we looped
-      if (needsRestart) {
+        // Restart if we looped
+        if (needsRestart) {
+          startTime = ctx.currentTime;
+          startOffset = newTime;
+          // Restart all clips at new position
+          stopAllNodes();
+          const clipsAtNewTime = getClipsAtTime(newTime);
+          for (const { track, clipId, buffer, clipStart } of clipsAtNewTime) {
+            const offsetInClip = newTime - clipStart;
+            const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
+            if (node) {
+              activeNodes.push(node);
+            }
+          }
+        }
+      } else if (needsRestart) {
+        // For reverse looping, just reset timing
         startTime = ctx.currentTime;
         startOffset = newTime;
-        // Restart all clips at new position
-        stopAllNodes();
-        const clipsAtNewTime = getClipsAtTime(newTime);
-        for (const { track, clipId, buffer, clipStart } of clipsAtNewTime) {
-          const offsetInClip = newTime - clipStart;
-          const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
-          if (node) {
-            activeNodes.push(node);
-          }
-        }
       }
 
       rafId = requestAnimationFrame(update);
@@ -487,10 +506,80 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   function startReversePlayback(): void {
     isPlaying.value = true;
-    startTime = audioStore.getAudioContext().currentTime;
+    const ctx = audioStore.getAudioContext();
+    startTime = ctx.currentTime;
     startOffset = currentTime.value;
+
+    // Ensure master gain exists for reverse scrub audio
+    if (!masterGain) {
+      masterGain = ctx.createGain();
+      masterGain.connect(ctx.destination);
+    }
+    masterGain.gain.value = volume.value;
+
     startTimeUpdate();
-    // Note: Audio won't play in reverse, only visual timeline moves
+    startReverseScrub();
+  }
+
+  // Play short audio snippets as the playhead scrubs backward
+  function startReverseScrub(): void {
+    stopReverseScrub();
+
+    const SCRUB_INTERVAL = 80; // ms between snippets
+    const SNIPPET_DURATION = 0.08; // 80ms snippets
+
+    reverseScrubInterval = window.setInterval(() => {
+      if (!isPlaying.value || playbackSpeed.value >= 0) {
+        stopReverseScrub();
+        return;
+      }
+
+      // Stop previous snippet
+      if (scrubSource) {
+        try { scrubSource.stop(); scrubSource.disconnect(); } catch {}
+        scrubSource = null;
+      }
+      if (scrubGainNode) {
+        try { scrubGainNode.disconnect(); } catch {}
+        scrubGainNode = null;
+      }
+
+      // Play a short snippet from the current playhead position
+      const time = currentTime.value;
+      const clipsAtTime = getClipsAtTime(time);
+      if (clipsAtTime.length === 0) return;
+
+      const ctx = audioStore.getAudioContext();
+      const { track, buffer, clipStart } = clipsAtTime[0];
+      const offsetInClip = time - clipStart;
+      if (offsetInClip < 0 || offsetInClip >= buffer.duration) return;
+
+      scrubSource = ctx.createBufferSource();
+      scrubSource.buffer = buffer;
+
+      scrubGainNode = ctx.createGain();
+      scrubGainNode.gain.value = track.volume * volume.value;
+
+      scrubSource.connect(scrubGainNode);
+      if (masterGain) scrubGainNode.connect(masterGain);
+
+      scrubSource.start(0, offsetInClip, SNIPPET_DURATION);
+    }, SCRUB_INTERVAL);
+  }
+
+  function stopReverseScrub(): void {
+    if (reverseScrubInterval !== null) {
+      clearInterval(reverseScrubInterval);
+      reverseScrubInterval = null;
+    }
+    if (scrubSource) {
+      try { scrubSource.stop(); scrubSource.disconnect(); } catch {}
+      scrubSource = null;
+    }
+    if (scrubGainNode) {
+      try { scrubGainNode.disconnect(); } catch {}
+      scrubGainNode = null;
+    }
   }
 
   function stopTimeUpdate(): void {

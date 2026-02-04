@@ -38,12 +38,12 @@ onMounted(async () => {
             const ext = '.' + path.split('.').pop()?.toLowerCase();
             if (SUPPORTED_FORMATS.includes(ext)) {
               settingsStore.setLastImportFolder(path);
-              await audioStore.loadFile(path);
+              await audioStore.importFile(path);
               return;
             }
           }
         }
-      } else if (event.payload.type === 'leave' || event.payload.type === 'cancel') {
+      } else if (event.payload.type === 'leave' || (event.payload.type as string) === 'cancel') {
         isDragging.value = false;
       }
     });
