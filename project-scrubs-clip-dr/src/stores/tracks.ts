@@ -7,9 +7,9 @@ import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
-  // 'ALL' means composite view, string means specific track, null means nothing selected
-  const selectedTrackId = ref<string | 'ALL' | null>(null);
-  const viewMode = ref<ViewMode>('selected');
+  // 'ALL' means composite view (default), string means specific track, null means nothing selected
+  const selectedTrackId = ref<string | 'ALL' | null>('ALL');
+  const viewMode = ref<ViewMode>('all');
 
   // Track color counter for automatic color assignment
   let colorIndex = 0;
@@ -23,12 +23,9 @@ export const useTracksStore = defineStore('tracks', () => {
   // Computed: Get selected track (null if 'ALL' or no selection)
   const selectedTrack = computed(() => {
     if (selectedTrackId.value === 'ALL' || selectedTrackId.value === null) {
-      console.log('[Tracks] selectedTrack computed: null (selectedTrackId is', selectedTrackId.value, ')');
       return null;
     }
-    const found = tracks.value.find((t) => t.id === selectedTrackId.value);
-    console.log('[Tracks] selectedTrack computed: looking for', selectedTrackId.value, 'found:', found?.name ?? 'none', 'tracks:', tracks.value.map(t => ({ id: t.id, name: t.name })));
-    return found ?? null;
+    return tracks.value.find((t) => t.id === selectedTrackId.value) ?? null;
   });
 
   // Computed: Timeline duration is the max end time of all tracks
@@ -98,9 +95,6 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value, track];
     console.log('[Tracks] Created track:', track.name, 'duration:', track.duration, 'at:', track.trackStart, 'source:', sourcePath);
 
-    // Auto-select new track
-    selectedTrackId.value = track.id;
-
     return track;
   }
 
@@ -114,13 +108,8 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Update selection if needed
     if (selectedTrackId.value === trackId) {
-      if (tracks.value.length > 0) {
-        // Select next track or last track
-        const newIndex = Math.min(index, tracks.value.length - 1);
-        selectedTrackId.value = tracks.value[newIndex].id;
-      } else {
-        selectedTrackId.value = null;
-      }
+      selectedTrackId.value = 'ALL';
+      viewMode.value = 'all';
     }
   }
 
@@ -167,7 +156,8 @@ export const useTracksStore = defineStore('tracks', () => {
 
   function clearTracks(): void {
     tracks.value = [];
-    selectedTrackId.value = null;
+    selectedTrackId.value = 'ALL';
+    viewMode.value = 'all';
     colorIndex = 0;
   }
 

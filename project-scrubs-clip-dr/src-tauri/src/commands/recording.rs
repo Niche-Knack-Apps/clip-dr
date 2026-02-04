@@ -1346,11 +1346,11 @@ fn link_monitor_to_pw_record(monitor_source: &str) -> Result<(), String> {
     }
 
     if links_created == 0 {
-        log::error!("Failed to create any audio links! Recording will have no audio.");
-        return Err("Failed to link monitor ports to pw-record. Check if the audio device has monitor ports.".to_string());
+        log::warn!("No explicit audio links created - PipeWire --target 0 should auto-link");
+    } else {
+        log::info!("Created {} audio link(s)", links_created);
     }
 
-    log::info!("Created {} audio link(s)", links_created);
     Ok(())
 }
 

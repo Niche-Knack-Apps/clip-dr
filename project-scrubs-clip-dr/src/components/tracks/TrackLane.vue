@@ -188,14 +188,14 @@ onUnmounted(() => {
 <template>
   <div
     :class="[
-      'flex border-b transition-colors',
+      'flex border-b border-l-2 transition-colors',
       isSelected
-        ? 'bg-track-active border-l-2 ring-1 ring-inset ring-opacity-30 border-gray-800'
+        ? 'bg-track-active ring-1 ring-inset ring-opacity-30 border-gray-800'
         : 'bg-track-bg hover:bg-track-hover border-gray-800',
     ]"
     :style="{
       height: `${TRACK_HEIGHT}px`,
-      borderLeftColor: isSelected ? track.color : undefined,
+      borderLeftColor: isSelected ? track.color : 'transparent',
       '--ring-color': isSelected ? track.color : undefined,
     }"
     @click="emit('select', track.id)"

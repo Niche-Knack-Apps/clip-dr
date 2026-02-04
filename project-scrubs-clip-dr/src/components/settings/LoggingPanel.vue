@@ -10,6 +10,7 @@ const filterLevel = ref<'all' | 'info' | 'warn' | 'error' | 'debug'>('all');
 const autoRefresh = ref(false);
 const clearing = ref(false);
 const downloading = ref(false);
+const downloadResult = ref<{ success: boolean; filename?: string; error?: string } | null>(null);
 
 let refreshInterval: number | null = null;
 
@@ -38,11 +39,23 @@ async function handleDownload() {
   if (!logger) return;
 
   downloading.value = true;
+  downloadResult.value = null;
   try {
     const result = await logger.downloadLogs();
+    downloadResult.value = result;
     if (!result.success) {
       console.error('Failed to download logs:', result.error);
     }
+    // Auto-clear success message after 5 seconds
+    if (result.success) {
+      setTimeout(() => {
+        if (downloadResult.value?.success) {
+          downloadResult.value = null;
+        }
+      }, 5000);
+    }
+  } catch (e) {
+    downloadResult.value = { success: false, error: String(e) };
   } finally {
     downloading.value = false;
   }
@@ -168,6 +181,16 @@ onUnmounted(() => {
       </Button>
     </div>
 
+    <!-- Download result feedback -->
+    <div v-if="downloadResult" class="download-feedback" :class="downloadResult.success ? 'download-success' : 'download-error'">
+      <span v-if="downloadResult.success">
+        Logs saved to: {{ downloadResult.filename }}
+      </span>
+      <span v-else>
+        Failed to download: {{ downloadResult.error }}
+      </span>
+    </div>
+
     <!-- Filter -->
     <div class="filter-row">
       <label class="filter-label">Filter:</label>
@@ -286,6 +309,26 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.download-feedback {
+  font-size: 0.75rem;
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.download-success {
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  color: #86efac;
+}
+
+.download-error {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
 }
 
 .filter-row {

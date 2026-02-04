@@ -328,6 +328,13 @@ export const usePlaybackStore = defineStore('playback', () => {
   async function speedUp(): Promise<void> {
     const wasPlaying = isPlaying.value;
 
+    // Re-anchor timing before speed change to prevent playhead jump
+    if (wasPlaying) {
+      const ctx = audioStore.getAudioContext();
+      startOffset = currentTime.value;
+      startTime = ctx.currentTime;
+    }
+
     if (playbackSpeed.value < 0) {
       playbackSpeed.value = 1;
       playDirection.value = 1;
@@ -345,6 +352,13 @@ export const usePlaybackStore = defineStore('playback', () => {
   function speedDown(): void {
     const wasPlaying = isPlaying.value;
 
+    // Re-anchor timing before speed change to prevent playhead jump
+    if (wasPlaying) {
+      const ctx = audioStore.getAudioContext();
+      startOffset = currentTime.value;
+      startTime = ctx.currentTime;
+    }
+
     if (playbackSpeed.value > 0) {
       playbackSpeed.value = -1;
       playDirection.value = -1;
@@ -361,6 +375,14 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   async function resetSpeed(): Promise<void> {
     const wasPlaying = isPlaying.value;
+
+    // Re-anchor timing before speed change to prevent playhead jump
+    if (wasPlaying) {
+      const ctx = audioStore.getAudioContext();
+      startOffset = currentTime.value;
+      startTime = ctx.currentTime;
+    }
+
     playbackSpeed.value = 1;
     playDirection.value = 1;
     if (wasPlaying) {
@@ -624,6 +646,15 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     if (isPlaying.value && playbackSpeed.value === targetSpeed) {
       return;
+    }
+
+    // Re-anchor timing BEFORE changing speed to prevent playhead jump.
+    // The RAF loop computes: startOffset + elapsed * speed
+    // If we change speed without re-anchoring, elapsed was accumulated at the old speed.
+    if (isPlaying.value) {
+      const ctx = audioStore.getAudioContext();
+      startOffset = currentTime.value;
+      startTime = ctx.currentTime;
     }
 
     playbackSpeed.value = targetSpeed;

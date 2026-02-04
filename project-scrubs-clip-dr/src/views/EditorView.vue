@@ -10,6 +10,7 @@ import { useTracksStore } from '@/stores/tracks';
 import { useSettingsStore } from '@/stores/settings';
 import { useClipboardStore } from '@/stores/clipboard';
 import { useUIStore } from '@/stores/ui';
+import { useTranscriptionStore } from '@/stores/transcription';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
 
@@ -22,9 +23,24 @@ const selectionStore = useSelectionStore();
 const tracksStore = useTracksStore();
 const settingsStore = useSettingsStore();
 const clipboardStore = useClipboardStore();
+const transcriptionStore = useTranscriptionStore();
 const uiStore = useUIStore();
 
 const focusSearch = inject<() => void>('focusSearch');
+
+// Load transcription for the newly selected track
+watch(
+  () => tracksStore.selectedTrackId,
+  (newId, oldId) => {
+    if (newId && newId !== oldId) {
+      // transcribeAudio checks for existing saved transcription first,
+      // falling back to running the model if needed
+      transcriptionStore.transcribeAudio().catch(() => {
+        // Silently fail - track may not have a transcription
+      });
+    }
+  }
+);
 
 // Auto-zoom to show all tracks when a new track is added
 watch(

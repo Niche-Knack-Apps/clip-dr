@@ -177,7 +177,12 @@ export const useSettingsStore = defineStore('settings', () => {
       return custom;
     }
     // Default: app local data dir (~/.local/share/com.niche-knack.clip-doctor-scrubs/)
-    return await appLocalDataDir();
+    try {
+      return await appLocalDataDir();
+    } catch (e) {
+      console.warn('[Settings] Failed to get app data dir, using /tmp:', e);
+      return '/tmp';
+    }
   }
 
   loadSettings();
