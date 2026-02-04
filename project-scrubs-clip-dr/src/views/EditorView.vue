@@ -51,6 +51,13 @@ watch(
       // which clamps to the selected track's duration (the new track is auto-selected
       // so getEffectiveDuration() would return just that track, not the full timeline)
       selectionStore.selection = { start: 0, end: tracksStore.timelineDuration };
+
+      // Also zoom track list to fit all content
+      const container = document.querySelector('[data-track-scroll]');
+      if (container) {
+        const containerWidth = container.clientWidth - uiStore.trackPanelWidth;
+        uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerWidth);
+      }
     }
   }
 );

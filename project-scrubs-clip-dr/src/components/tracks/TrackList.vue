@@ -310,6 +310,7 @@ function handleClipDragLeaveTrack() {
 
     <div
       ref="scrollContainerRef"
+      data-track-scroll
       class="max-h-48 overflow-y-auto overflow-x-auto"
       @wheel="handleWheel"
     >
