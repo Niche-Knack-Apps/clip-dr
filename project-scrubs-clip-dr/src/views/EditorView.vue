@@ -140,12 +140,7 @@ useKeyboardShortcuts({
     const { outPoint } = selectionStore.inOutPoints;
     if (outPoint !== null) playbackStore.seek(outPoint);
   },
-  onDeleteTrack: () => {
-    const selected = tracksStore.selectedTrack;
-    if (selected) {
-      tracksStore.deleteTrack(selected.id);
-    }
-  },
+  onDeleteTrack: () => clipboardStore.deleteSelected(),
   onFocusSearch: () => focusSearch?.(),
   // New shortcuts
   onJumpLayerStart: () => playbackStore.jumpToLayerStart(),
@@ -164,6 +159,34 @@ useKeyboardShortcuts({
   onCutDirect: () => clipboardStore.cut(),
   onPasteDirect: () => clipboardStore.paste(),
   onDeleteDirect: () => clipboardStore.deleteSelected(),
+  // Zoom shortcuts (+/-)
+  onZoomIn: () => uiStore.zoomTrackIn(),
+  onZoomOut: () => uiStore.zoomTrackOut(),
+  // Track selection cycling (Tab/Shift+Tab)
+  onSelectNextTrack: () => {
+    const tracks = tracksStore.tracks;
+    if (tracks.length === 0) return;
+    const currentId = tracksStore.selectedTrackId;
+    if (currentId === 'ALL' || currentId === null) {
+      tracksStore.selectTrack(tracks[0].id);
+    } else {
+      const idx = tracks.findIndex(t => t.id === currentId);
+      const nextIdx = (idx + 1) % tracks.length;
+      tracksStore.selectTrack(tracks[nextIdx].id);
+    }
+  },
+  onSelectPrevTrack: () => {
+    const tracks = tracksStore.tracks;
+    if (tracks.length === 0) return;
+    const currentId = tracksStore.selectedTrackId;
+    if (currentId === 'ALL' || currentId === null) {
+      tracksStore.selectTrack(tracks[tracks.length - 1].id);
+    } else {
+      const idx = tracks.findIndex(t => t.id === currentId);
+      const prevIdx = (idx - 1 + tracks.length) % tracks.length;
+      tracksStore.selectTrack(tracks[prevIdx].id);
+    }
+  },
 });
 </script>
 
