@@ -237,14 +237,30 @@ export const useClipboardStore = defineStore('clipboard', () => {
     return newTrack;
   }
 
-  // Delete selected track without copying to clipboard
+  // Delete in-place: no track → nothing; track + I/O → split and remove segment; track alone → delete track
   function deleteSelected(): boolean {
     const selectedTrack = tracksStore.selectedTrack;
-    if (!selectedTrack) return false;
+    if (!selectedTrack) return false; // No track selected → do nothing
 
-    tracksStore.deleteTrack(selectedTrack.id);
-    console.log(`[Clipboard] Deleted track ${selectedTrack.id}`);
-    return true;
+    const { inPoint, outPoint } = selectionStore.inOutPoints;
+
+    if (inPoint !== null && outPoint !== null) {
+      // In/out set → delete just that segment (split into two parts), leave in-place
+      const ctx = audioStore.getAudioContext();
+      const result = tracksStore.cutRegionFromTrack(
+        selectedTrack.id, inPoint, outPoint, ctx
+      );
+      if (result) {
+        selectionStore.clearInOutPoints();
+        // Don't put on clipboard — this is delete, not cut
+      }
+      return result !== null;
+    } else {
+      // No in/out → delete entire track, leave remaining tracks in-place
+      tracksStore.deleteTrack(selectedTrack.id);
+      console.log(`[Clipboard] Deleted track ${selectedTrack.id}`);
+      return true;
+    }
   }
 
   // Clear clipboard
