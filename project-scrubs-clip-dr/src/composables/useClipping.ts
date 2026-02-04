@@ -16,19 +16,44 @@ export function useClipping() {
   const selectedTrackId = computed(() => tracksStore.selectedTrackId);
   const viewMode = computed(() => tracksStore.viewMode);
 
-  const canCreateClip = computed(() => selectionStore.hasInOutPoints && tracksStore.selectedTrack !== null);
+  // Clip is available whenever in/out points are set and there's a usable track
+  const canCreateClip = computed(() => {
+    if (!selectionStore.hasInOutPoints) return false;
+    // Allow clipping from the selected track, or from any overlapping track when 'ALL' is selected
+    if (tracksStore.selectedTrack !== null) return true;
+    // When 'ALL' or no specific track selected, check if any track overlaps the in/out region
+    const { inPoint, outPoint } = selectionStore.inOutPoints;
+    if (inPoint === null || outPoint === null) return false;
+    return tracksStore.tracks.some(t =>
+      t.audioData.buffer && t.trackStart < outPoint && t.trackStart + t.duration > inPoint
+    );
+  });
+
+  // Find the best track to clip from: selected track, or the first overlapping track
+  function findClipSourceTrack(): Track | null {
+    const { inPoint, outPoint } = selectionStore.inOutPoints;
+    if (inPoint === null || outPoint === null) return null;
+
+    // Prefer the explicitly selected track
+    if (tracksStore.selectedTrack) return tracksStore.selectedTrack;
+
+    // Otherwise find the first track that overlaps the in/out region
+    return tracksStore.tracks.find(t =>
+      t.audioData.buffer && t.trackStart < outPoint && t.trackStart + t.duration > inPoint
+    ) ?? null;
+  }
 
   // Create a new track from the audio between in/out points
   function createClip(): Track | null {
-    const selectedTrack = tracksStore.selectedTrack;
-    if (!selectedTrack) {
-      console.log('[Clipping] No track selected');
-      return null;
-    }
-
     const { inPoint, outPoint } = selectionStore.inOutPoints;
     if (inPoint === null || outPoint === null) {
       console.log('[Clipping] In/Out points not set');
+      return null;
+    }
+
+    const selectedTrack = findClipSourceTrack();
+    if (!selectedTrack) {
+      console.log('[Clipping] No track found overlapping in/out region');
       return null;
     }
 
@@ -76,16 +101,16 @@ export function useClipping() {
     // Generate waveform for the clipped region
     const waveformData = tracksStore.generateWaveformFromBuffer(newBuffer);
 
-    // Create new track at current playhead position
+    // Place the clip at the in-point so it lines up with the original audio position
     const clipName = `Clip ${tracksStore.tracks.length + 1}`;
     const newTrack = tracksStore.createTrackFromBuffer(
       newBuffer,
       waveformData,
       clipName,
-      playbackStore.currentTime
+      inPoint
     );
 
-    console.log(`[Clipping] Created clip from ${relativeStart.toFixed(2)}s - ${relativeEnd.toFixed(2)}s at playhead ${playbackStore.currentTime.toFixed(2)}s`);
+    console.log(`[Clipping] Created clip from ${relativeStart.toFixed(2)}s - ${relativeEnd.toFixed(2)}s at timeline ${inPoint.toFixed(2)}s`);
     return newTrack;
   }
 
