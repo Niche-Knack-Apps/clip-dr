@@ -602,6 +602,24 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
+  // Slide tracks left to fill a gap. Moves all tracks whose start >= gapStart
+  // leftward by gapDuration seconds. Also shifts clip positions within those tracks.
+  function slideTracksLeft(gapStart: number, gapDuration: number): void {
+    if (gapDuration <= 0) return;
+    tracks.value = tracks.value.map(t => {
+      if (t.trackStart >= gapStart) {
+        const newTrackStart = Math.max(0, t.trackStart - gapDuration);
+        // Also shift any clips within the track
+        const newClips = t.clips?.map(c => ({
+          ...c,
+          clipStart: Math.max(0, c.clipStart - gapDuration),
+        }));
+        return { ...t, trackStart: newTrackStart, clips: newClips };
+      }
+      return t;
+    });
+  }
+
   // Finalize clip positions and recalculate track bounds after drag ends
   function finalizeClipPositions(trackId: string): void {
     const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
@@ -652,6 +670,7 @@ export const useTracksStore = defineStore('tracks', () => {
     cutRegionFromTrack,
     getTrackClips,
     setClipStart,
+    slideTracksLeft,
     finalizeClipPositions,
   };
 });

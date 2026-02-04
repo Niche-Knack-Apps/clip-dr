@@ -128,7 +128,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     return true;
   }
 
-  // Cut the selected region (copy + delete track or region)
+  // Cut the selected region (copy + delete + slide tracks left to fill gap)
   function cut(): boolean {
     const selectedTrack = tracksStore.selectedTrack;
     if (!selectedTrack) return false;
@@ -165,16 +165,23 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
         // Clear I/O points after cut
         selectionStore.clearInOutPoints();
+
+        // Slide remaining tracks left to fill the gap
+        const gapDuration = outPoint - inPoint;
+        tracksStore.slideTracksLeft(inPoint, gapDuration);
         return true;
       }
       return false;
     } else {
-      // Cutting the whole track - copy first, then delete
+      // Cutting the whole track - copy first, then delete and slide
+      const trackStart = selectedTrack.trackStart;
+      const trackDuration = selectedTrack.duration;
       const copied = copy();
       if (!copied) return false;
 
       tracksStore.deleteTrack(selectedTrack.id);
-      console.log(`[Clipboard] Cut entire track ${selectedTrack.id}`);
+      tracksStore.slideTracksLeft(trackStart, trackDuration);
+      console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, slid remaining tracks left`);
       return true;
     }
   }
