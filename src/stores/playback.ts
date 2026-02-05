@@ -32,7 +32,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Hold-to-play mode
   const holdMode = ref<'none' | 'forward' | 'reverse'>('none');
   const holdStartPosition = ref(0);
-
+  const reversedBuffers = ref<Map<string, AudioBuffer>>(new Map());
 
   // Multi-track playback nodes
   let activeNodes: TrackPlaybackNode[] = [];

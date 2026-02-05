@@ -39,6 +39,7 @@ const playheadColor = computed(() => settingsStore.settings.playheadColor);
 
 // Zoom constraints (same as ZoomedWaveform)
 const MIN_ZOOM_DURATION = 0.5;
+const MAX_ZOOM_DURATION = 60;
 const ZOOM_FACTOR = 0.15;
 
 // Scroll wheel zoom handler - resizes selection window (same behavior as Panel 2)

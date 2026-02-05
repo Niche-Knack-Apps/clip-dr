@@ -43,6 +43,7 @@ const DRAG_THRESHOLD = 5;
 
 // Zoom constraints
 const MIN_ZOOM_DURATION = 0.5; // Minimum 0.5 seconds visible
+const MAX_ZOOM_DURATION = 60; // Maximum 60 seconds visible (or full duration)
 const ZOOM_FACTOR = 0.15; // 15% zoom per scroll step
 
 const selection = computed(() => selectionStore.selection);

@@ -316,7 +316,7 @@ export class DebugLogger {
    * Initialize IndexedDB for storage
    */
   private _initIndexedDB(): Promise<void> {
-    return new Promise((resolve, _reject) => {
+    return new Promise((resolve, reject) => {
       try {
         const request = indexedDB.open(this.config.dbName, 1);
 

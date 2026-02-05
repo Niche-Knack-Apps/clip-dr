@@ -1,10 +1,12 @@
 import { computed } from 'vue';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
+import { useSettingsStore } from '@/stores/settings';
 
 export function usePlayback() {
   const playbackStore = usePlaybackStore();
   const selectionStore = useSelectionStore();
+  const settingsStore = useSettingsStore();
 
   const isPlaying = computed(() => playbackStore.isPlaying);
   const currentTime = computed(() => playbackStore.currentTime);

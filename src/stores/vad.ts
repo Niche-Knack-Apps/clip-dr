@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import type { VadResult, VadOptions } from '@/shared/types';
+import type { VadResult, VadOptions, SpeechSegment } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 

@@ -8,6 +8,7 @@ import { useVadStore } from './vad';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
+import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
 

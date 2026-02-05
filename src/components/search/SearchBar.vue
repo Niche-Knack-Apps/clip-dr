@@ -5,6 +5,7 @@ import { useSearch } from '@/composables/useSearch';
 const searchInput = ref<HTMLInputElement | null>(null);
 
 const {
+  query,
   hasResults,
   currentResultIndex,
   resultCount,
