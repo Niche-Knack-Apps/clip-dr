@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import type { Transcription, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata } from '@/shared/types';
+import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
@@ -75,7 +75,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const tracksStore = useTracksStore();
   const settingsStore = useSettingsStore();
 
-  const transcription = ref<Transcription | null>(null);
+  // ─── Per-track transcriptions (Map<trackId, TrackTranscription>) ───
+  const transcriptions = ref<Map<string, TrackTranscription>>(new Map());
+
+  // ─── Background job queue ───
+  const jobQueue = ref<TranscriptionJob[]>([]);
+  let processorRunning = false;
+
+  // ─── Global state ───
   const loading = ref(false);
   const progress = ref<TranscriptionProgress>({
     stage: 'loading',
@@ -87,31 +94,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const modelsDirectory = ref<string | null>(null);
   const availableModels = ref<ModelInfo[]>([]);
 
-  // Timing adjustments
-  const globalOffsetMs = ref(0);
-  const wordOffsetsMs = ref<Map<string, number>>(new Map());
-  const hasUnsavedChanges = ref(false);
-  const enableFalloff = ref(true); // Gradual pull effect for neighbors
-
   function getCustomPath(): string | null {
     const path = settingsStore.settings.modelsPath;
     return path && path.trim() !== '' ? path : null;
   }
 
-  // Check if whisper model is available on store initialization
+  // ─── Model checking ───
   async function checkModel(): Promise<boolean> {
     try {
       const customPath = getCustomPath();
-      console.log('[Transcription] Checking for model, customPath:', customPath);
       modelPath.value = await invoke<string>('check_whisper_model', { customPath });
-      console.log('[Transcription] Found model at:', modelPath.value);
       return true;
     } catch (e) {
-      console.log('[Transcription] Model not found:', e);
       modelPath.value = null;
       try {
         modelsDirectory.value = await invoke<string>('get_models_directory');
-        console.log('[Transcription] Default models directory:', modelsDirectory.value);
       } catch {
         modelsDirectory.value = null;
       }
@@ -131,20 +128,43 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   const hasModel = computed(() => modelPath.value !== null);
 
-  const words = computed(() => transcription.value?.words ?? []);
-  const fullText = computed(() => transcription.value?.fullText ?? '');
-  const hasTranscription = computed(() => transcription.value !== null);
+  // ─── Debug: log Map state ───
+  function logMapState(context: string): void {
+    const keys = Array.from(transcriptions.value.keys());
+    const sizes = keys.map(k => {
+      const t = transcriptions.value.get(k);
+      return `${k.slice(0, 8)}(${t?.words.length ?? 0}w)`;
+    });
+    console.log(`[Transcription][MAP] ${context} — ${keys.length} entries: [${sizes.join(', ')}]`);
+  }
 
-  // Get words with timing adjustments applied
-  const adjustedWords = computed((): Word[] => {
-    if (!transcription.value) return [];
+  // ─── Per-track getters ───
+  function hasTranscriptionForTrack(trackId: string): boolean {
+    return transcriptions.value.has(trackId);
+  }
 
-    const trackOffset = tracksStore.selectedTrack?.trackStart ?? 0;
-    const globalOffsetSec = globalOffsetMs.value / 1000;
+  function getTranscription(trackId: string): TrackTranscription | undefined {
+    return transcriptions.value.get(trackId);
+  }
 
-    return transcription.value.words.map((word) => {
-      const individualOffsetMs = wordOffsetsMs.value.get(word.id) ?? 0;
-      const totalOffsetSec = globalOffsetSec + (individualOffsetMs / 1000);
+  // Backwards-compat computed: true if the selected track has a transcription
+  const hasTranscription = computed(() => {
+    const sel = tracksStore.selectedTrackId;
+    if (!sel || sel === 'ALL') return false;
+    return transcriptions.value.has(sel);
+  });
+
+  // ─── Adjusted words (applies trackStart + wordOffsets) ───
+  function getAdjustedWords(trackId: string): Word[] {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return [];
+
+    const track = tracksStore.tracks.find(tr => tr.id === trackId);
+    const trackOffset = track?.trackStart ?? 0;
+
+    return t.words.map((word) => {
+      const individualOffsetMs = t.wordOffsets.get(word.id) ?? 0;
+      const totalOffsetSec = individualOffsetMs / 1000;
 
       return {
         ...word,
@@ -152,48 +172,49 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         end: Math.max(0, word.end + trackOffset + totalOffsetSec),
       };
     });
-  });
-
-  // Adjust global offset (shifts all words)
-  function setGlobalOffset(offsetMs: number): void {
-    globalOffsetMs.value = offsetMs;
-    hasUnsavedChanges.value = true;
   }
 
-  // Adjust individual word offset with automatic neighbor pushing and falloff
-  function setWordOffset(wordId: string, offsetMs: number, pushNeighbors: boolean = true): void {
-    if (!transcription.value) return;
+  // Backwards-compat computed for selected track
+  const adjustedWords = computed((): Word[] => {
+    const sel = tracksStore.selectedTrackId;
+    if (!sel || sel === 'ALL') return [];
+    return getAdjustedWords(sel);
+  });
 
-    const allWords = transcription.value.words;
+  // ─── Word offset (drag) with neighbor pushing/falloff ───
+  function setWordOffset(trackId: string, wordId: string, offsetMs: number, pushNeighbors: boolean = true): void {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return;
+
+    const allWords = t.words;
     const wordIndex = allWords.findIndex((w) => w.id === wordId);
     if (wordIndex === -1) return;
 
     const word = allWords[wordIndex];
-    const globalOffsetSec = globalOffsetMs.value / 1000;
     const newOffsetSec = offsetMs / 1000;
 
     // Get the previous offset for this word to calculate delta
-    const prevOffset = wordOffsetsMs.value.get(wordId) ?? 0;
+    const prevOffset = t.wordOffsets.get(wordId) ?? 0;
     const deltaMs = offsetMs - prevOffset;
 
     // Calculate the new adjusted times for this word
-    const newStart = word.start + globalOffsetSec + newOffsetSec;
-    const newEnd = word.end + globalOffsetSec + newOffsetSec;
+    const newStart = word.start + newOffsetSec;
+    const newEnd = word.end + newOffsetSec;
 
     // Set the offset for this word
     if (offsetMs === 0) {
-      wordOffsetsMs.value.delete(wordId);
+      t.wordOffsets.delete(wordId);
     } else {
-      wordOffsetsMs.value.set(wordId, offsetMs);
+      t.wordOffsets.set(wordId, offsetMs);
     }
 
     // Push neighbors if enabled
     if (pushNeighbors) {
-      const minGap = 0.01; // 10ms minimum gap between words
-      const falloffFactor = enableFalloff.value ? 0.6 : 1.0; // 60% of movement for each neighbor
-      const falloffRadius = enableFalloff.value ? 5 : 100; // How many neighbors to affect
+      const minGap = 0.01;
+      const falloffFactor = t.enableFalloff ? 0.6 : 1.0;
+      const falloffRadius = t.enableFalloff ? 5 : 100;
 
-      // Check and push previous words (if dragging left/earlier)
+      // Check and push previous words
       if (wordIndex > 0) {
         let prevIndex = wordIndex - 1;
         let requiredEndTime = newStart - minGap;
@@ -201,30 +222,24 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
         while (prevIndex >= 0 && distance <= falloffRadius) {
           const prevWord = allWords[prevIndex];
-          const prevCurrentOffset = wordOffsetsMs.value.get(prevWord.id) ?? 0;
-          const prevAdjustedEnd = prevWord.end + globalOffsetSec + (prevCurrentOffset / 1000);
+          const prevCurrentOffset = t.wordOffsets.get(prevWord.id) ?? 0;
 
-          // Apply falloff: pull neighbors with diminishing force
-          if (enableFalloff.value && deltaMs < 0) {
-            // Dragging left - apply falloff pull to previous words
+          if (t.enableFalloff && deltaMs < 0) {
             const pullFactor = Math.pow(falloffFactor, distance);
             const pullAmount = deltaMs * pullFactor;
-            if (Math.abs(pullAmount) > 1) { // Only pull if > 1ms
+            if (Math.abs(pullAmount) > 1) {
               const newPrevOffset = prevCurrentOffset + pullAmount;
-              wordOffsetsMs.value.set(prevWord.id, newPrevOffset);
+              t.wordOffsets.set(prevWord.id, newPrevOffset);
             }
           }
 
-          // Always prevent overlap (hard push)
-          const prevUpdatedOffset = wordOffsetsMs.value.get(prevWord.id) ?? 0;
-          const prevUpdatedEnd = prevWord.end + globalOffsetSec + (prevUpdatedOffset / 1000);
+          const prevUpdatedOffset = t.wordOffsets.get(prevWord.id) ?? 0;
+          const prevUpdatedEnd = prevWord.end + (prevUpdatedOffset / 1000);
 
           if (prevUpdatedEnd > requiredEndTime) {
-            // Need to push this word earlier to prevent overlap
             const pushAmount = prevUpdatedEnd - requiredEndTime;
             const newPrevOffset = prevUpdatedOffset - (pushAmount * 1000);
-            wordOffsetsMs.value.set(prevWord.id, newPrevOffset);
-            // Update required end time for next previous word
+            t.wordOffsets.set(prevWord.id, newPrevOffset);
             const prevWordDuration = prevWord.end - prevWord.start;
             requiredEndTime = requiredEndTime - prevWordDuration - minGap;
           }
@@ -234,7 +249,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       }
 
-      // Check and push next words (if dragging right/later)
+      // Check and push next words
       if (wordIndex < allWords.length - 1) {
         let nextIndex = wordIndex + 1;
         let requiredStartTime = newEnd + minGap;
@@ -242,30 +257,24 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
         while (nextIndex < allWords.length && distance <= falloffRadius) {
           const nextWord = allWords[nextIndex];
-          const nextCurrentOffset = wordOffsetsMs.value.get(nextWord.id) ?? 0;
-          const nextAdjustedStart = nextWord.start + globalOffsetSec + (nextCurrentOffset / 1000);
+          const nextCurrentOffset = t.wordOffsets.get(nextWord.id) ?? 0;
 
-          // Apply falloff: pull neighbors with diminishing force
-          if (enableFalloff.value && deltaMs > 0) {
-            // Dragging right - apply falloff pull to next words
+          if (t.enableFalloff && deltaMs > 0) {
             const pullFactor = Math.pow(falloffFactor, distance);
             const pullAmount = deltaMs * pullFactor;
-            if (Math.abs(pullAmount) > 1) { // Only pull if > 1ms
+            if (Math.abs(pullAmount) > 1) {
               const newNextOffset = nextCurrentOffset + pullAmount;
-              wordOffsetsMs.value.set(nextWord.id, newNextOffset);
+              t.wordOffsets.set(nextWord.id, newNextOffset);
             }
           }
 
-          // Always prevent overlap (hard push)
-          const nextUpdatedOffset = wordOffsetsMs.value.get(nextWord.id) ?? 0;
-          const nextUpdatedStart = nextWord.start + globalOffsetSec + (nextUpdatedOffset / 1000);
+          const nextUpdatedOffset = t.wordOffsets.get(nextWord.id) ?? 0;
+          const nextUpdatedStart = nextWord.start + (nextUpdatedOffset / 1000);
 
           if (nextUpdatedStart < requiredStartTime) {
-            // Need to push this word later to prevent overlap
             const pushAmount = requiredStartTime - nextUpdatedStart;
             const newNextOffset = nextUpdatedOffset + (pushAmount * 1000);
-            wordOffsetsMs.value.set(nextWord.id, newNextOffset);
-            // Update required start time for next word
+            t.wordOffsets.set(nextWord.id, newNextOffset);
             const nextWordDuration = nextWord.end - nextWord.start;
             requiredStartTime = requiredStartTime + nextWordDuration + minGap;
           }
@@ -275,203 +284,42 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       }
     }
-
-    hasUnsavedChanges.value = true;
   }
 
-  function setEnableFalloff(enabled: boolean): void {
-    enableFalloff.value = enabled;
+  function setEnableFalloff(trackId: string, enabled: boolean): void {
+    const t = transcriptions.value.get(trackId);
+    if (t) t.enableFalloff = enabled;
   }
 
-  // Update word text (for inline editing)
-  function updateWordText(wordId: string, newText: string): void {
-    if (!transcription.value) return;
+  // ─── Word text editing ───
+  function updateWordText(trackId: string, wordId: string, newText: string): void {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return;
 
-    const word = transcription.value.words.find((w) => w.id === wordId);
+    const word = t.words.find((w) => w.id === wordId);
     if (word) {
       useHistoryStore().pushState('Edit word');
       word.text = newText;
-      // Update full text
-      transcription.value.fullText = transcription.value.words.map((w) => w.text).join(' ');
-      hasUnsavedChanges.value = true;
-      // Auto-save
-      saveTranscription();
+      t.fullText = t.words.map((w) => w.text).join(' ');
+      saveTranscription(trackId);
     }
   }
 
-  // Get the current offset for a word
-  function getWordOffset(wordId: string): number {
-    return wordOffsetsMs.value.get(wordId) ?? 0;
+  // ─── Word offset getter ───
+  function getWordOffset(trackId: string, wordId: string): number {
+    return transcriptions.value.get(trackId)?.wordOffsets.get(wordId) ?? 0;
   }
 
-  // Ripple shift transcription after a region is deleted:
-  // Remove words within [inPoint, outPoint], shift words after outPoint left by gapDuration
-  function rippleShiftWords(inPoint: number, outPoint: number): void {
-    if (!transcription.value) return;
-
-    const gapDuration = outPoint - inPoint;
-    if (gapDuration <= 0) return;
-    useHistoryStore().pushState('Shift words');
-
-    const adjustedWordsList = adjustedWords.value;
-    const originalWords = transcription.value.words;
-
-    // Build set of word IDs to remove (words entirely within the cut region)
-    const idsToRemove = new Set<string>();
-    for (const w of adjustedWordsList) {
-      if (w.start >= inPoint && w.end <= outPoint) {
-        idsToRemove.add(w.id);
-      }
-    }
-
-    // Filter out removed words and shift remaining ones
-    const trackOffset = tracksStore.selectedTrack?.trackStart ?? 0;
-    const newWords = originalWords
-      .filter(w => !idsToRemove.has(w.id))
-      .map(w => {
-        // Apply existing offsets to get current position
-        const offsetMs = wordOffsetsMs.value.get(w.id) ?? 0;
-        const adjStart = w.start + trackOffset + globalOffsetMs.value / 1000 + offsetMs / 1000;
-
-        if (adjStart >= outPoint) {
-          // Word is after the cut - shift its base timing left
-          return {
-            ...w,
-            start: w.start - gapDuration,
-            end: w.end - gapDuration,
-          };
-        }
-        return w;
-      });
-
-    transcription.value = {
-      ...transcription.value,
-      words: newWords,
-      fullText: newWords.map(w => w.text).join(' '),
-    };
-
-    // Clear per-word offsets for removed words
-    for (const id of idsToRemove) {
-      wordOffsetsMs.value.delete(id);
-    }
-
-    hasUnsavedChanges.value = true;
-    console.log(`[Transcription] Ripple shifted: removed ${idsToRemove.size} words, shifted ${newWords.filter((_, i) => i >= 0).length} words left by ${gapDuration.toFixed(2)}s`);
+  // ─── Range/time queries ───
+  function getWordsInRange(trackId: string, start: number, end: number): Word[] {
+    const adjWords = getAdjustedWords(trackId);
+    return adjWords.filter((word) => word.end > start && word.start < end);
   }
 
-  // Clear all timing adjustments
-  function clearTimingAdjustments(): void {
-    useHistoryStore().pushState('Clear timing');
-    globalOffsetMs.value = 0;
-    wordOffsetsMs.value.clear();
-    hasUnsavedChanges.value = false;
-  }
+  function getWordAtTime(trackId: string, time: number): Word | null {
+    const adjWords = getAdjustedWords(trackId);
+    if (adjWords.length === 0) return null;
 
-  // Save transcription and timing metadata to file
-  async function saveTranscription(): Promise<void> {
-    const audioPath = getSelectedTrackPath();
-    if (!audioPath || !transcription.value) return;
-
-    const metadata: TranscriptionMetadata = {
-      audioPath,
-      globalOffsetMs: globalOffsetMs.value,
-      wordAdjustments: Array.from(wordOffsetsMs.value.entries()).map(([wordId, offsetMs]) => ({
-        wordId,
-        offsetMs,
-      })),
-      savedAt: Date.now(),
-      // Include full transcription data
-      words: transcription.value.words,
-      fullText: transcription.value.fullText,
-      language: transcription.value.language,
-    };
-
-    try {
-      await invoke('save_transcription_metadata', {
-        audioPath,
-        metadata,
-      });
-      hasUnsavedChanges.value = false;
-      console.log('[Transcription] Full transcription saved');
-    } catch (e) {
-      console.error('[Transcription] Failed to save transcription:', e);
-    }
-  }
-
-  // Alias for backwards compatibility
-  async function saveTimingMetadata(): Promise<void> {
-    return saveTranscription();
-  }
-
-  // Load transcription from file (returns true if found)
-  async function loadExistingTranscription(): Promise<boolean> {
-    const audioPath = getSelectedTrackPath();
-    if (!audioPath) return false;
-
-    // Get a track ID for the transcription reference
-    const trackId = tracksStore.selectedTrack?.id || tracksStore.tracks[0]?.id || generateId();
-
-    try {
-      const metadata = await invoke<TranscriptionMetadata | null>('load_transcription_metadata', {
-        audioPath,
-      });
-
-      if (metadata && metadata.words && metadata.words.length > 0) {
-        // Load full transcription from saved metadata
-        transcription.value = {
-          audioId: trackId,
-          words: metadata.words,
-          fullText: metadata.fullText || metadata.words.map(w => w.text).join(' '),
-          language: metadata.language || 'en',
-          processedAt: metadata.savedAt,
-        };
-
-        // Load timing adjustments
-        globalOffsetMs.value = metadata.globalOffsetMs || 0;
-        wordOffsetsMs.value.clear();
-        for (const adj of metadata.wordAdjustments || []) {
-          wordOffsetsMs.value.set(adj.wordId, adj.offsetMs);
-        }
-
-        console.log('[Transcription] Loaded existing transcription from file');
-        return true;
-      }
-
-      // If metadata exists but no words, just load timing adjustments
-      if (metadata) {
-        globalOffsetMs.value = metadata.globalOffsetMs || 0;
-        wordOffsetsMs.value.clear();
-        for (const adj of metadata.wordAdjustments || []) {
-          wordOffsetsMs.value.set(adj.wordId, adj.offsetMs);
-        }
-      }
-
-      return false;
-    } catch (e) {
-      console.log('[Transcription] No existing transcription found:', e);
-      return false;
-    }
-  }
-
-  // Alias for backwards compatibility
-  async function loadTimingMetadata(): Promise<void> {
-    await loadExistingTranscription();
-  }
-
-  function getWordsInRange(start: number, end: number): Word[] {
-    if (!transcription.value) return [];
-
-    // Use adjusted words for range queries
-    return adjustedWords.value.filter(
-      (word) => word.end > start && word.start < end
-    );
-  }
-
-  function getWordAtTime(time: number): Word | null {
-    if (!transcription.value) return null;
-
-    // Use adjusted words
-    const adjWords = adjustedWords.value;
     const idx = binarySearch(adjWords, time, (w) => w.start);
 
     for (let i = Math.max(0, idx - 1); i < Math.min(adjWords.length, idx + 2); i++) {
@@ -484,27 +332,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return null;
   }
 
-  function searchWords(query: string): SearchResult[] {
-    if (!transcription.value) return [];
+  // ─── Search ───
+  function searchWords(trackId: string, query: string): SearchResult[] {
+    const adjWords = getAdjustedWords(trackId);
+    if (adjWords.length === 0) return [];
 
     const queryWords = query.toLowerCase().trim().split(/\s+/);
-    // Filter out stopwords when checking if we have enough meaningful words
     const meaningfulWords = queryWords.filter(w => !SEARCH_STOPWORDS.has(w));
     if (meaningfulWords.length < SEARCH_MIN_WORDS) return [];
 
     const results: SearchResult[] = [];
-    // Use adjusted words for search
-    const allWords = adjustedWords.value;
     const searchQuery = queryWords.join(' ');
 
-    for (let i = 0; i <= allWords.length - queryWords.length; i++) {
-      const windowWords = allWords.slice(i, i + queryWords.length);
+    for (let i = 0; i <= adjWords.length - queryWords.length; i++) {
+      const windowWords = adjWords.slice(i, i + queryWords.length);
       const windowText = windowWords.map((w) => w.text.toLowerCase()).join(' ');
 
       if (windowText.includes(searchQuery) || searchQuery.includes(windowText)) {
         results.push({
           wordIndex: i,
-          word: allWords[i],
+          word: adjWords[i],
           matchStart: 0,
           matchEnd: queryWords.length,
         });
@@ -514,121 +361,307 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return results;
   }
 
-  // Try to load existing transcription, or run model if none exists
-  async function transcribeAudio(): Promise<void> {
-    if (loading.value) {
-      console.log('[Transcription] Already running, skipping');
-      return;
+  // ─── Cut/delete adjustments ───
+
+  /** Remove words in [cutStart, cutEnd] and shift remaining words left by the gap duration */
+  function adjustForCut(trackId: string, cutStart: number, cutEnd: number): void {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return;
+
+    const gapDuration = cutEnd - cutStart;
+    if (gapDuration <= 0) return;
+
+    const track = tracksStore.tracks.find(tr => tr.id === trackId);
+    const trackOffset = track?.trackStart ?? 0;
+
+    // Build set of word IDs to remove (words entirely within the cut region)
+    const idsToRemove = new Set<string>();
+    for (const w of t.words) {
+      const offsetMs = t.wordOffsets.get(w.id) ?? 0;
+      const adjStart = w.start + trackOffset + offsetMs / 1000;
+      const adjEnd = w.end + trackOffset + offsetMs / 1000;
+      if (adjStart >= cutStart && adjEnd <= cutEnd) {
+        idsToRemove.add(w.id);
+      }
     }
-    if (!tracksStore.hasAudio) {
-      error.value = 'No audio file loaded';
+
+    // Filter out removed words and shift remaining ones
+    const newWords = t.words
+      .filter(w => !idsToRemove.has(w.id))
+      .map(w => {
+        const offsetMs = t.wordOffsets.get(w.id) ?? 0;
+        const adjStart = w.start + trackOffset + offsetMs / 1000;
+
+        if (adjStart >= cutEnd) {
+          // Word is after the cut - shift its base timing left
+          return {
+            ...w,
+            start: w.start - gapDuration,
+            end: w.end - gapDuration,
+          };
+        }
+        return w;
+      });
+
+    // Clear per-word offsets for removed words
+    for (const id of idsToRemove) {
+      t.wordOffsets.delete(id);
+    }
+
+    t.words = newWords;
+    t.fullText = newWords.map(w => w.text).join(' ');
+
+    console.log(`[Transcription] adjustForCut(${trackId}): removed ${idsToRemove.size} words, shifted remaining left by ${gapDuration.toFixed(2)}s`);
+  }
+
+  /** Remove words in [deleteStart, deleteEnd] without shifting (gap left in place) */
+  function adjustForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return;
+
+    const track = tracksStore.tracks.find(tr => tr.id === trackId);
+    const trackOffset = track?.trackStart ?? 0;
+
+    const idsToRemove = new Set<string>();
+    for (const w of t.words) {
+      const offsetMs = t.wordOffsets.get(w.id) ?? 0;
+      const adjStart = w.start + trackOffset + offsetMs / 1000;
+      const adjEnd = w.end + trackOffset + offsetMs / 1000;
+      if (adjStart >= deleteStart && adjEnd <= deleteEnd) {
+        idsToRemove.add(w.id);
+      }
+    }
+
+    for (const id of idsToRemove) {
+      t.wordOffsets.delete(id);
+    }
+
+    t.words = t.words.filter(w => !idsToRemove.has(w.id));
+    t.fullText = t.words.map(w => w.text).join(' ');
+
+    console.log(`[Transcription] adjustForDelete(${trackId}): removed ${idsToRemove.size} words`);
+  }
+
+  /** Remove an entire track's transcription */
+  function removeTranscription(trackId: string): void {
+    console.log(`[Transcription][MAP] removeTranscription(${trackId.slice(0, 8)})`);
+    logMapState('BEFORE removeTranscription');
+    transcriptions.value.delete(trackId);
+    logMapState('AFTER removeTranscription');
+    // Also remove any pending jobs for this track
+    jobQueue.value = jobQueue.value.filter(j => j.trackId !== trackId);
+  }
+
+  // ─── Background job queue ───
+
+  function queueTranscription(trackId: string, priority: 'high' | 'normal' = 'normal'): void {
+    // Skip if already queued or running for this track
+    const existing = jobQueue.value.find(j => j.trackId === trackId && (j.status === 'queued' || j.status === 'running'));
+    if (existing) {
+      console.log(`[Transcription] Already queued/running for track ${trackId}, skipping`);
       return;
     }
 
-    loading.value = true;
-    error.value = null;
-    progress.value = { stage: 'loading', progress: 0, message: 'Checking for existing transcription...' };
+    const job: TranscriptionJob = {
+      id: generateId(),
+      trackId,
+      priority,
+      status: 'queued',
+      progress: 0,
+    };
+
+    jobQueue.value = [...jobQueue.value, job];
+    console.log(`[Transcription] Queued transcription for track ${trackId} (${priority})`);
+    kickProcessor();
+  }
+
+  function kickProcessor(): void {
+    if (processorRunning) return;
+    processNextJob();
+  }
+
+  async function processNextJob(): Promise<void> {
+    // Pick highest priority, oldest job
+    const pending = jobQueue.value
+      .filter(j => j.status === 'queued')
+      .sort((a, b) => {
+        if (a.priority === 'high' && b.priority !== 'high') return -1;
+        if (b.priority === 'high' && a.priority !== 'high') return 1;
+        return 0; // preserve insertion order
+      });
+
+    if (pending.length === 0) {
+      processorRunning = false;
+      loading.value = false;
+      return;
+    }
+
+    processorRunning = true;
+    const job = pending[0];
+    job.status = 'running';
+    jobQueue.value = [...jobQueue.value]; // trigger reactivity
+
+    // Update global loading state if this is the selected track
+    if (job.trackId === tracksStore.selectedTrackId) {
+      loading.value = true;
+      error.value = null;
+    }
 
     try {
-      // First, try to load existing transcription from JSON
-      const hasExisting = await loadExistingTranscription();
-      if (hasExisting) {
-        progress.value = { stage: 'complete', progress: 100, message: 'Loaded from file' };
-        loading.value = false;
-        return;
+      await runTranscriptionForTrack(job.trackId);
+      job.status = 'complete';
+      job.progress = 100;
+    } catch (e) {
+      job.status = 'error';
+      job.error = e instanceof Error ? e.message : String(e);
+      console.error(`[Transcription] Job failed for track ${job.trackId}:`, e);
+      if (job.trackId === tracksStore.selectedTrackId) {
+        error.value = job.error;
+      }
+    }
+
+    jobQueue.value = [...jobQueue.value];
+
+    // Update loading state
+    if (job.trackId === tracksStore.selectedTrackId) {
+      loading.value = false;
+    }
+
+    // Process next
+    processNextJob();
+  }
+
+  // ─── Load or queue ───
+
+  async function loadOrQueueTranscription(trackId: string): Promise<void> {
+    logMapState(`loadOrQueueTranscription(${trackId.slice(0, 8)})`);
+
+    // Already have it in memory?
+    if (transcriptions.value.has(trackId)) {
+      console.log(`[Transcription] Already in memory for track ${trackId.slice(0, 8)}, skipping`);
+      return;
+    }
+
+    // Try to load from disk
+    const loaded = await loadTranscriptionFromDisk(trackId);
+    if (loaded) {
+      logMapState(`AFTER disk load for ${trackId.slice(0, 8)}`);
+      return;
+    }
+
+    // Queue for background transcription
+    queueTranscription(trackId, 'high');
+  }
+
+  // ─── Disk persistence ───
+
+  function getTrackPath(trackId: string): string | null {
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    return track?.sourcePath ?? audioStore.lastImportedPath;
+  }
+
+  async function saveTranscription(trackId: string): Promise<void> {
+    const audioPath = getTrackPath(trackId);
+    const t = transcriptions.value.get(trackId);
+    if (!audioPath || !t) return;
+
+    const metadata: TranscriptionMetadata = {
+      audioPath,
+      globalOffsetMs: 0, // No longer used, kept for backwards compat
+      wordAdjustments: Array.from(t.wordOffsets.entries()).map(([wordId, offsetMs]) => ({
+        wordId,
+        offsetMs,
+      })),
+      savedAt: Date.now(),
+      words: t.words,
+      fullText: t.fullText,
+      language: t.language,
+    };
+
+    try {
+      await invoke('save_transcription_metadata', {
+        audioPath,
+        metadata,
+      });
+      console.log(`[Transcription] Saved transcription for track ${trackId}`);
+    } catch (e) {
+      console.error('[Transcription] Failed to save transcription:', e);
+    }
+  }
+
+  async function loadTranscriptionFromDisk(trackId: string): Promise<boolean> {
+    const audioPath = getTrackPath(trackId);
+    if (!audioPath) return false;
+
+    try {
+      const metadata = await invoke<TranscriptionMetadata | null>('load_transcription_metadata', {
+        audioPath,
+      });
+
+      if (metadata && metadata.words && metadata.words.length > 0) {
+        const wordOffsets = new Map<string, number>();
+        for (const adj of metadata.wordAdjustments || []) {
+          wordOffsets.set(adj.wordId, adj.offsetMs);
+        }
+
+        logMapState(`BEFORE disk load set(${trackId.slice(0, 8)})`);
+        transcriptions.value.set(trackId, {
+          trackId,
+          words: metadata.words,
+          fullText: metadata.fullText || metadata.words.map(w => w.text).join(' '),
+          language: metadata.language || 'en',
+          processedAt: metadata.savedAt,
+          wordOffsets,
+          enableFalloff: true,
+        });
+        logMapState(`AFTER disk load set(${trackId.slice(0, 8)})`);
+
+        console.log(`[Transcription] Loaded from disk for track ${trackId}`);
+        return true;
       }
 
-      // No existing transcription, need to run model
+      return false;
+    } catch (e) {
+      console.log(`[Transcription] No existing transcription for track ${trackId}:`, e);
+      return false;
+    }
+  }
+
+  // ─── Core transcription runner ───
+
+  async function runTranscriptionForTrack(trackId: string): Promise<void> {
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (!track) throw new Error(`Track ${trackId} not found`);
+
+    // Update progress for this job
+    if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'loading', progress: 5, message: 'Checking model...' };
+    }
 
-      // Check if model is available
-      const modelAvailable = await checkModel();
-      if (!modelAvailable) {
-        // Show custom path if configured, otherwise show default
-        const customPath = getCustomPath();
-        const dir = customPath || modelsDirectory.value || '~/.local/share/clip-doctor-scrubs/models';
-        error.value = `Whisper model not found. Please download ggml-tiny.bin from https://huggingface.co/ggerganov/whisper.cpp/tree/main and place it in: ${dir}`;
-        loading.value = false;
-        return;
-      }
+    const modelAvailable = await checkModel();
+    if (!modelAvailable) {
+      const customPath = getCustomPath();
+      const dir = customPath || modelsDirectory.value || '~/.local/share/clip-doctor-scrubs/models';
+      throw new Error(`Whisper model not found. Download ggml-tiny.bin from huggingface.co/ggerganov/whisper.cpp and place in: ${dir}`);
+    }
 
-      await runTranscription();
-    } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      // Check if it's a model-not-found error
-      if (errMsg.includes('not found') || errMsg.includes('model')) {
-        const customPath = getCustomPath();
-        const dir = customPath || modelsDirectory.value || '~/.local/share/clip-doctor-scrubs/models';
-        error.value = `Whisper model not found. Download ggml-tiny.bin from huggingface.co/ggerganov/whisper.cpp and place in: ${dir}`;
-      } else {
-        error.value = errMsg;
-      }
-      throw e;
-    } finally {
-      loading.value = false;
+    // Decide: use source file or mix from buffer
+    const audioPath = track.sourcePath;
+    const hasClips = track.clips && track.clips.length > 0;
+
+    if (audioPath && !hasClips) {
+      // Simple case: transcribe from file
+      await runTranscriptionFromFile(trackId, audioPath);
+    } else {
+      // Multi-clip or no source file: mix and transcribe from buffer
+      await runTranscriptionFromBuffer(trackId);
     }
   }
 
-  // Force re-transcription using CURRENT buffer state (after clips moved/cut)
-  async function reTranscribe(): Promise<void> {
-    if (!tracksStore.hasAudio) {
-      error.value = 'No audio file loaded';
-      return;
+  async function runTranscriptionFromFile(trackId: string, audioPath: string): Promise<void> {
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'transcribing', progress: 15, message: 'Transcribing audio...' };
     }
-
-    loading.value = true;
-    error.value = null;
-    progress.value = { stage: 'loading', progress: 0, message: 'Checking model...' };
-
-    // Clear existing transcription and timing adjustments
-    transcription.value = null;
-    clearTimingAdjustments();
-
-    try {
-      // Check if model is available
-      const modelAvailable = await checkModel();
-      if (!modelAvailable) {
-        const customPath = getCustomPath();
-        const dir = customPath || modelsDirectory.value || '~/.local/share/clip-doctor-scrubs/models';
-        error.value = `Whisper model not found. Please download ggml-tiny.bin from https://huggingface.co/ggerganov/whisper.cpp/tree/main and place it in: ${dir}`;
-        loading.value = false;
-        return;
-      }
-
-      // Use current buffer state instead of original file
-      await runTranscriptionFromBuffer();
-    } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      if (errMsg.includes('not found') || errMsg.includes('model')) {
-        const customPath = getCustomPath();
-        const dir = customPath || modelsDirectory.value || '~/.local/share/clip-doctor-scrubs/models';
-        error.value = `Whisper model not found. Download ggml-tiny.bin from huggingface.co/ggerganov/whisper.cpp and place in: ${dir}`;
-      } else {
-        error.value = errMsg;
-      }
-      throw e;
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  // Get the audio path for the currently selected track
-  function getSelectedTrackPath(): string | null {
-    const selectedTrack = tracksStore.selectedTrack;
-    return selectedTrack?.sourcePath ?? audioStore.lastImportedPath;
-  }
-
-  // Internal function to actually run the transcription
-  async function runTranscription(): Promise<void> {
-    const audioPath = getSelectedTrackPath();
-    if (!audioPath) {
-      error.value = 'No audio file available for selected track';
-      return;
-    }
-    console.log('[Transcription] Running on track:', tracksStore.selectedTrack?.name, 'path:', audioPath);
-
-    progress.value = { stage: 'loading', progress: 10, message: 'Preparing audio...' };
-    progress.value = { stage: 'transcribing', progress: 15, message: 'Transcribing audio...' };
 
     const customPath = getCustomPath();
     const result = await invoke<{ words: Word[]; text: string; language: string }>(
@@ -639,23 +672,27 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }
     );
 
-    progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
+    }
 
-    // Get a track ID for the transcription reference
-    const trackId = tracksStore.selectedTrack?.id || tracksStore.tracks[0]?.id || generateId();
-
-    transcription.value = {
-      audioId: trackId,
+    logMapState(`BEFORE set in runTranscriptionFromFile(${trackId.slice(0, 8)})`);
+    transcriptions.value.set(trackId, {
+      trackId,
       words: result.words.map((w) => ({ ...w, id: w.id || generateId() })),
       fullText: result.text,
       language: result.language,
       processedAt: Date.now(),
-    };
+      wordOffsets: new Map(),
+      enableFalloff: true,
+    });
+    logMapState(`AFTER set in runTranscriptionFromFile(${trackId.slice(0, 8)})`);
 
-    progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
+    }
 
-    // Save the transcription to JSON for future loads
-    await saveTranscription();
+    await saveTranscription(trackId);
   }
 
   // Mix track clips into a single buffer for transcription
@@ -665,7 +702,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     const audioContext = audioStore.getAudioContext();
 
-    // Find bounds
     let timelineStart = Infinity;
     let timelineEnd = 0;
     let sampleRate = 44100;
@@ -676,7 +712,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       sampleRate = clip.buffer.sampleRate;
     }
 
-    // Normalize to start at 0
     const totalDuration = timelineEnd - timelineStart;
     const totalSamples = Math.ceil(totalDuration * sampleRate);
     const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
@@ -702,39 +737,28 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return mixedBuffer;
   }
 
-  // Transcribe from current buffer state (used for re-transcription after edits)
-  async function runTranscriptionFromBuffer(): Promise<void> {
-    const selectedTrack = tracksStore.selectedTrack;
-    const trackId = selectedTrack?.id || tracksStore.tracks[0]?.id;
-
-    if (!trackId) {
-      error.value = 'No track available for transcription';
-      return;
+  async function runTranscriptionFromBuffer(trackId: string): Promise<void> {
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'loading', progress: 10, message: 'Preparing audio...' };
     }
 
-    progress.value = { stage: 'loading', progress: 10, message: 'Preparing current audio state...' };
-
-    // Mix track clips into single buffer
     const mixedBuffer = mixTrackClipsToBuffer(trackId);
-    if (!mixedBuffer) {
-      error.value = 'No audio clips to transcribe';
-      return;
+    if (!mixedBuffer) throw new Error('No audio clips to transcribe');
+
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'loading', progress: 20, message: 'Encoding audio...' };
     }
 
-    progress.value = { stage: 'loading', progress: 20, message: 'Encoding audio...' };
-
-    // Encode to WAV
     const wavData = encodeWav(mixedBuffer);
 
-    // Write to temp file
     const tempFileName = `transcribe_buffer_${Date.now()}.wav`;
     await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
     const tempDirPath = await tempDir();
     const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
 
-    console.log('[Transcription] Transcribing from current buffer state, temp file:', tempPath);
-
-    progress.value = { stage: 'transcribing', progress: 30, message: 'Transcribing audio...' };
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'transcribing', progress: 30, message: 'Transcribing audio...' };
+    }
 
     const customPath = getCustomPath();
     const result = await invoke<{ words: Word[]; text: string; language: string }>(
@@ -745,78 +769,68 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }
     );
 
-    progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
+    }
 
-    transcription.value = {
-      audioId: trackId,
+    logMapState(`BEFORE set in runTranscriptionFromBuffer(${trackId.slice(0, 8)})`);
+    transcriptions.value.set(trackId, {
+      trackId,
       words: result.words.map((w) => ({ ...w, id: w.id || generateId() })),
       fullText: result.text,
       language: result.language,
       processedAt: Date.now(),
-    };
+      wordOffsets: new Map(),
+      enableFalloff: true,
+    });
+    logMapState(`AFTER set in runTranscriptionFromBuffer(${trackId.slice(0, 8)})`);
 
-    progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
+    if (trackId === tracksStore.selectedTrackId) {
+      progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
+    }
 
-    // Save transcription
-    await saveTranscription();
+    await saveTranscription(trackId);
   }
 
-  function clearTranscription(): void {
-    transcription.value = null;
-    error.value = null;
-    progress.value = { stage: 'loading', progress: 0, message: '' };
-  }
-
-  function setMockTranscription(mockWords: Word[]): void {
-    if (!tracksStore.hasAudio) return;
-
-    const trackId = tracksStore.selectedTrack?.id || tracksStore.tracks[0]?.id || generateId();
-
-    transcription.value = {
-      audioId: trackId,
-      words: mockWords,
-      fullText: mockWords.map((w) => w.text).join(' '),
-      language: 'en',
-      processedAt: Date.now(),
-    };
-  }
-
+  // ─── Exposed return ───
   return {
-    transcription,
-    loading,
-    progress,
-    error,
+    transcriptions,
+    jobQueue,
+    // Per-track getters
+    hasTranscriptionForTrack,
+    getTranscription,
+    getAdjustedWords,
+    getWordsInRange,
+    getWordAtTime,
+    // Backwards-compat computeds (operate on selected track)
+    hasTranscription,
+    adjustedWords,
+    // Actions
+    queueTranscription,
+    loadOrQueueTranscription,
+    removeTranscription,
+    // Word editing
+    setWordOffset,
+    updateWordText,
+    getWordOffset,
+    setEnableFalloff,
+    // Search
+    searchWords,
+    // Adjustment
+    adjustForCut,
+    adjustForDelete,
+    // Persistence
+    saveTranscription,
+    // Model
+    checkModel,
+    loadAvailableModels,
+    hasModel,
     modelPath,
     modelsDirectory,
     availableModels,
-    hasModel,
-    words,
-    adjustedWords,
-    fullText,
-    hasTranscription,
-    globalOffsetMs,
-    wordOffsetsMs,
-    hasUnsavedChanges,
-    enableFalloff,
-    checkModel,
-    loadAvailableModels,
-    getWordsInRange,
-    getWordAtTime,
-    searchWords,
-    transcribeAudio,
-    reTranscribe,
-    clearTranscription,
-    setMockTranscription,
-    setGlobalOffset,
-    setWordOffset,
-    getWordOffset,
-    clearTimingAdjustments,
-    rippleShiftWords,
-    saveTimingMetadata,
-    saveTranscription,
-    loadTimingMetadata,
-    loadExistingTranscription,
-    setEnableFalloff,
-    updateWordText,
+    // Misc
+    loading,
+    progress,
+    error,
   };
 });
