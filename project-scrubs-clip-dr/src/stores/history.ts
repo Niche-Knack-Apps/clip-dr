@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Track, TrackClip, ViewMode, Transcription, SilenceRegion, InOutPoints } from '@/shared/types';
+import type { Track, TrackClip, ViewMode, Word, SilenceRegion, InOutPoints } from '@/shared/types';
 import { useTracksStore } from './tracks';
 import { useTranscriptionStore } from './transcription';
 import { useSelectionStore } from './selection';
@@ -9,6 +9,16 @@ import { useSilenceStore } from './silence';
 const MAX_HISTORY = 50;
 
 // ─── Snapshot shape ───────────────────────────────────────────────
+interface TranscriptionEntry {
+  trackId: string;
+  words: Word[];
+  fullText: string;
+  language: string;
+  processedAt: number;
+  wordOffsets: Map<string, number>;
+  enableFalloff: boolean;
+}
+
 interface Snapshot {
   label: string;
   tracks: {
@@ -18,9 +28,7 @@ interface Snapshot {
     viewMode: ViewMode;
   };
   transcription: {
-    transcription: Transcription | null;
-    globalOffsetMs: number;
-    wordOffsetsMs: Map<string, number>;
+    transcriptions: Map<string, TranscriptionEntry>;
   };
   selection: {
     inOutPoints: InOutPoints;
@@ -55,12 +63,20 @@ function cloneTrack(track: Track): Track {
   };
 }
 
-function cloneTranscription(t: Transcription | null): Transcription | null {
-  if (!t) return null;
-  return {
-    ...t,
-    words: t.words.map(w => ({ ...w })),
-  };
+function cloneTranscriptions(source: Map<string, { trackId: string; words: Word[]; fullText: string; language: string; processedAt: number; wordOffsets: Map<string, number>; enableFalloff: boolean }>): Map<string, TranscriptionEntry> {
+  const result = new Map<string, TranscriptionEntry>();
+  for (const [key, entry] of source) {
+    result.set(key, {
+      trackId: entry.trackId,
+      words: entry.words.map(w => ({ ...w })),
+      fullText: entry.fullText,
+      language: entry.language,
+      processedAt: entry.processedAt,
+      wordOffsets: new Map(entry.wordOffsets),
+      enableFalloff: entry.enableFalloff,
+    });
+  }
+  return result;
 }
 
 // ─── Store ────────────────────────────────────────────────────────
@@ -81,6 +97,10 @@ export const useHistoryStore = defineStore('history', () => {
     const selectionStore = useSelectionStore();
     const silenceStore = useSilenceStore();
 
+    const clonedTranscriptions = cloneTranscriptions(transcriptionStore.transcriptions);
+    const transKeys = Array.from(clonedTranscriptions.keys()).map(k => k.slice(0, 8));
+    console.log(`[History] captureSnapshot("${label}"): transcriptions Map keys: [${transKeys}]`);
+
     return {
       label,
       tracks: {
@@ -90,9 +110,7 @@ export const useHistoryStore = defineStore('history', () => {
         viewMode: tracksStore.viewMode,
       },
       transcription: {
-        transcription: cloneTranscription(transcriptionStore.transcription),
-        globalOffsetMs: transcriptionStore.globalOffsetMs,
-        wordOffsetsMs: new Map(transcriptionStore.wordOffsetsMs),
+        transcriptions: clonedTranscriptions,
       },
       selection: {
         inOutPoints: { ...selectionStore.inOutPoints },
@@ -120,10 +138,11 @@ export const useHistoryStore = defineStore('history', () => {
       tracksStore.selectedClipId = snapshot.tracks.selectedClipId;
       tracksStore.viewMode = snapshot.tracks.viewMode;
 
-      // Transcription
-      transcriptionStore.transcription = cloneTranscription(snapshot.transcription.transcription);
-      transcriptionStore.globalOffsetMs = snapshot.transcription.globalOffsetMs;
-      transcriptionStore.wordOffsetsMs = new Map(snapshot.transcription.wordOffsetsMs);
+      // Transcription — restore the Map
+      const snapshotKeys = Array.from(snapshot.transcription.transcriptions.keys()).map(k => k.slice(0, 8));
+      const currentKeys = Array.from(transcriptionStore.transcriptions.keys()).map(k => k.slice(0, 8));
+      console.log(`[History] restoreSnapshot: replacing transcriptions Map. Current: [${currentKeys}] → Snapshot: [${snapshotKeys}]`);
+      transcriptionStore.transcriptions = cloneTranscriptions(snapshot.transcription.transcriptions);
 
       // Selection
       selectionStore.inOutPoints = { ...snapshot.selection.inOutPoints };
