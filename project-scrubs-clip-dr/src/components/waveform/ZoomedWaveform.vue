@@ -235,7 +235,7 @@ function handleWheel(event: WheelEvent) {
   if (duration <= 0) return;
 
   const currentDuration = selection.value.end - selection.value.start;
-  const maxDuration = Math.min(MAX_ZOOM_DURATION, duration);
+  const maxDuration = duration;
 
   // Determine zoom direction: scroll up = zoom in, scroll down = zoom out
   const zoomIn = event.deltaY < 0;

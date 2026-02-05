@@ -5,7 +5,6 @@ import { TRACK_COLORS } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
-import { useAudioStore } from './audio';
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
@@ -156,6 +155,23 @@ export const useTracksStore = defineStore('tracks', () => {
     }
   }
 
+  // Clear a track's audio data but keep the empty track shell
+  function clearTrackAudio(trackId: string): void {
+    const index = tracks.value.findIndex((t) => t.id === trackId);
+    if (index === -1) return;
+    useHistoryStore().pushState('Clear track audio');
+
+    const track = tracks.value[index];
+    tracks.value[index] = {
+      ...track,
+      audioData: { buffer: null, waveformData: [], sampleRate: track.audioData.sampleRate, channels: track.audioData.channels },
+      clips: undefined,
+      duration: 0,
+    };
+    tracks.value = [...tracks.value];
+    console.log('[Tracks] Cleared audio from track:', trackId);
+  }
+
   // Select a track or 'ALL' for composite view
   function selectTrack(trackId: string | 'ALL'): void {
     selectedTrackId.value = trackId;
@@ -289,6 +305,27 @@ export const useTracksStore = defineStore('tracks', () => {
 
     const existingBuffer = track.audioData.buffer;
 
+    // Empty track — just set the new buffer directly
+    if (!existingBuffer) {
+      const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
+      if (trackIndex !== -1) {
+        const newWaveformData = generateWaveformFromBuffer(buffer);
+        tracks.value[trackIndex] = {
+          ...track,
+          audioData: {
+            buffer,
+            waveformData: newWaveformData,
+            sampleRate: buffer.sampleRate,
+            channels: buffer.numberOfChannels,
+          },
+          duration: buffer.duration,
+        };
+        tracks.value = [...tracks.value];
+      }
+      console.log(`[Tracks] Set audio on empty track ${track.name}, duration: ${buffer.duration.toFixed(2)}s`);
+      return true;
+    }
+
     // Handle sample rate mismatch by using the existing track's sample rate
     // The buffer should already be at the correct sample rate from clipboard
     if (buffer.sampleRate !== existingBuffer.sampleRate) {
@@ -368,6 +405,10 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // For now, moving to another track means merging at the target's end
     // The source track gets deleted and its audio appends to target
+    if (!sourceTrack.audioData.buffer) {
+      console.log('[Tracks] Source track is empty, nothing to move');
+      return false;
+    }
     const success = appendAudioToTrack(
       targetTrackId,
       sourceTrack.audioData.buffer,
@@ -389,7 +430,8 @@ export const useTracksStore = defineStore('tracks', () => {
     trackId: string,
     inPoint: number,
     outPoint: number,
-    audioContext: AudioContext
+    audioContext: AudioContext,
+    keepTrack = false
   ): { buffer: AudioBuffer; waveformData: number[] } | null {
     const track = tracks.value.find((t) => t.id === trackId);
     if (!track) {
@@ -400,10 +442,12 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // ── Multi-clip track: process each clip individually ──
     if (track.clips && track.clips.length > 0) {
-      return cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext);
+      return cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, keepTrack);
     }
 
     // ── Single-buffer track (original path) ──
+    if (!track.audioData.buffer) return null; // Empty track, nothing to cut
+
     // Convert timeline coordinates to track-relative
     const trackStart = track.trackStart;
     const relativeIn = inPoint - trackStart;
@@ -442,9 +486,23 @@ export const useTracksStore = defineStore('tracks', () => {
     const hasAudioAfter = cutEnd < track.duration - 0.001;
 
     if (!hasAudioBefore && !hasAudioAfter) {
-      // Entire track was cut - delete it
-      deleteTrack(trackId);
-      console.log('[Tracks] Entire track cut, deleted');
+      if (keepTrack) {
+        // Clear audio but preserve the empty track shell
+        const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+        if (trackIndex !== -1) {
+          tracks.value[trackIndex] = {
+            ...track,
+            audioData: { buffer: null, waveformData: [], sampleRate: buffer.sampleRate, channels: buffer.numberOfChannels },
+            clips: undefined,
+            duration: 0,
+          };
+          tracks.value = [...tracks.value];
+        }
+        console.log('[Tracks] Entire track cut, kept empty');
+      } else {
+        deleteTrack(trackId);
+        console.log('[Tracks] Entire track cut, deleted');
+      }
       return { buffer: cutBuffer, waveformData: cutWaveform };
     }
 
@@ -519,7 +577,8 @@ export const useTracksStore = defineStore('tracks', () => {
     trackId: string,
     inPoint: number,
     outPoint: number,
-    audioContext: AudioContext
+    audioContext: AudioContext,
+    keepTrack = false
   ): { buffer: AudioBuffer; waveformData: number[] } | null {
     const clips = track.clips!;
     const newClips: TrackClip[] = [];
@@ -623,8 +682,22 @@ export const useTracksStore = defineStore('tracks', () => {
     if (trackIndex === -1) return { buffer: mixedCut, waveformData: cutWaveform };
 
     if (newClips.length === 0) {
-      deleteTrack(trackId);
-      console.log('[Tracks] All clips cut from track, deleted');
+      if (keepTrack) {
+        // Clear audio but preserve the empty track shell
+        if (trackIndex !== -1) {
+          tracks.value[trackIndex] = {
+            ...track,
+            audioData: { buffer: null, waveformData: [], sampleRate, channels: maxChannels },
+            clips: undefined,
+            duration: 0,
+          };
+          tracks.value = [...tracks.value];
+        }
+        console.log('[Tracks] All clips cut from track, kept empty');
+      } else {
+        deleteTrack(trackId);
+        console.log('[Tracks] All clips cut from track, deleted');
+      }
       return { buffer: mixedCut, waveformData: cutWaveform };
     }
 
@@ -651,6 +724,9 @@ export const useTracksStore = defineStore('tracks', () => {
     if (track.clips && track.clips.length > 0) {
       return track.clips;
     }
+
+    // Empty track (null buffer) — no clips to render
+    if (!track.audioData.buffer) return [];
 
     // Convert single audioData to a clip for uniform handling
     // Use activeDrag position if this track is being dragged, so clip moves visually
@@ -866,7 +942,7 @@ export const useTracksStore = defineStore('tracks', () => {
       // Check overlap
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-      const result = cutRegionFromTrack(trackId, inPoint, outPoint, audioContext);
+      const result = cutRegionFromTrack(trackId, inPoint, outPoint, audioContext, true);
       if (result) {
         cutResults.buffers.push(result.buffer);
         cutResults.waveforms.push(result.waveformData);
@@ -904,6 +980,7 @@ export const useTracksStore = defineStore('tracks', () => {
       if (overlapEnd <= overlapStart) continue;
 
       const buffer = track.audioData.buffer;
+      if (!buffer) continue; // Empty track, skip
       sampleRate = buffer.sampleRate;
       maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
 
@@ -972,6 +1049,10 @@ export const useTracksStore = defineStore('tracks', () => {
         activeDrag.value = null;
         tracks.value = [...tracks.value];
       }
+      // Reset the timeline duration floor now that drag is complete.
+      // During drag, minTimelineDuration prevents flickering, but after
+      // finalization the timeline should reflect actual content bounds.
+      minTimelineDuration.value = 0;
       return;
     }
 
@@ -987,6 +1068,9 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Trigger reactivity
     tracks.value = [...tracks.value];
+
+    // Reset the timeline duration floor now that drag is complete.
+    minTimelineDuration.value = 0;
   }
 
   // Delete a specific clip from a track
@@ -1032,6 +1116,60 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
+  }
+
+  // Remove a clip from a track but ALWAYS keep the track (even if it becomes empty).
+  // Used by cut operations where the clip is selected — the track should persist.
+  function removeClipKeepTrack(trackId: string, clipId: string): void {
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return;
+    useHistoryStore().pushState('Remove clip (keep track)');
+
+    const track = tracks.value[trackIndex];
+
+    // Single-buffer track (virtual clip id = trackId + '-main'): clear audio but keep track
+    if (clipId === track.id + '-main') {
+      tracks.value[trackIndex] = {
+        ...track,
+        audioData: { buffer: null, waveformData: [], sampleRate: track.audioData.sampleRate, channels: track.audioData.channels },
+        clips: undefined,
+        duration: 0,
+      };
+      tracks.value = [...tracks.value];
+      console.log(`[Tracks] Removed main audio from track ${trackId}, track preserved`);
+      return;
+    }
+
+    // Multi-clip track: remove the clip
+    if (!track.clips || track.clips.length === 0) return;
+
+    const newClips = track.clips.filter(c => c.id !== clipId);
+
+    if (newClips.length === 0) {
+      // No clips left — keep track as empty
+      tracks.value[trackIndex] = {
+        ...track,
+        clips: undefined,
+        audioData: { buffer: null, waveformData: [], sampleRate: track.audioData.sampleRate, channels: track.audioData.channels },
+        duration: 0,
+      };
+    } else {
+      const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
+      const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+      tracks.value[trackIndex] = {
+        ...track,
+        clips: newClips,
+        trackStart: firstClipStart,
+        duration: lastClipEnd - firstClipStart,
+      };
+    }
+    tracks.value = [...tracks.value];
+
+    if (selectedClipId.value === clipId) {
+      selectedClipId.value = null;
+    }
+
+    console.log(`[Tracks] Removed clip ${clipId} from track ${trackId}, track preserved, ${newClips.length} clips remain`);
   }
 
   // Split a clip at a specific time, returning the two resulting clips
@@ -1114,7 +1252,7 @@ export const useTracksStore = defineStore('tracks', () => {
     let currentClips: TrackClip[];
     if (track.clips && track.clips.length > 0) {
       currentClips = [...track.clips];
-    } else {
+    } else if (track.audioData.buffer) {
       // Convert main audio to a clip
       currentClips = [{
         id: generateId(),
@@ -1123,6 +1261,9 @@ export const useTracksStore = defineStore('tracks', () => {
         clipStart: track.trackStart,
         duration: track.duration,
       }];
+    } else {
+      // Empty track — start with no existing clips
+      currentClips = [];
     }
 
     // Check if playhead falls within any existing clip - if so, split it
@@ -1181,13 +1322,22 @@ export const useTracksStore = defineStore('tracks', () => {
     minTimelineDuration.value = 0;
   }
 
-  // Add an empty track (tiny silent buffer - essentially invisible)
+  // Add a truly empty track — null buffer, zero duration, no audio at all
   function addEmptyTrack(): void {
-    const ctx = useAudioStore().getAudioContext();
-    const sampleRate = 44100;
-    const silentBuffer = ctx.createBuffer(1, 100, sampleRate); // ~2ms silence (invisible)
+    useHistoryStore().pushState('Add track');
     const name = `Track ${tracks.value.length + 1}`;
-    const track = createTrackFromBuffer(silentBuffer, null, name);
+    const track: Track = {
+      id: generateId(),
+      name,
+      audioData: { buffer: null, waveformData: [], sampleRate: 44100, channels: 1 },
+      trackStart: 0,
+      duration: 0,
+      color: getNextColor(),
+      muted: false,
+      solo: false,
+      volume: 1,
+    };
+    tracks.value = [...tracks.value, track];
     selectTrack(track.id);
   }
 
@@ -1202,6 +1352,7 @@ export const useTracksStore = defineStore('tracks', () => {
     hasAudio,
     createTrackFromBuffer,
     deleteTrack,
+    clearTrackAudio,
     selectTrack,
     selectClip,
     clearClipSelection,
@@ -1228,6 +1379,7 @@ export const useTracksStore = defineStore('tracks', () => {
     extractRegionFromAllTracks,
     finalizeClipPositions,
     deleteClipFromTrack,
+    removeClipKeepTrack,
     splitClipAtTime,
     insertClipAtPlayhead,
     addEmptyTrack,

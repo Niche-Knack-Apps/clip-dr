@@ -179,8 +179,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const gapStart = clip.clipStart;
       const gapDuration = clip.duration;
 
-      // Delete the clip
-      tracksStore.deleteClipFromTrack(trackId, clip.id);
+      // Remove the clip but keep the track (clip was selected, not the track)
+      tracksStore.removeClipKeepTrack(trackId, clip.id);
 
       // Slide remaining clips left to close the gap
       tracksStore.slideTracksLeft(gapStart, gapDuration);
@@ -228,7 +228,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       selectionStore.clearInOutPoints();
       return results.buffers.length > 0;
     } else {
-      // No I/O points - cut the target track entirely
+      // No I/O points - cut the target track entirely (keep empty track)
       const selectedTrack = getTargetTrack();
       if (!selectedTrack) return false;
 
@@ -237,9 +237,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const copied = copy();
       if (!copied) return false;
 
-      tracksStore.deleteTrack(selectedTrack.id);
+      tracksStore.clearTrackAudio(selectedTrack.id);
       tracksStore.slideTracksLeft(trackStart, trackDuration);
-      console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, slid remaining tracks left`);
+      console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, kept empty, slid remaining tracks left`);
       return true;
     }
     } finally { historyStore.endBatch(); }
