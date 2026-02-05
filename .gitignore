@@ -5,6 +5,17 @@ node_modules/
 dist/
 target/
 
+# Build artifacts
+*.apk
+*.aab
+*.AppImage
+*.deb
+*.exe
+*.msi
+*.dmg
+*.zip
+*.blockmap
+
 # Flatpak builder cache
 packaging/flatpak/.flatpak-builder/
 
