@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, computed, ref, watch } from 'vue';
+import { inject, computed, ref, watch, nextTick } from 'vue';
 import FullWaveform from '@/components/waveform/FullWaveform.vue';
 import ZoomedWaveform from '@/components/waveform/ZoomedWaveform.vue';
 import WordTimeline from '@/components/transcription/WordTimeline.vue';
@@ -12,9 +12,11 @@ import { useClipboardStore } from '@/stores/clipboard';
 import { useUIStore } from '@/stores/ui';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
+import { useClipping } from '@/composables/useClipping';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
 
 const { effectiveDuration } = useEffectiveAudio();
+const { createClip } = useClipping();
 
 // Check for audio using tracks store instead of audioStore.hasFile
 const hasAudio = computed(() => tracksStore.hasAudio);
@@ -43,10 +45,12 @@ watch(
 );
 
 // Set selection to full timeline when a new track is added
+// Uses nextTick to ensure this runs AFTER the track-selection watcher
 watch(
   () => tracksStore.tracks.length,
-  (newLen, oldLen) => {
+  async (newLen, oldLen) => {
     if (newLen > (oldLen ?? 0) && tracksStore.timelineDuration > 0) {
+      await nextTick();
       selectionStore.selection = { start: 0, end: tracksStore.timelineDuration };
     }
   }
@@ -152,8 +156,7 @@ useKeyboardShortcuts({
   onSetIn: () => selectionStore.setInPoint(playbackStore.currentTime),
   onSetOut: () => selectionStore.setOutPoint(playbackStore.currentTime),
   onCreateClip: () => {
-    // Create clip is now just paste from clipboard
-    clipboardStore.paste();
+    createClip();
   },
   onJumpStart: () => playbackStore.seek(0),
   onJumpEnd: () => playbackStore.seek(effectiveDuration.value),

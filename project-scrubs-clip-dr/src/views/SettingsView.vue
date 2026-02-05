@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { appLocalDataDir } from '@tauri-apps/api/path';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Slider from '@/components/ui/Slider.vue';
@@ -9,7 +10,7 @@ import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.3.0';
 
 const emit = defineEmits<{
   close: [];
@@ -23,6 +24,7 @@ const debugError = ref<string | null>(null);
 const downloadingModel = ref<string | null>(null);
 const downloadError = ref<string | null>(null);
 const bundledModelPath = ref<string | null>(null);
+const defaultProjectFolder = ref<string>('');
 
 const displayPath = computed(() => {
   const path = settingsStore.settings.modelsPath;
@@ -100,8 +102,13 @@ async function downloadModel(model: { name: string; filename: string; downloadUr
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   refreshModels();
+  try {
+    defaultProjectFolder.value = await appLocalDataDir();
+  } catch {
+    defaultProjectFolder.value = '(app data directory)';
+  }
 });
 </script>
 
@@ -209,7 +216,8 @@ onMounted(() => {
               </Button>
             </div>
             <p class="text-[10px] text-gray-500">
-              Recordings and project files are saved here. Default: ~/.local/share/com.niche-knack.clip-doctor-scrubs/
+              Recordings and project files are saved here.
+              <template v-if="defaultProjectFolder"> Default: {{ defaultProjectFolder }}</template>
             </p>
           </div>
         </div>
@@ -319,7 +327,8 @@ onMounted(() => {
                 </Button>
               </div>
               <p class="text-xs text-gray-500 mt-1">
-                Default: ~/.local/share/clip-doctor-scrubs/models
+                <template v-if="defaultProjectFolder">Default: {{ defaultProjectFolder }}models/</template>
+                <template v-else>Default: app data directory</template>
               </p>
             </div>
 

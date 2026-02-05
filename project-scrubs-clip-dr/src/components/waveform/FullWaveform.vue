@@ -37,6 +37,56 @@ const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const selectionColor = computed(() => settingsStore.settings.selectionColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 
+// Zoom constraints (same as ZoomedWaveform)
+const MIN_ZOOM_DURATION = 0.5;
+const MAX_ZOOM_DURATION = 60;
+const ZOOM_FACTOR = 0.15;
+
+// Scroll wheel zoom handler - resizes selection window (same behavior as Panel 2)
+function handleWheel(event: WheelEvent) {
+  event.preventDefault();
+
+  const dur = duration.value;
+  if (dur <= 0) return;
+
+  const rect = containerRef.value?.getBoundingClientRect();
+  if (!rect) return;
+
+  const currentDuration = selection.value.end - selection.value.start;
+  const maxDuration = Math.min(MAX_ZOOM_DURATION, dur);
+
+  // Scroll up = zoom in, scroll down = zoom out
+  const zoomIn = event.deltaY < 0;
+  const factor = zoomIn ? (1 - ZOOM_FACTOR) : (1 + ZOOM_FACTOR);
+
+  let newDuration = currentDuration * factor;
+  newDuration = Math.max(MIN_ZOOM_DURATION, Math.min(maxDuration, newDuration));
+
+  if (newDuration === currentDuration) return;
+
+  // Map mouse X to time on the full timeline (not the selection)
+  const timeUnderMouse = ((event.clientX - rect.left) / rect.width) * dur;
+
+  // Calculate the ratio of where the mouse is in the current selection view
+  const mouseRatio = (timeUnderMouse - selection.value.start) / currentDuration;
+
+  // Calculate new start/end keeping the mouse position stable
+  let newStart = timeUnderMouse - (mouseRatio * newDuration);
+  let newEnd = newStart + newDuration;
+
+  // Clamp to audio bounds
+  if (newStart < 0) {
+    newStart = 0;
+    newEnd = newDuration;
+  }
+  if (newEnd > dur) {
+    newEnd = dur;
+    newStart = Math.max(0, dur - newDuration);
+  }
+
+  selectionStore.setSelection(newStart, newEnd);
+}
+
 let resizeObserver: ResizeObserver | null = null;
 
 function updateWidth() {
@@ -104,6 +154,7 @@ onUnmounted(() => {
       ref="containerRef"
       class="relative"
       :style="{ height: `${props.height}px` }"
+      @wheel.prevent="handleWheel"
     >
       <WaveformCanvas
         :start-time="0"

@@ -1,6 +1,6 @@
 [package]
 name = "clip-doctor-scrubs"
-version = "0.2.0"
+version = "0.3.0"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 edition = "2021"
@@ -25,7 +25,6 @@ uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 env_logger = "0.10"
 whisper-rs = "0.13"
-dirs = "5"
 biquad = "0.4"
 nnnoiseless = "0.5"
 realfft = "3.4"

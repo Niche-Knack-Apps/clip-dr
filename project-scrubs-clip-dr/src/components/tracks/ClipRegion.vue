@@ -9,11 +9,13 @@ interface Props {
   duration: number;
   isDragging?: boolean;
   draggingClipId?: string | null;
+  isSelected?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isDragging: false,
   draggingClipId: null,
+  isSelected: false,
 });
 
 const emit = defineEmits<{
@@ -49,12 +51,15 @@ const bgColor = computed(() => {
 
 const borderColor = computed(() => {
   if (props.track.muted) return 'rgb(75, 85, 99)'; // gray-600
+  if (props.isSelected) return 'rgba(255, 255, 255, 0.6)';
   return props.track.color;
 });
 
 function handleMouseDown(event: MouseEvent) {
   // Prevent default to avoid text selection during drag
   event.preventDefault();
+  // Stop propagation so parent track click doesn't fire (which would clear clip selection)
+  event.stopPropagation();
   emit('dragStart', clipId.value, event);
 }
 </script>
@@ -65,6 +70,7 @@ function handleMouseDown(event: MouseEvent) {
     :class="[
       track.solo ? 'ring-2 ring-yellow-500' : '',
       isThisClipDragging ? 'opacity-70 ring-2 ring-cyan-400' : '',
+      isSelected && !isThisClipDragging && !track.solo ? 'ring-2 ring-white/60 shadow-lg shadow-white/10' : '',
     ]"
     :style="{
       left: `${left}px`,
@@ -72,6 +78,7 @@ function handleMouseDown(event: MouseEvent) {
       backgroundColor: bgColor,
     }"
     @mousedown="handleMouseDown"
+    @click.stop
   >
     <div
       class="absolute inset-0 border rounded pointer-events-none"

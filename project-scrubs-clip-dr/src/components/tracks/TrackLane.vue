@@ -29,6 +29,7 @@ const emit = defineEmits<{
   clipDragStart: [trackId: string, clipId: string];
   clipDrag: [trackId: string, clipId: string, newClipStart: number];
   clipDragEnd: [trackId: string, clipId: string, newClipStart: number];
+  clipSelect: [trackId: string, clipId: string];
 }>();
 
 const playbackStore = usePlaybackStore();
@@ -125,8 +126,10 @@ function handleClipDragEnd(event: MouseEvent) {
     const deltaTime = (deltaX / containerWidth.value) * duration.value;
     const newStart = Math.max(0, clipDragOriginalStart.value + deltaTime);
     emit('clipDragEnd', props.track.id, clipId, newStart);
+  } else if (!wasDragging && clipId) {
+    // Drag threshold not met - this was a click, select the clip
+    emit('clipSelect', props.track.id, clipId);
   }
-  // If not dragging (threshold not reached), the click event on parent will handle selection
 
   clipDragPending.value = false;
   isClipDragging.value = false;
@@ -335,6 +338,7 @@ onUnmounted(() => {
         :duration="duration"
         :is-dragging="isClipDragging"
         :dragging-clip-id="draggingClipId"
+        :is-selected="clip.id === tracksStore.selectedClipId"
         @drag-start="handleClipDragStart"
       />
 

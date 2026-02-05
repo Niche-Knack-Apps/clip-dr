@@ -11,6 +11,9 @@ export const useTracksStore = defineStore('tracks', () => {
   const selectedTrackId = ref<string | 'ALL' | null>('ALL');
   const viewMode = ref<ViewMode>('all');
 
+  // Selected clip within a track (for segment operations)
+  const selectedClipId = ref<string | null>(null);
+
   // Track color counter for automatic color assignment
   let colorIndex = 0;
 
@@ -36,6 +39,26 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Computed: Check if any track has audio loaded
   const hasAudio = computed(() => tracks.value.length > 0);
+
+  // Computed: Get selected clip info (searches all tracks)
+  const selectedClip = computed(() => {
+    if (!selectedClipId.value) return null;
+    for (const track of tracks.value) {
+      const clips = getTrackClips(track.id);
+      const clip = clips.find(c => c.id === selectedClipId.value);
+      if (clip) return { trackId: track.id, clip };
+    }
+    return null;
+  });
+
+  function selectClip(trackId: string, clipId: string): void {
+    selectedClipId.value = clipId;
+    console.log('[Tracks] Selected clip:', clipId, 'in track:', trackId);
+  }
+
+  function clearClipSelection(): void {
+    selectedClipId.value = null;
+  }
 
   // Generate waveform data from AudioBuffer (min/max pairs format)
   function generateWaveformFromBuffer(buffer: AudioBuffer, bucketCount: number = WAVEFORM_BUCKET_COUNT): number[] {
@@ -106,16 +129,23 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = tracks.value.filter((t) => t.id !== trackId);
     console.log('[Tracks] Deleted track:', trackId);
 
-    // Update selection if needed
+    // Update selection: pick an adjacent track, or fall back to 'ALL' if none remain
     if (selectedTrackId.value === trackId) {
-      selectedTrackId.value = 'ALL';
-      viewMode.value = 'all';
+      if (tracks.value.length > 0) {
+        const newIndex = Math.min(index, tracks.value.length - 1);
+        selectedTrackId.value = tracks.value[newIndex].id;
+        viewMode.value = 'selected';
+      } else {
+        selectedTrackId.value = 'ALL';
+        viewMode.value = 'all';
+      }
     }
   }
 
   // Select a track or 'ALL' for composite view
   function selectTrack(trackId: string | 'ALL'): void {
     selectedTrackId.value = trackId;
+    selectedClipId.value = null;
     viewMode.value = trackId === 'ALL' ? 'all' : 'selected';
     console.log('[Tracks] Selected:', trackId);
   }
@@ -602,22 +632,155 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
-  // Slide tracks left to fill a gap. Moves all tracks whose start >= gapStart
-  // leftward by gapDuration seconds. Also shifts clip positions within those tracks.
+  // Slide tracks left to fill a gap. Handles both whole tracks after the gap
+  // and clips within tracks that span the gap.
   function slideTracksLeft(gapStart: number, gapDuration: number): void {
     if (gapDuration <= 0) return;
     tracks.value = tracks.value.map(t => {
+      const trackEnd = t.trackStart + t.duration;
+
       if (t.trackStart >= gapStart) {
+        // Entire track is at/after the gap - shift everything left
         const newTrackStart = Math.max(0, t.trackStart - gapDuration);
-        // Also shift any clips within the track
         const newClips = t.clips?.map(c => ({
           ...c,
           clipStart: Math.max(0, c.clipStart - gapDuration),
         }));
         return { ...t, trackStart: newTrackStart, clips: newClips };
+      } else if (t.clips && t.clips.length > 0 && trackEnd > gapStart) {
+        // Track spans the gap - shift only clips at/after gapStart
+        const newClips = t.clips.map(c => {
+          if (c.clipStart >= gapStart) {
+            return { ...c, clipStart: Math.max(0, c.clipStart - gapDuration) };
+          }
+          return c;
+        });
+        // Recalculate track bounds
+        const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
+        const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+        return {
+          ...t,
+          clips: newClips,
+          trackStart: firstClipStart,
+          duration: lastClipEnd - firstClipStart,
+        };
       }
       return t;
     });
+  }
+
+  // Ripple delete: cut [inPoint, outPoint] from ALL tracks and close the gap
+  function rippleDeleteRegion(
+    inPoint: number,
+    outPoint: number,
+    audioContext: AudioContext
+  ): { buffers: AudioBuffer[]; waveforms: number[][] } {
+    const gapDuration = outPoint - inPoint;
+    const cutResults: { buffers: AudioBuffer[]; waveforms: number[][] } = {
+      buffers: [],
+      waveforms: [],
+    };
+
+    // Step 1: Cut the region from every track that overlaps [inPoint, outPoint]
+    const trackIds = tracks.value.map(t => t.id);
+    for (const trackId of trackIds) {
+      const track = tracks.value.find(t => t.id === trackId);
+      if (!track) continue;
+
+      const trackEnd = track.trackStart + track.duration;
+      // Check overlap
+      if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
+
+      const result = cutRegionFromTrack(trackId, inPoint, outPoint, audioContext);
+      if (result) {
+        cutResults.buffers.push(result.buffer);
+        cutResults.waveforms.push(result.waveformData);
+      }
+    }
+
+    // Step 2: Close the gap - shift everything at/after outPoint left by gapDuration
+    slideTracksLeft(outPoint, gapDuration);
+
+    console.log(`[Tracks] Ripple deleted ${gapDuration.toFixed(2)}s region, affected ${cutResults.buffers.length} tracks`);
+    return cutResults;
+  }
+
+  // Extract audio from the [inPoint, outPoint] region across ALL tracks and mix into one buffer
+  function extractRegionFromAllTracks(
+    inPoint: number,
+    outPoint: number,
+    audioContext: AudioContext
+  ): { buffer: AudioBuffer; waveformData: number[] } | null {
+    const regionDuration = outPoint - inPoint;
+    if (regionDuration <= 0) return null;
+
+    // Collect buffers and their offsets within the extraction region
+    const contributions: { buffer: AudioBuffer; offsetInRegion: number }[] = [];
+    let maxChannels = 1;
+    let sampleRate = 44100;
+
+    for (const track of tracks.value) {
+      const trackEnd = track.trackStart + track.duration;
+      // Check overlap
+      if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
+
+      const overlapStart = Math.max(track.trackStart, inPoint);
+      const overlapEnd = Math.min(trackEnd, outPoint);
+      if (overlapEnd <= overlapStart) continue;
+
+      const buffer = track.audioData.buffer;
+      sampleRate = buffer.sampleRate;
+      maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
+
+      // Extract the overlapping portion from this track's buffer
+      const relStart = overlapStart - track.trackStart;
+      const relEnd = overlapEnd - track.trackStart;
+      const startSample = Math.floor(relStart * buffer.sampleRate);
+      const endSample = Math.floor(relEnd * buffer.sampleRate);
+      const length = endSample - startSample;
+
+      if (length <= 0) continue;
+
+      const extractedBuffer = audioContext.createBuffer(
+        buffer.numberOfChannels,
+        length,
+        buffer.sampleRate
+      );
+      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+        const src = buffer.getChannelData(ch);
+        const dest = extractedBuffer.getChannelData(ch);
+        for (let i = 0; i < length; i++) {
+          dest[i] = src[startSample + i];
+        }
+      }
+
+      contributions.push({
+        buffer: extractedBuffer,
+        offsetInRegion: overlapStart - inPoint,
+      });
+    }
+
+    if (contributions.length === 0) return null;
+
+    // Mix all contributions into a single buffer
+    const totalSamples = Math.ceil(regionDuration * sampleRate);
+    const mixedBuffer = audioContext.createBuffer(maxChannels, totalSamples, sampleRate);
+
+    for (const { buffer, offsetInRegion } of contributions) {
+      const offsetSamples = Math.floor(offsetInRegion * sampleRate);
+      for (let ch = 0; ch < maxChannels; ch++) {
+        const destData = mixedBuffer.getChannelData(ch);
+        const srcCh = Math.min(ch, buffer.numberOfChannels - 1);
+        const srcData = buffer.getChannelData(srcCh);
+        for (let i = 0; i < srcData.length && (offsetSamples + i) < totalSamples; i++) {
+          destData[offsetSamples + i] += srcData[i];
+        }
+      }
+    }
+
+    const waveformData = generateWaveformFromBuffer(mixedBuffer);
+    console.log(`[Tracks] Extracted ${regionDuration.toFixed(2)}s from ${contributions.length} tracks`);
+    return { buffer: mixedBuffer, waveformData };
   }
 
   // Finalize clip positions and recalculate track bounds after drag ends
@@ -642,16 +805,205 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
+  // Delete a specific clip from a track
+  function deleteClipFromTrack(trackId: string, clipId: string): void {
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return;
+
+    const track = tracks.value[trackIndex];
+
+    // For single-buffer tracks (clipId ends with '-main'), delete entire track
+    if (clipId === track.id + '-main') {
+      deleteTrack(trackId);
+      return;
+    }
+
+    // Multi-clip track: remove the clip
+    if (!track.clips || track.clips.length === 0) return;
+
+    const newClips = track.clips.filter(c => c.id !== clipId);
+
+    if (newClips.length === 0) {
+      // No clips left, delete the track
+      deleteTrack(trackId);
+      return;
+    }
+
+    // Recalculate track bounds
+    const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+
+    tracks.value[trackIndex] = {
+      ...track,
+      clips: newClips,
+      trackStart: firstClipStart,
+      duration: lastClipEnd - firstClipStart,
+    };
+    tracks.value = [...tracks.value];
+
+    // Clear clip selection if the deleted clip was selected
+    if (selectedClipId.value === clipId) {
+      selectedClipId.value = null;
+    }
+
+    console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
+  }
+
+  // Split a clip at a specific time, returning the two resulting clips
+  function splitClipAtTime(
+    trackId: string,
+    clipId: string,
+    splitTime: number,
+    audioContext: AudioContext
+  ): { before: TrackClip; after: TrackClip } | null {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track) return null;
+
+    const clips = getTrackClips(trackId);
+    const clip = clips.find(c => c.id === clipId);
+    if (!clip) return null;
+
+    const clipEnd = clip.clipStart + clip.duration;
+
+    // Split point must be inside the clip (not at edges)
+    if (splitTime <= clip.clipStart + 0.001 || splitTime >= clipEnd - 0.001) return null;
+
+    const relSplit = splitTime - clip.clipStart;
+    const buffer = clip.buffer;
+    const sampleRate = buffer.sampleRate;
+    const channels = buffer.numberOfChannels;
+    const splitSample = Math.floor(relSplit * sampleRate);
+
+    // Create "before" buffer
+    const beforeBuffer = audioContext.createBuffer(channels, splitSample, sampleRate);
+    for (let ch = 0; ch < channels; ch++) {
+      const src = buffer.getChannelData(ch);
+      const dest = beforeBuffer.getChannelData(ch);
+      for (let i = 0; i < splitSample; i++) dest[i] = src[i];
+    }
+
+    // Create "after" buffer
+    const afterLength = buffer.length - splitSample;
+    const afterBuffer = audioContext.createBuffer(channels, afterLength, sampleRate);
+    for (let ch = 0; ch < channels; ch++) {
+      const src = buffer.getChannelData(ch);
+      const dest = afterBuffer.getChannelData(ch);
+      for (let i = 0; i < afterLength; i++) dest[i] = src[splitSample + i];
+    }
+
+    const beforeClip: TrackClip = {
+      id: generateId(),
+      buffer: beforeBuffer,
+      waveformData: generateWaveformFromBuffer(beforeBuffer),
+      clipStart: clip.clipStart,
+      duration: beforeBuffer.duration,
+    };
+
+    const afterClip: TrackClip = {
+      id: generateId(),
+      buffer: afterBuffer,
+      waveformData: generateWaveformFromBuffer(afterBuffer),
+      clipStart: splitTime,
+      duration: afterBuffer.duration,
+    };
+
+    return { before: beforeClip, after: afterClip };
+  }
+
+  // Insert a clip at the playhead position in a track, splitting existing clips if needed
+  function insertClipAtPlayhead(
+    trackId: string,
+    buffer: AudioBuffer,
+    waveformData: number[],
+    playheadTime: number,
+    audioContext: AudioContext
+  ): boolean {
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return false;
+
+    const track = tracks.value[trackIndex];
+    const pasteDuration = buffer.duration;
+
+    // Get current clips (converting single-buffer track to clips if needed)
+    let currentClips: TrackClip[];
+    if (track.clips && track.clips.length > 0) {
+      currentClips = [...track.clips];
+    } else {
+      // Convert main audio to a clip
+      currentClips = [{
+        id: generateId(),
+        buffer: track.audioData.buffer,
+        waveformData: track.audioData.waveformData,
+        clipStart: track.trackStart,
+        duration: track.duration,
+      }];
+    }
+
+    // Check if playhead falls within any existing clip - if so, split it
+    const overlappingIndex = currentClips.findIndex(c =>
+      playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001
+    );
+
+    if (overlappingIndex !== -1) {
+      const overlapping = currentClips[overlappingIndex];
+      const splitResult = splitClipAtTime(trackId, overlapping.id, playheadTime, audioContext);
+      if (splitResult) {
+        // Replace the overlapping clip with the two halves
+        currentClips.splice(overlappingIndex, 1, splitResult.before, splitResult.after);
+      }
+    }
+
+    // Shift all clips at/after playhead right by paste duration
+    currentClips = currentClips.map(c => {
+      if (c.clipStart >= playheadTime - 0.001) {
+        return { ...c, clipStart: c.clipStart + pasteDuration };
+      }
+      return c;
+    });
+
+    // Insert the new clip at the playhead position
+    const newClip: TrackClip = {
+      id: generateId(),
+      buffer,
+      waveformData,
+      clipStart: playheadTime,
+      duration: pasteDuration,
+    };
+    currentClips.push(newClip);
+
+    // Sort clips by position
+    currentClips.sort((a, b) => a.clipStart - b.clipStart);
+
+    // Recalculate track bounds
+    const firstClipStart = Math.min(...currentClips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...currentClips.map(c => c.clipStart + c.duration));
+
+    tracks.value[trackIndex] = {
+      ...track,
+      clips: currentClips,
+      trackStart: firstClipStart,
+      duration: lastClipEnd - firstClipStart,
+    };
+    tracks.value = [...tracks.value];
+
+    console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip at playhead ${playheadTime.toFixed(2)}s in track ${track.name}`);
+    return true;
+  }
+
   return {
     tracks,
     selectedTrackId,
+    selectedClipId,
     viewMode,
     selectedTrack,
+    selectedClip,
     timelineDuration,
     hasAudio,
     createTrackFromBuffer,
     deleteTrack,
     selectTrack,
+    selectClip,
+    clearClipSelection,
     setTrackMuted,
     setTrackSolo,
     setTrackVolume,
@@ -671,6 +1023,11 @@ export const useTracksStore = defineStore('tracks', () => {
     getTrackClips,
     setClipStart,
     slideTracksLeft,
+    rippleDeleteRegion,
+    extractRegionFromAllTracks,
     finalizeClipPositions,
+    deleteClipFromTrack,
+    splitClipAtTime,
+    insertClipAtPlayhead,
   };
 });

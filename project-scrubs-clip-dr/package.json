@@ -1,6 +1,6 @@
 {
   "name": "clip-doctor-scrubs",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Audio cleaning and clip-making application with CPU-only ASR",
   "type": "module",
   "scripts": {

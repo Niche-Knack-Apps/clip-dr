@@ -28,8 +28,8 @@ export const useUIStore = defineStore('ui', () => {
 
   // Track timeline zoom (pixels per second)
   const trackZoom = ref(100); // Default 100px per second
-  const TRACK_ZOOM_MIN = 10;  // Minimum zoom (zoomed out)
-  const TRACK_ZOOM_MAX = 500; // Maximum zoom (zoomed in)
+  const TRACK_ZOOM_MIN = 2;    // Minimum zoom (zoomed way out)
+  const TRACK_ZOOM_MAX = 2000; // Maximum zoom (zoomed way in)
 
   // Computed helpers
   const isTrackPanelCollapsed = computed(() => trackPanelWidth.value <= TRACK_PANEL_MIN_WIDTH);

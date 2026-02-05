@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import TrackLane from './TrackLane.vue';
 import { useClipping } from '@/composables/useClipping';
 import { useAudioStore } from '@/stores/audio';
@@ -7,6 +7,7 @@ import { useUIStore } from '@/stores/ui';
 import { useTracksStore } from '@/stores/tracks';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useExportStore } from '@/stores/export';
+import { useSelectionStore } from '@/stores/selection';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
 
 const audioStore = useAudioStore();
@@ -14,6 +15,7 @@ const uiStore = useUIStore();
 const tracksStore = useTracksStore();
 const transcriptionStore = useTranscriptionStore();
 const exportStore = useExportStore();
+const selectionStore = useSelectionStore();
 
 const {
   tracks,
@@ -44,9 +46,29 @@ const clipDragTargetTrackId = ref<string | null>(null);
 const clipDragPreviewStart = ref<number>(0);
 
 const panelWidth = computed(() => uiStore.trackPanelWidth);
-const isAllSelected = computed(() => selectedTrackId.value === 'ALL');
 const snapEnabled = computed(() => uiStore.snapEnabled);
 const trackZoom = computed(() => uiStore.trackZoom);
+
+// Logarithmic zoom slider: left = zoomed in (max px/sec), right = zoomed out (min px/sec)
+// Maps slider 0..1000 to zoom range using log scale for natural feel
+const SLIDER_MAX = 1000;
+const zoomSliderValue = computed(() => {
+  const minLog = Math.log(uiStore.TRACK_ZOOM_MIN);
+  const maxLog = Math.log(uiStore.TRACK_ZOOM_MAX);
+  const currentLog = Math.log(trackZoom.value);
+  // Invert: left (0) = max zoom, right (SLIDER_MAX) = min zoom
+  return Math.round(SLIDER_MAX - ((currentLog - minLog) / (maxLog - minLog)) * SLIDER_MAX);
+});
+
+function handleZoomSlider(event: Event) {
+  const sliderVal = Number((event.target as HTMLInputElement).value);
+  const minLog = Math.log(uiStore.TRACK_ZOOM_MIN);
+  const maxLog = Math.log(uiStore.TRACK_ZOOM_MAX);
+  // Invert: slider 0 = max zoom, slider SLIDER_MAX = min zoom
+  const fraction = 1 - (sliderVal / SLIDER_MAX);
+  const zoom = Math.exp(minLog + fraction * (maxLog - minLog));
+  uiStore.setTrackZoom(zoom);
+}
 
 // Reference to the scroll container for zoom calculations
 const scrollContainerRef = ref<HTMLDivElement | null>(null);
@@ -59,6 +81,37 @@ const timelineWidth = computed(() => {
   const paddedDuration = duration * 1.1;
   return Math.max(600, paddedDuration * trackZoom.value) + panelWidth.value;
 });
+
+// Selection window overlay position on track list
+const selectionOverlayLeft = computed(() => {
+  const duration = tracksStore.timelineDuration;
+  if (duration <= 0) return 0;
+  const timelineAreaWidth = timelineWidth.value - panelWidth.value;
+  return (selectionStore.selection.start / duration) * timelineAreaWidth + panelWidth.value;
+});
+
+const selectionOverlayWidth = computed(() => {
+  const duration = tracksStore.timelineDuration;
+  if (duration <= 0) return 0;
+  const timelineAreaWidth = timelineWidth.value - panelWidth.value;
+  return ((selectionStore.selection.end - selectionStore.selection.start) / duration) * timelineAreaWidth;
+});
+
+// Auto zoom all the way out when tracks are added via import or record
+// Only triggers for tracks with sourcePath (import/record), not clip creation or paste
+watch(
+  () => tracksStore.tracks.length,
+  async (newLen, oldLen) => {
+    if (newLen > (oldLen ?? 0)) {
+      // Check if the newest track has a sourcePath (import/record indicator)
+      const newest = tracksStore.tracks[tracksStore.tracks.length - 1];
+      if (newest?.sourcePath) {
+        await nextTick();
+        uiStore.setTrackZoom(uiStore.TRACK_ZOOM_MIN);
+      }
+    }
+  }
+);
 
 // Handle scroll wheel: Ctrl+wheel zooms, plain wheel scrolls natively
 function handleWheel(event: WheelEvent) {
@@ -80,18 +133,6 @@ function handleWheel(event: WheelEvent) {
     uiStore.zoomTrackIn();
   } else {
     uiStore.zoomTrackOut();
-  }
-}
-
-// Toggle ALL view on/off
-function toggleAllView() {
-  if (isAllSelected.value) {
-    // Deselect ALL - select first track if available
-    if (tracks.value.length > 0) {
-      selectTrack(tracks.value[0].id);
-    }
-  } else {
-    selectTrack('ALL');
   }
 }
 
@@ -268,6 +309,15 @@ function handleClipDragLeaveTrack() {
     clipDragTargetTrackId.value = clipDraggingTrackId.value;
   }
 }
+
+// Clip select handler (click without drag)
+function handleClipSelect(trackId: string, clipId: string) {
+  // Only change track selection if needed (avoid clearing clip selection via selectTrack)
+  if (tracksStore.selectedTrackId !== trackId) {
+    tracksStore.selectTrack(trackId);
+  }
+  tracksStore.selectClip(trackId, clipId);
+}
 </script>
 
 <template>
@@ -275,20 +325,6 @@ function handleClipDragLeaveTrack() {
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-700">
       <div class="flex items-center gap-2">
         <span class="text-xs text-gray-400">Tracks</span>
-        <!-- ALL Tracks button -->
-        <button
-          type="button"
-          :class="[
-            'px-2 py-0.5 text-[10px] font-medium rounded transition-colors',
-            isAllSelected
-              ? 'bg-cyan-600 text-white'
-              : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
-          ]"
-          title="View all tracks combined (click to toggle)"
-          @click="toggleAllView"
-        >
-          ALL
-        </button>
         <!-- Snap/Magnet button -->
         <button
           type="button"
@@ -308,6 +344,23 @@ function handleClipDragLeaveTrack() {
       </div>
       <div class="flex items-center gap-2">
         <span v-if="exporting" class="text-xs text-cyan-400">Exporting...</span>
+        <!-- Zoom slider: left = zoom in, right = zoom out -->
+        <div class="flex items-center gap-1" title="Timeline zoom (left=in, right=out)">
+          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7" />
+          </svg>
+          <input
+            type="range"
+            :min="0"
+            :max="SLIDER_MAX"
+            :value="zoomSliderValue"
+            class="w-20 h-1 accent-cyan-500 cursor-pointer"
+            @input="handleZoomSlider"
+          />
+          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM13 10H7" />
+          </svg>
+        </div>
         <span class="text-xs text-gray-500">{{ tracks.length }} track{{ tracks.length !== 1 ? 's' : '' }}</span>
       </div>
     </div>
@@ -319,8 +372,22 @@ function handleClipDragLeaveTrack() {
       @wheel="handleWheel"
     >
       <div
+        class="relative"
         :style="{ minWidth: `${timelineWidth}px` }"
       >
+        <!-- Selection window overlay -->
+        <div
+          v-if="tracksStore.timelineDuration > 0"
+          class="pointer-events-none z-[5] absolute top-0 bottom-0"
+          :style="{
+            left: `${selectionOverlayLeft}px`,
+            width: `${selectionOverlayWidth}px`,
+            backgroundColor: 'rgba(0, 212, 255, 0.08)',
+            borderLeft: '1px solid rgba(0, 212, 255, 0.25)',
+            borderRight: '1px solid rgba(0, 212, 255, 0.25)',
+          }"
+        />
+
         <div
           v-for="track in tracks"
           :key="track.id"
@@ -353,6 +420,7 @@ function handleClipDragLeaveTrack() {
             @clip-drag-start="handleClipDragStart"
             @clip-drag="handleClipDrag"
             @clip-drag-end="handleClipDragEnd"
+            @clip-select="handleClipSelect"
           />
         </div>
 

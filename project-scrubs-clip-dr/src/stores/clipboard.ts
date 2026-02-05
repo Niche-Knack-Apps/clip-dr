@@ -5,6 +5,7 @@ import { useTracksStore } from './tracks';
 import { useSelectionStore } from './selection';
 import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
+import { useTranscriptionStore } from './transcription';
 import type { Track } from '@/shared/types';
 
 export interface AudioClipboard {
@@ -23,6 +24,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
   const selectionStore = useSelectionStore();
   const playbackStore = usePlaybackStore();
   const settingsStore = useSettingsStore();
+  const transcriptionStore = useTranscriptionStore();
 
   const clipboard = ref<AudioClipboard | null>(null);
   const clipboardBuffer = ref<AudioBuffer | null>(null);
@@ -31,7 +33,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
   const clipboardDuration = computed(() => clipboard.value?.duration ?? 0);
 
   // Get the target track for operations: selected track, or first track when in ALL view
-  function getTargetTrack(): ReturnType<typeof tracksStore.selectedTrack> {
+  function getTargetTrack(): Track | null {
     const selected = tracksStore.selectedTrack;
     if (selected) return selected;
     // In ALL view, fall back to first track
@@ -139,52 +141,93 @@ export const useClipboardStore = defineStore('clipboard', () => {
     return true;
   }
 
-  // Cut the selected region (copy + delete + slide tracks left to fill gap)
+  // Cut: selected clip > I/O region ripple delete > entire track
   function cut(): boolean {
-    const selectedTrack = getTargetTrack();
-    if (!selectedTrack) return false;
+    // Priority 1: Selected clip - cut it to clipboard and slide remaining left
+    const selClip = tracksStore.selectedClip;
+    if (selClip) {
+      const { trackId, clip } = selClip;
+      const ctx = audioStore.getAudioContext();
 
-    // Check if we're cutting a region (I/O points) or whole track
-    const useInOutPoints = settingsStore.settings.clipboardUsesInOutPoints ?? true;
+      // Copy clip audio to clipboard
+      const clonedBuffer = ctx.createBuffer(
+        clip.buffer.numberOfChannels,
+        clip.buffer.length,
+        clip.buffer.sampleRate
+      );
+      for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
+        clonedBuffer.getChannelData(ch).set(clip.buffer.getChannelData(ch));
+      }
+      clipboardBuffer.value = clonedBuffer;
+
+      const waveform = tracksStore.generateWaveformFromBuffer(clonedBuffer);
+      clipboard.value = {
+        samples: [],
+        sampleRate: clonedBuffer.sampleRate,
+        duration: clonedBuffer.duration,
+        sourceRegion: { start: clip.clipStart, end: clip.clipStart + clip.duration },
+        sourceTrackId: trackId,
+        waveformData: waveform,
+        copiedAt: Date.now(),
+      };
+
+      // Record gap position before deleting
+      const gapStart = clip.clipStart;
+      const gapDuration = clip.duration;
+
+      // Delete the clip
+      tracksStore.deleteClipFromTrack(trackId, clip.id);
+
+      // Slide remaining clips left to close the gap
+      tracksStore.slideTracksLeft(gapStart, gapDuration);
+
+      tracksStore.clearClipSelection();
+      console.log(`[Clipboard] Cut clip ${clip.id} (${gapDuration.toFixed(2)}s) from track ${trackId}`);
+      return true;
+    }
+
+    // Priority 2: I/O points
     const { inPoint, outPoint } = selectionStore.inOutPoints;
+    const useInOutPoints = settingsStore.settings.clipboardUsesInOutPoints ?? true;
     const hasIOPoints = useInOutPoints && inPoint !== null && outPoint !== null;
 
     const ctx = audioStore.getAudioContext();
 
     if (hasIOPoints) {
-      // Cutting a region - use cutRegionFromTrack which handles splitting
-      const result = tracksStore.cutRegionFromTrack(
-        selectedTrack.id,
-        inPoint,
-        outPoint,
-        ctx
-      );
+      // Extract mixed audio BEFORE deleting (for clipboard)
+      const extracted = tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
 
-      if (result) {
-        // Store cut audio in clipboard
-        clipboardBuffer.value = result.buffer;
+      // Ripple delete the I/O region from ALL tracks and close the gap
+      const results = tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx);
+
+      if (results.buffers.length > 0) {
+        // Store the mixed extraction in clipboard (or first cut buffer as fallback)
+        const buf = extracted?.buffer ?? results.buffers[0];
+        const waveform = extracted?.waveformData ?? results.waveforms[0] ?? [];
+        clipboardBuffer.value = buf;
         clipboard.value = {
-          samples: [], // Not used directly anymore
-          sampleRate: result.buffer.sampleRate,
-          duration: result.buffer.duration,
+          samples: [],
+          sampleRate: buf.sampleRate,
+          duration: buf.duration,
           sourceRegion: { start: inPoint, end: outPoint },
-          sourceTrackId: selectedTrack.id,
-          waveformData: result.waveformData,
+          sourceTrackId: 'all',
+          waveformData: waveform,
           copiedAt: Date.now(),
         };
-        console.log(`[Clipboard] Cut region ${(outPoint - inPoint).toFixed(2)}s from track`);
+        console.log(`[Clipboard] Ripple cut ${(outPoint - inPoint).toFixed(2)}s from ${results.buffers.length} track(s)`);
 
-        // Clear I/O points after cut
-        selectionStore.clearInOutPoints();
-
-        // Slide remaining tracks left to fill the gap
-        const gapDuration = outPoint - inPoint;
-        tracksStore.slideTracksLeft(inPoint, gapDuration);
-        return true;
+        // Shift transcription words to match the ripple delete
+        transcriptionStore.rippleShiftWords(inPoint, outPoint);
       }
-      return false;
+
+      // Clear I/O points after cut
+      selectionStore.clearInOutPoints();
+      return results.buffers.length > 0;
     } else {
-      // Cutting the whole track - copy first, then delete and slide
+      // No I/O points - cut the target track entirely
+      const selectedTrack = getTargetTrack();
+      if (!selectedTrack) return false;
+
       const trackStart = selectedTrack.trackStart;
       const trackDuration = selectedTrack.duration;
       const copied = copy();
@@ -197,7 +240,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     }
   }
 
-  // Paste clipboard content - append to selected track or create new track
+  // Paste clipboard content - insert at playhead in selected track, or create new track
   function paste(): Track | null {
     if (!clipboard.value || !clipboardBuffer.value) {
       console.log('[Clipboard] Nothing to paste');
@@ -217,29 +260,32 @@ export const useClipboardStore = defineStore('clipboard', () => {
       clonedBuffer.getChannelData(ch).set(sourceBuffer.getChannelData(ch));
     }
 
-    // Check if a specific track is selected (or first track in ALL view)
-    const selectedTrack = getTargetTrack();
+    // Check if a specific track is selected (not ALL view)
+    const selectedTrack = tracksStore.selectedTrack;
 
     if (selectedTrack) {
-      // Append to selected track
-      console.log(`[Clipboard] Appending ${clipboard.value.duration.toFixed(2)}s to track "${selectedTrack.name}"`);
+      // Insert at playhead position (splits existing clips if needed)
+      const playheadTime = playbackStore.currentTime;
+      const waveform = [...clipboard.value.waveformData];
+      console.log(`[Clipboard] Inserting ${clipboard.value.duration.toFixed(2)}s at playhead ${playheadTime.toFixed(2)}s in track "${selectedTrack.name}"`);
 
-      const success = tracksStore.appendAudioToTrack(
+      const success = tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
+        waveform,
+        playheadTime,
         ctx
       );
 
       if (success) {
-        // Re-fetch the track since it was replaced in the array
-        const updatedTrack = tracksStore.selectedTrack;
-        console.log(`[Clipboard] Pasted to existing track, new duration: ${updatedTrack?.duration.toFixed(2)}s`);
-        return updatedTrack;
+        const updatedTrack = tracksStore.tracks.find(t => t.id === selectedTrack.id);
+        console.log(`[Clipboard] Pasted at playhead, track duration: ${updatedTrack?.duration.toFixed(2)}s`);
+        return updatedTrack ?? null;
       }
-      // Fall through to create new track if append failed
+      // Fall through to create new track if insert failed
     }
 
-    // No track selected (ALL view) or append failed - create new track
+    // No specific track selected or insert failed - create new track
     const pasteTime = playbackStore.currentTime;
     const trackName = `Pasted ${tracksStore.tracks.length + 1}`;
     console.log(`[Clipboard] Creating NEW track "${trackName}" at time ${pasteTime.toFixed(2)}s`);
@@ -255,30 +301,84 @@ export const useClipboardStore = defineStore('clipboard', () => {
     return newTrack;
   }
 
-  // Delete in-place: no track → nothing; track + I/O → split and remove segment; track alone → delete track
+  // Delete: selected clip > I/O points > entire track
   function deleteSelected(): boolean {
-    const selectedTrack = getTargetTrack();
-    if (!selectedTrack) return false; // No track selected → do nothing
+    // Priority 1: Selected clip
+    const selClip = tracksStore.selectedClip;
+    if (selClip) {
+      console.log(`[Clipboard] deleteSelected: deleting selected clip ${selClip.clip.id} from track ${selClip.trackId}`);
+      tracksStore.deleteClipFromTrack(selClip.trackId, selClip.clip.id);
+      tracksStore.clearClipSelection();
+      return true;
+    }
 
+    // Priority 2: I/O points
     const { inPoint, outPoint } = selectionStore.inOutPoints;
 
     if (inPoint !== null && outPoint !== null) {
-      // In/out set → delete just that segment (split into two parts), leave in-place
+      console.log(`[Clipboard] deleteSelected: removing segment ${inPoint.toFixed(2)}-${outPoint.toFixed(2)}s from all overlapping tracks`);
       const ctx = audioStore.getAudioContext();
-      const result = tracksStore.cutRegionFromTrack(
-        selectedTrack.id, inPoint, outPoint, ctx
-      );
-      if (result) {
-        selectionStore.clearInOutPoints();
-        // Don't put on clipboard — this is delete, not cut
+      let cutCount = 0;
+
+      // Cut from every track that overlaps the I/O region (no ripple shift)
+      const trackIds = tracksStore.tracks.map(t => t.id);
+      for (const trackId of trackIds) {
+        const track = tracksStore.tracks.find(t => t.id === trackId);
+        if (!track) continue;
+        const trackEnd = track.trackStart + track.duration;
+        if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
+
+        const result = tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx);
+        if (result) cutCount++;
       }
-      return result !== null;
+
+      if (cutCount > 0) {
+        selectionStore.clearInOutPoints();
+        console.log(`[Clipboard] deleteSelected: removed segment from ${cutCount} track(s)`);
+      }
+      return cutCount > 0;
     } else {
-      // No in/out → delete entire track, leave remaining tracks in-place
+      // Priority 3: Entire target track
+      const selectedTrack = getTargetTrack();
+      if (!selectedTrack) {
+        console.log('[Clipboard] deleteSelected: no target track, nothing to do');
+        return false;
+      }
+      console.log(`[Clipboard] deleteSelected: deleting entire track "${selectedTrack.name}" (${selectedTrack.id})`);
       tracksStore.deleteTrack(selectedTrack.id);
-      console.log(`[Clipboard] Deleted track ${selectedTrack.id}`);
       return true;
     }
+  }
+
+  // Create clip: extract audio from I/O region across ALL tracks into a new track
+  function createClip(): Track | null {
+    const { inPoint, outPoint } = selectionStore.inOutPoints;
+    if (inPoint === null || outPoint === null) {
+      console.log('[Clipboard] createClip: no I/O points set');
+      return null;
+    }
+
+    const ctx = audioStore.getAudioContext();
+    const extracted = tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
+    if (!extracted) {
+      console.log('[Clipboard] createClip: no audio found in I/O region');
+      return null;
+    }
+
+    // Create new track at end of timeline so it doesn't overlap
+    const pasteTime = tracksStore.timelineDuration;
+    const trackName = `Clip ${tracksStore.tracks.length + 1}`;
+
+    const newTrack = tracksStore.createTrackFromBuffer(
+      extracted.buffer,
+      extracted.waveformData,
+      trackName,
+      pasteTime
+    );
+
+    console.log(`[Clipboard] Created clip "${trackName}" (${(outPoint - inPoint).toFixed(2)}s) at ${pasteTime.toFixed(2)}s`);
+    selectionStore.clearInOutPoints();
+    return newTrack;
   }
 
   // Clear clipboard
@@ -296,6 +396,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     cut,
     paste,
     deleteSelected,
+    createClip,
     clear,
   };
 });
