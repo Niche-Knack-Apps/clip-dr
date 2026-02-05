@@ -1,6 +1,14 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'path';
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src'),
+      '@shared': resolve(__dirname, '../_shared'),
+    },
+  },
+
   // Prevent vite from obscuring rust errors
   clearScreen: false,
 

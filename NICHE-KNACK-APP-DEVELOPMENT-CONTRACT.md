@@ -17,6 +17,9 @@ This document defines the shared conventions and standards that all Niche-Knack 
 9. [Documentation Standards](#9-documentation-standards)
 10. [Security Guidelines](#10-security-guidelines)
 11. [GPU/VRAM Constraints](#11-gpuvram-constraints)
+12. [Dev Server Ports](#12-dev-server-ports)
+13. [Data Storage Locations](#13-data-storage-locations)
+14. [Licensing](#14-licensing)
 
 ---
 
@@ -356,9 +359,25 @@ app-name/
 
 Location: `_shared/`
 
-- `AboutPanel.vue` - Standardized about dialog
-- `debug-logger.js` - Logging framework
-- `niche-knack-config.js` - Common configuration
+#### Core Components
+- `AboutPanel.vue` - Standardized about dialog (Vue apps)
+- `about-section.{js,css,html}` - About section (vanilla JS apps)
+- `debug-logger.js` - Cross-platform logging framework
+- `niche-knack-config.js` - V4V and brand configuration
+
+#### Development Resources
+- `ai-engine/` - Python AI/ML backend (JSON-RPC 2.0)
+- `desktop-runtime/` - TypeScript IPC bridge
+- `flaticons-bold-straight-uicons/` - 4,665 SVG icons
+- `tauri-app-template/` - Tauri 2.0 app template
+
+#### Build & Release
+- `releases/` - Release artifacts organized by app/runtime/platform
+- `niche-knack-release.jks` - Android signing keystore
+
+#### Utility Scripts
+- `update-v4v-config.sh` - Propagate config to all apps
+- `update-releases.sh` - Update release artifacts
 
 ---
 
@@ -647,6 +666,48 @@ Every app must have:
 - `npm run build:win` - Windows packages
 - `npm run build:mac` - macOS packages
 
+### 7.6 Release Directory Structure
+
+All build artifacts MUST output to the standardized release directory:
+
+```
+_shared/releases/{app-name}/{runtime}/{platform}/
+```
+
+Where:
+- `{app-name}` - Application directory name (e.g., `audio-doctor-scrubs`)
+- `{runtime}` - `electron` or `tauri`
+- `{platform}` - `windows`, `mac`, `linux`, `android`, `ios`
+
+Example:
+```
+_shared/releases/
+├── audio-doctor-scrubs/
+│   └── tauri/
+│       ├── linux/
+│       │   └── audio-doctor-scrubs_1.0.0_amd64.AppImage
+│       ├── windows/
+│       │   └── audio-doctor-scrubs_1.0.0_x64-setup.msi
+│       └── mac/
+│           └── audio-doctor-scrubs_1.0.0_universal.dmg
+├── gnucash-reporter/
+│   ├── electron/
+│   │   └── linux/
+│   │       └── GNUCash-Reporter-1.0.0.AppImage
+│   └── tauri/
+│       └── ...
+└── engine/
+    ├── engine-linux
+    ├── engine-windows.exe
+    └── engine-macos
+```
+
+#### Build Script Requirements
+
+Every app MUST have these build scripts in package.json:
+- `npm run build:release` - Build + copy to _shared/releases (Electron)
+- `npm run tauri:build:release` - Build + copy to _shared/releases (Tauri)
+
 ---
 
 ## 8. Testing Requirements
@@ -738,7 +799,7 @@ npm run dev
 
 ## License
 
-[License type]
+Apache-2.0 - See [LICENSE](LICENSE)
 ```
 
 ### 9.3 Code Comments
@@ -878,6 +939,191 @@ When VRAM budget is exceeded:
 
 ---
 
+## 12. Dev Server Ports
+
+### 12.1 Port Assignment Requirement
+
+**CRITICAL**: Each application MUST use a unique dev server port to allow simultaneous development of multiple apps.
+
+When running `npm run tauri:dev` or `npm run dev`, Vite/esbuild starts a dev server. If two apps use the same port, the second app will connect to the first app's dev server, causing the wrong content to be displayed.
+
+### 12.2 Assigned Ports
+
+| Application | Port | Notes |
+|-------------|------|-------|
+| project-scrubs-clip-dr | 5173 | Default Vite port |
+| messy-mind | 5174 | |
+| window-cleaner | 5175 | |
+| gnucash-reporter | 5176 | |
+| poetryscribe | 5177 | |
+| lifespeed | 5178 | |
+| by-metes-and-bounds | 5179 | |
+| lamplighter | 5180 | |
+| das-bomb | 5181 | |
+| entrusted | 1420 | Legacy Tauri default |
+| *(next app)* | 5182 | |
+
+### 12.3 Configuration Locations
+
+Ports must be set in **both** places:
+
+**1. Vite Config** (`vite.config.ts`):
+```typescript
+export default defineConfig({
+  server: {
+    port: 5174,        // Unique port
+    strictPort: true,  // Fail if port in use (recommended)
+  },
+  // ...
+});
+```
+
+**2. Tauri Config** (`src-tauri/tauri.conf.json`):
+```json
+{
+  "build": {
+    "devUrl": "http://localhost:5174"
+  }
+}
+```
+
+### 12.4 New App Checklist
+
+When creating a new app:
+1. Check this document for the next available port
+2. Update `vite.config.ts` with the assigned port
+3. Update `src-tauri/tauri.conf.json` devUrl to match
+4. Add the app to the port table in this document
+5. Consider using `strictPort: true` to catch conflicts early
+
+---
+
+## 13. Data Storage Locations
+
+### 13.1 Storage Directory Requirement
+
+**CRITICAL**: All apps MUST store data and configuration under a single app-specific directory determined by the OS and the app's identifier.
+
+| Platform | Path |
+|----------|------|
+| Linux | `~/.local/share/com.niche-knack.{app-name}/` |
+| macOS | `~/Library/Application Support/com.niche-knack.{app-name}/` |
+| Windows | `%APPDATA%\com.niche-knack.{app-name}\` |
+
+### 13.2 Tauri Implementation
+
+Tauri apps MUST use `app.path().app_data_dir()` to resolve the storage directory, ideally via a centralized `services/path_service.rs` module:
+
+```rust
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use tauri::{AppHandle, Manager};
+
+static USER_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let user_data = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&user_data)?;
+    USER_DATA_DIR.set(user_data).map_err(|_| "already initialized")?;
+    Ok(())
+}
+
+pub fn get_user_data_dir() -> Option<&'static PathBuf> {
+    USER_DATA_DIR.get()
+}
+```
+
+Initialize the path service in the `.setup()` callback:
+
+```rust
+tauri::Builder::default()
+    .setup(|app| {
+        services::path_service::init(&app.handle().clone())?;
+        Ok(())
+    })
+```
+
+### 13.3 Identifier Requirement
+
+The `identifier` field in `tauri.conf.json` MUST follow the pattern `com.niche-knack.{app-name}`. This identifier determines the app data directory name on all platforms.
+
+### 13.4 Prohibited Patterns
+
+- **NEVER** use `dirs::data_dir()` or similar crate-level functions — these bypass the Tauri identifier and produce incorrect paths
+- **NEVER** hardcode paths like `~/.local/share/my-app/`
+- **NEVER** store app data outside the app-specific directory
+
+### 13.5 Standard Subdirectories
+
+Organize data within the app directory using standard subdirectories:
+
+| Subdirectory | Purpose |
+|-------------|---------|
+| `logs/` | Application log files |
+| `models/` | AI/ML model files |
+| `db/` | Database files |
+| `cache/` | Temporary cached data |
+| `config/` | User configuration |
+
+---
+
+## 14. Licensing
+
+### 14.1 License Type
+
+All Niche-Knack applications are licensed under the **Apache License, Version 2.0**.
+
+SPDX Identifier: `Apache-2.0`
+
+### 14.2 Required Files
+
+Every application MUST include these files in its root directory:
+
+| File | Purpose | Source |
+|------|---------|--------|
+| `LICENSE` | Full Apache 2.0 license text | Copy from `_shared/LICENSE` |
+| `NOTICE` | App-specific copyright attribution | Based on `_shared/NOTICE.template` |
+
+### 14.3 NOTICE File Format
+
+```
+{Product Name}
+Copyright {year} Niche-Knack Apps
+
+This product includes software developed by Niche-Knack Apps.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+```
+
+### 14.4 Metadata Requirements
+
+License must be declared in all relevant configuration files:
+
+**package.json:**
+```json
+{
+  "license": "Apache-2.0"
+}
+```
+
+**Cargo.toml** (Tauri apps):
+```toml
+[package]
+license = "Apache-2.0"
+```
+
+### 14.5 Template Files
+
+Template files are maintained in `_shared/`:
+- `_shared/LICENSE` — Standard Apache 2.0 full text
+- `_shared/NOTICE.template` — Template for NOTICE files
+
+---
+
 ## Appendix A: Checklist for New Apps
 
 - [ ] Follows project structure conventions
@@ -887,9 +1133,18 @@ When VRAM budget is exceeded:
 - [ ] Implements error handling patterns
 - [ ] Uses logging framework
 - [ ] Has build scripts for all platforms
+- [ ] Build outputs to `_shared/releases/{app-name}/{runtime}/{platform}/`
+- [ ] Has `scripts/copy-to-releases.sh` for Tauri builds
+- [ ] References shared resources from `_shared/` directory
 - [ ] Has test coverage
 - [ ] Has required documentation
 - [ ] Follows security guidelines
+- [ ] **Uses unique dev server port** (see Section 12)
+- [ ] **Uses standard data storage paths** (see Section 13)
+- [ ] Contains LICENSE file (copy from `_shared/LICENSE`)
+- [ ] Contains NOTICE file with correct product name
+- [ ] `package.json` has `"license": "Apache-2.0"`
+- [ ] `Cargo.toml` has `license = "Apache-2.0"` (Tauri apps)
 
 ## Appendix B: Migration Checklist (Electron → Tauri)
 
@@ -901,8 +1156,9 @@ When VRAM budget is exceeded:
 - [ ] Update build scripts
 - [ ] Test on all platforms
 - [ ] Compare metrics with baseline
+- [ ] Configure data storage via Tauri `app_data_dir()` (see Section 13)
 
 ---
 
-*Last Updated: 2024-01*
-*Version: 1.0.0*
+*Last Updated: 2026-02-05*
+*Version: 1.4.0*

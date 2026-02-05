@@ -24,7 +24,7 @@
     "json-rpc"
   ],
   "author": "Niche-Knack",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/uuid": "^9.0.7",
