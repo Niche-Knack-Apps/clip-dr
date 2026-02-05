@@ -3,6 +3,7 @@ name = "clip-doctor-scrubs"
 version = "0.3.1"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
+license = "Apache-2.0"
 edition = "2021"
 
 [build-dependencies]
