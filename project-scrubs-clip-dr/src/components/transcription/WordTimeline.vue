@@ -22,12 +22,17 @@ const { getHighlightedWordIndices } = useSearch();
 
 const hasAudio = computed(() => audioStore.hasAudio);
 
-// Current track ID for per-track operations
-const trackId = computed(() => {
+// Selected track ID (for editing operations like drag, text edit, falloff)
+const selectedTrackId = computed(() => {
   const sel = tracksStore.selectedTrackId;
   if (!sel || sel === 'ALL') return null;
   return sel;
 });
+
+// Extended word type carrying the source trackId
+interface WordWithTrack extends Word {
+  trackId: string;
+}
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
@@ -40,23 +45,40 @@ const highlightedIndices = computed(() => getHighlightedWordIndices());
 type DragMode = 'none' | 'word';
 const dragMode = ref<DragMode>('none');
 const dragWordId = ref<string | null>(null);
+const dragTrackId = ref<string | null>(null);
 const dragStartX = ref(0);
 const dragStartOffsetMs = ref(0);
 
-const visibleWords = computed(() => {
-  if (!trackId.value) return [];
-  return transcriptionStore.getWordsInRange(trackId.value, selection.value.start, selection.value.end);
+// Show words from ALL tracks in the visible range
+const visibleWords = computed((): WordWithTrack[] => {
+  const allWords: WordWithTrack[] = [];
+  for (const track of tracksStore.tracks) {
+    const words = transcriptionStore.getWordsInRange(track.id, selection.value.start, selection.value.end);
+    for (const w of words) {
+      allWords.push({ ...w, trackId: track.id });
+    }
+  }
+  allWords.sort((a, b) => a.start - b.start);
+  return allWords;
+});
+
+// Check if ANY track has a transcription
+const hasAnyTranscription = computed(() => {
+  return tracksStore.tracks.some(t => transcriptionStore.hasTranscriptionForTrack(t.id));
 });
 
 const activeWord = computed(() => {
-  if (!trackId.value) return null;
-  return transcriptionStore.getWordAtTime(trackId.value, currentTime.value);
+  for (const track of tracksStore.tracks) {
+    const word = transcriptionStore.getWordAtTime(track.id, currentTime.value);
+    if (word) return word;
+  }
+  return null;
 });
 
-// Get the per-track enableFalloff
+// Get the per-track enableFalloff (for selected track)
 const enableFalloff = computed(() => {
-  if (!trackId.value) return true;
-  return transcriptionStore.getTranscription(trackId.value)?.enableFalloff ?? true;
+  if (!selectedTrackId.value) return true;
+  return transcriptionStore.getTranscription(selectedTrackId.value)?.enableFalloff ?? true;
 });
 
 let resizeObserver: ResizeObserver | null = null;
@@ -92,21 +114,20 @@ function handleWordClick(word: Word) {
   }
 }
 
-function handleWordTextUpdate(wordId: string, newText: string) {
-  if (!trackId.value) return;
-  transcriptionStore.updateWordText(trackId.value, wordId, newText);
+function handleWordTextUpdate(wordTrackId: string, wordId: string, newText: string) {
+  transcriptionStore.updateWordText(wordTrackId, wordId, newText);
 }
 
-function handleWordDragStart(event: MouseEvent, word: Word) {
+function handleWordDragStart(event: MouseEvent, word: WordWithTrack) {
   event.preventDefault();
   event.stopPropagation();
-  if (!trackId.value) return;
 
   useHistoryStore().pushState('Adjust word timing');
   dragMode.value = 'word';
   dragWordId.value = word.id;
+  dragTrackId.value = word.trackId;
   dragStartX.value = event.clientX;
-  dragStartOffsetMs.value = transcriptionStore.getWordOffset(trackId.value, word.id);
+  dragStartOffsetMs.value = transcriptionStore.getWordOffset(word.trackId, word.id);
 
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseup', handleMouseUp);
@@ -116,25 +137,28 @@ function handleMouseMove(event: MouseEvent) {
   const deltaX = event.clientX - dragStartX.value;
   const deltaMs = xToMs(deltaX);
 
-  if (dragMode.value === 'word' && dragWordId.value && trackId.value) {
+  if (dragMode.value === 'word' && dragWordId.value && dragTrackId.value) {
     const newOffsetMs = dragStartOffsetMs.value + deltaMs;
-    transcriptionStore.setWordOffset(trackId.value, dragWordId.value, newOffsetMs);
+    transcriptionStore.setWordOffset(dragTrackId.value, dragWordId.value, newOffsetMs);
   }
 }
 
 function handleMouseUp() {
-  if (dragMode.value !== 'none' && trackId.value) {
-    transcriptionStore.saveTranscription(trackId.value);
+  if (dragMode.value !== 'none' && dragTrackId.value) {
+    transcriptionStore.saveTranscription(dragTrackId.value);
   }
 
   dragMode.value = 'none';
   dragWordId.value = null;
+  dragTrackId.value = null;
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseup', handleMouseUp);
 }
 
-function isWordHighlighted(word: Word): boolean {
-  const allWords = trackId.value ? transcriptionStore.getAdjustedWords(trackId.value) : [];
+function isWordHighlighted(word: WordWithTrack): boolean {
+  // Search only highlights words in the selected track
+  if (word.trackId !== selectedTrackId.value) return false;
+  const allWords = transcriptionStore.getAdjustedWords(word.trackId);
   const index = allWords.findIndex((w) => w.id === word.id);
   return highlightedIndices.value.has(index);
 }
@@ -189,12 +213,12 @@ onUnmounted(() => {
           :is-highlighted="isWordHighlighted(word)"
           :is-dragging="isWordBeingDragged(word)"
           @click="handleWordClick"
-          @update-text="handleWordTextUpdate"
+          @update-text="(wordId: string, text: string) => handleWordTextUpdate(word.trackId, wordId, text)"
         />
       </div>
 
       <div
-        v-if="!visibleWords.length && transcriptionStore.hasTranscription"
+        v-if="!visibleWords.length && hasAnyTranscription"
         class="absolute inset-0 flex items-center justify-center text-xs text-gray-500"
       >
         No words in this region
@@ -202,7 +226,7 @@ onUnmounted(() => {
 
       <!-- Context-aware messages when no transcription -->
       <div
-        v-if="!transcriptionStore.hasTranscription && !transcriptionStore.hasModel && hasAudio"
+        v-if="!hasAnyTranscription && !transcriptionStore.hasModel && hasAudio"
         class="absolute inset-0 flex items-center justify-center text-xs text-gray-500 italic px-2"
       >
         Whisper model not found.
@@ -215,7 +239,7 @@ onUnmounted(() => {
       </div>
 
       <div
-        v-else-if="!transcriptionStore.hasTranscription && transcriptionStore.loading"
+        v-else-if="!hasAnyTranscription && transcriptionStore.loading"
         class="absolute inset-0 flex items-center justify-center text-xs text-gray-400"
       >
         <svg class="animate-spin h-3 w-3 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -226,21 +250,21 @@ onUnmounted(() => {
       </div>
 
       <div
-        v-else-if="!transcriptionStore.hasTranscription && transcriptionStore.error"
+        v-else-if="!hasAnyTranscription && transcriptionStore.error"
         class="absolute inset-0 flex items-center justify-center text-xs text-red-400 px-2"
       >
         {{ transcriptionStore.error }}
       </div>
 
       <div
-        v-else-if="!transcriptionStore.hasTranscription && !hasAudio"
+        v-else-if="!hasAnyTranscription && !hasAudio"
         class="absolute inset-0 flex items-center justify-center text-xs text-gray-600"
       >
         Load audio to see transcription
       </div>
 
       <div
-        v-else-if="!transcriptionStore.hasTranscription"
+        v-else-if="!hasAnyTranscription"
         class="absolute inset-0 flex items-center justify-center text-xs text-gray-600"
       >
         No transcription available
@@ -249,7 +273,7 @@ onUnmounted(() => {
 
     <!-- Falloff toggle bar (replaces global offset drag bar) -->
     <div
-      v-if="transcriptionStore.hasTranscription"
+      v-if="hasAnyTranscription"
       class="h-4 bg-gray-800 border-t border-gray-700 flex items-center"
     >
       <!-- Falloff toggle -->
@@ -262,7 +286,7 @@ onUnmounted(() => {
           type="checkbox"
           :checked="enableFalloff"
           class="w-2.5 h-2.5 rounded border-gray-600 bg-gray-700 text-cyan-500 focus:ring-0 focus:ring-offset-0 cursor-pointer"
-          @change="trackId && transcriptionStore.setEnableFalloff(trackId, ($event.target as HTMLInputElement).checked)"
+          @change="selectedTrackId && transcriptionStore.setEnableFalloff(selectedTrackId, ($event.target as HTMLInputElement).checked)"
           @click.stop
         />
         Pull
