@@ -10,7 +10,7 @@ import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
 
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.3.2';
 
 const emit = defineEmits<{
   close: [];
