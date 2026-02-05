@@ -42,12 +42,13 @@ const currentTime = computed(() => playbackStore.currentTime);
 const highlightedIndices = computed(() => getHighlightedWordIndices());
 
 // Drag state
-type DragMode = 'none' | 'word';
+type DragMode = 'none' | 'word' | 'global';
 const dragMode = ref<DragMode>('none');
 const dragWordId = ref<string | null>(null);
 const dragTrackId = ref<string | null>(null);
 const dragStartX = ref(0);
 const dragStartOffsetMs = ref(0);
+const globalDragLastX = ref(0);
 
 // Show words from ALL tracks in the visible range
 const visibleWords = computed((): WordWithTrack[] => {
@@ -133,13 +134,31 @@ function handleWordDragStart(event: MouseEvent, word: WordWithTrack) {
   document.addEventListener('mouseup', handleMouseUp);
 }
 
-function handleMouseMove(event: MouseEvent) {
-  const deltaX = event.clientX - dragStartX.value;
-  const deltaMs = xToMs(deltaX);
+function handleGlobalDragStart(event: MouseEvent) {
+  event.preventDefault();
+  if (!selectedTrackId.value) return;
+  if (!transcriptionStore.hasTranscriptionForTrack(selectedTrackId.value)) return;
 
+  useHistoryStore().pushState('Shift all words');
+  dragMode.value = 'global';
+  dragTrackId.value = selectedTrackId.value;
+  globalDragLastX.value = event.clientX;
+
+  document.addEventListener('mousemove', handleMouseMove);
+  document.addEventListener('mouseup', handleMouseUp);
+}
+
+function handleMouseMove(event: MouseEvent) {
   if (dragMode.value === 'word' && dragWordId.value && dragTrackId.value) {
+    const deltaX = event.clientX - dragStartX.value;
+    const deltaMs = xToMs(deltaX);
     const newOffsetMs = dragStartOffsetMs.value + deltaMs;
     transcriptionStore.setWordOffset(dragTrackId.value, dragWordId.value, newOffsetMs);
+  } else if (dragMode.value === 'global' && dragTrackId.value) {
+    const deltaX = event.clientX - globalDragLastX.value;
+    globalDragLastX.value = event.clientX;
+    const deltaMs = xToMs(deltaX);
+    transcriptionStore.shiftAllWords(dragTrackId.value, deltaMs);
   }
 }
 
@@ -271,14 +290,14 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Falloff toggle bar (replaces global offset drag bar) -->
+    <!-- Control bar: falloff toggle + global drag handle -->
     <div
       v-if="hasAnyTranscription"
-      class="h-4 bg-gray-800 border-t border-gray-700 flex items-center"
+      class="h-5 bg-gray-800 border-t border-gray-700 flex items-center"
     >
       <!-- Falloff toggle -->
       <label
-        class="flex items-center gap-1 px-2 text-[9px] text-gray-500 cursor-pointer hover:text-gray-400 select-none"
+        class="flex items-center gap-1 px-2 text-[9px] text-gray-500 cursor-pointer hover:text-gray-400 select-none shrink-0"
         @click.stop
         title="When enabled, dragging a word pulls neighbors with diminishing force"
       >
@@ -291,6 +310,25 @@ onUnmounted(() => {
         />
         Pull
       </label>
+
+      <!-- Global drag handle — shifts all words in selected track -->
+      <div
+        class="flex-1 h-full flex items-center justify-center cursor-ew-resize select-none group"
+        :class="{ 'opacity-40': !selectedTrackId || !transcriptionStore.hasTranscriptionForTrack(selectedTrackId!) }"
+        title="Drag left/right to shift all words for the selected track"
+        @mousedown="handleGlobalDragStart"
+      >
+        <div class="flex items-center gap-0.5 text-gray-600 group-hover:text-gray-400 transition-colors">
+          <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>
+          <div class="w-4 h-1 rounded-full bg-gray-600 group-hover:bg-gray-400 transition-colors" />
+          <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7" /></svg>
+        </div>
+      </div>
+
+      <!-- Track name hint -->
+      <span v-if="selectedTrackId" class="text-[9px] text-gray-600 px-2 shrink-0 truncate max-w-[120px]">
+        {{ tracksStore.tracks.find(t => t.id === selectedTrackId)?.name }}
+      </span>
     </div>
   </div>
 </template>

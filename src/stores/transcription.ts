@@ -193,95 +193,127 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const word = allWords[wordIndex];
     const newOffsetSec = offsetMs / 1000;
 
-    // Get the previous offset for this word to calculate delta
+    // Delta since last call (for falloff calculations)
     const prevOffset = t.wordOffsets.get(wordId) ?? 0;
     const deltaMs = offsetMs - prevOffset;
 
-    // Calculate the new adjusted times for this word
-    const newStart = word.start + newOffsetSec;
-    const newEnd = word.end + newOffsetSec;
-
-    // Set the offset for this word
+    // Set the offset for the dragged word
     if (offsetMs === 0) {
       t.wordOffsets.delete(wordId);
     } else {
       t.wordOffsets.set(wordId, offsetMs);
     }
 
-    // Push neighbors if enabled
-    if (pushNeighbors) {
-      const minGap = 0.01;
-      const falloffFactor = t.enableFalloff ? 0.6 : 1.0;
-      const falloffRadius = t.enableFalloff ? 5 : 100;
+    if (!pushNeighbors || Math.abs(deltaMs) < 0.5) return;
 
-      // Check and push previous words
-      if (wordIndex > 0) {
-        let prevIndex = wordIndex - 1;
-        let requiredEndTime = newStart - minGap;
-        let distance = 1;
+    const minGap = 0.01; // seconds between words
 
-        while (prevIndex >= 0 && distance <= falloffRadius) {
-          const prevWord = allWords[prevIndex];
-          const prevCurrentOffset = t.wordOffsets.get(prevWord.id) ?? 0;
+    if (t.enableFalloff) {
+      // ── PULL MODE: apply fractional delta to neighbors in BOTH directions ──
+      const falloffFactor = 0.55;
+      const falloffRadius = 5;
 
-          if (t.enableFalloff && deltaMs < 0) {
-            const pullFactor = Math.pow(falloffFactor, distance);
-            const pullAmount = deltaMs * pullFactor;
-            if (Math.abs(pullAmount) > 1) {
-              const newPrevOffset = prevCurrentOffset + pullAmount;
-              t.wordOffsets.set(prevWord.id, newPrevOffset);
-            }
-          }
-
-          const prevUpdatedOffset = t.wordOffsets.get(prevWord.id) ?? 0;
-          const prevUpdatedEnd = prevWord.end + (prevUpdatedOffset / 1000);
-
-          if (prevUpdatedEnd > requiredEndTime) {
-            const pushAmount = prevUpdatedEnd - requiredEndTime;
-            const newPrevOffset = prevUpdatedOffset - (pushAmount * 1000);
-            t.wordOffsets.set(prevWord.id, newPrevOffset);
-            const prevWordDuration = prevWord.end - prevWord.start;
-            requiredEndTime = requiredEndTime - prevWordDuration - minGap;
-          }
-
-          prevIndex--;
-          distance++;
+      // Pull previous words (left neighbors) in the same direction
+      for (let i = wordIndex - 1, dist = 1; i >= 0 && dist <= falloffRadius; i--, dist++) {
+        const neighbor = allWords[i];
+        const curOffset = t.wordOffsets.get(neighbor.id) ?? 0;
+        const pullAmount = deltaMs * Math.pow(falloffFactor, dist);
+        if (Math.abs(pullAmount) > 0.5) {
+          t.wordOffsets.set(neighbor.id, curOffset + pullAmount);
         }
       }
 
-      // Check and push next words
-      if (wordIndex < allWords.length - 1) {
-        let nextIndex = wordIndex + 1;
-        let requiredStartTime = newEnd + minGap;
-        let distance = 1;
-
-        while (nextIndex < allWords.length && distance <= falloffRadius) {
-          const nextWord = allWords[nextIndex];
-          const nextCurrentOffset = t.wordOffsets.get(nextWord.id) ?? 0;
-
-          if (t.enableFalloff && deltaMs > 0) {
-            const pullFactor = Math.pow(falloffFactor, distance);
-            const pullAmount = deltaMs * pullFactor;
-            if (Math.abs(pullAmount) > 1) {
-              const newNextOffset = nextCurrentOffset + pullAmount;
-              t.wordOffsets.set(nextWord.id, newNextOffset);
-            }
-          }
-
-          const nextUpdatedOffset = t.wordOffsets.get(nextWord.id) ?? 0;
-          const nextUpdatedStart = nextWord.start + (nextUpdatedOffset / 1000);
-
-          if (nextUpdatedStart < requiredStartTime) {
-            const pushAmount = requiredStartTime - nextUpdatedStart;
-            const newNextOffset = nextUpdatedOffset + (pushAmount * 1000);
-            t.wordOffsets.set(nextWord.id, newNextOffset);
-            const nextWordDuration = nextWord.end - nextWord.start;
-            requiredStartTime = requiredStartTime + nextWordDuration + minGap;
-          }
-
-          nextIndex++;
-          distance++;
+      // Pull next words (right neighbors) in the same direction
+      for (let i = wordIndex + 1, dist = 1; i < allWords.length && dist <= falloffRadius; i++, dist++) {
+        const neighbor = allWords[i];
+        const curOffset = t.wordOffsets.get(neighbor.id) ?? 0;
+        const pullAmount = deltaMs * Math.pow(falloffFactor, dist);
+        if (Math.abs(pullAmount) > 0.5) {
+          t.wordOffsets.set(neighbor.id, curOffset + pullAmount);
         }
+      }
+
+      // ── Second pass: resolve any remaining overlaps ──
+      resolveOverlaps(t, allWords, wordIndex, minGap);
+    } else {
+      // ── NO PULL: only hard-push to prevent overlap ──
+      const newStart = word.start + newOffsetSec;
+      const newEnd = word.end + newOffsetSec;
+
+      // Push previous words left if dragged word collides
+      let requiredEnd = newStart - minGap;
+      for (let i = wordIndex - 1; i >= 0; i--) {
+        const prev = allWords[i];
+        const prevOff = t.wordOffsets.get(prev.id) ?? 0;
+        const prevEnd = prev.end + prevOff / 1000;
+        if (prevEnd > requiredEnd) {
+          const pushMs = (prevEnd - requiredEnd) * 1000;
+          t.wordOffsets.set(prev.id, prevOff - pushMs);
+          requiredEnd = (prev.start + (prevOff - pushMs) / 1000) - minGap;
+        } else {
+          break;
+        }
+      }
+
+      // Push next words right if dragged word collides
+      let requiredStart = newEnd + minGap;
+      for (let i = wordIndex + 1; i < allWords.length; i++) {
+        const next = allWords[i];
+        const nextOff = t.wordOffsets.get(next.id) ?? 0;
+        const nextStart = next.start + nextOff / 1000;
+        if (nextStart < requiredStart) {
+          const pushMs = (requiredStart - nextStart) * 1000;
+          t.wordOffsets.set(next.id, nextOff + pushMs);
+          requiredStart = (next.end + (nextOff + pushMs) / 1000) + minGap;
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  /** Resolve overlaps outward from a pivot index */
+  function resolveOverlaps(t: TrackTranscription, allWords: Word[], pivotIndex: number, minGap: number): void {
+    // Resolve leftward from pivot
+    for (let i = pivotIndex; i > 0; i--) {
+      const cur = allWords[i];
+      const prev = allWords[i - 1];
+      const curOff = t.wordOffsets.get(cur.id) ?? 0;
+      const prevOff = t.wordOffsets.get(prev.id) ?? 0;
+      const curStart = cur.start + curOff / 1000;
+      const prevEnd = prev.end + prevOff / 1000;
+      if (prevEnd > curStart - minGap) {
+        const pushMs = (prevEnd - (curStart - minGap)) * 1000;
+        t.wordOffsets.set(prev.id, prevOff - pushMs);
+      }
+    }
+    // Resolve rightward from pivot
+    for (let i = pivotIndex; i < allWords.length - 1; i++) {
+      const cur = allWords[i];
+      const next = allWords[i + 1];
+      const curOff = t.wordOffsets.get(cur.id) ?? 0;
+      const nextOff = t.wordOffsets.get(next.id) ?? 0;
+      const curEnd = cur.end + curOff / 1000;
+      const nextStart = next.start + nextOff / 1000;
+      if (nextStart < curEnd + minGap) {
+        const pushMs = ((curEnd + minGap) - nextStart) * 1000;
+        t.wordOffsets.set(next.id, nextOff + pushMs);
+      }
+    }
+  }
+
+  // ─── Shift all words in a track (global drag bar) ───
+  function shiftAllWords(trackId: string, deltaMs: number): void {
+    const t = transcriptions.value.get(trackId);
+    if (!t || Math.abs(deltaMs) < 0.1) return;
+
+    for (const word of t.words) {
+      const cur = t.wordOffsets.get(word.id) ?? 0;
+      const newOffset = cur + deltaMs;
+      if (Math.abs(newOffset) < 0.5) {
+        t.wordOffsets.delete(word.id);
+      } else {
+        t.wordOffsets.set(word.id, newOffset);
       }
     }
   }
@@ -811,6 +843,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     removeTranscription,
     // Word editing
     setWordOffset,
+    shiftAllWords,
     updateWordText,
     getWordOffset,
     setEnableFalloff,
