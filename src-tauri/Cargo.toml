@@ -1,6 +1,6 @@
 [package]
 name = "clip-doctor-scrubs"
-version = "0.3.2"
+version = "0.4.0"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
