@@ -20,7 +20,7 @@ const sources: { value: RecordingSource; label: string; icon: string }[] = [
 // Auto-start monitoring when device or source changes
 watch(
   () => ({ deviceId: recordingStore.selectedDeviceId, source: recordingStore.source }),
-  async (newVal, oldVal) => {
+  async (newVal) => {
     if (recordingStore.isRecording) return;
 
     // Stop previous monitoring if running
@@ -74,13 +74,7 @@ async function handleDeviceChange(deviceId: string) {
   await recordingStore.startMonitoring();
 }
 
-async function handleUnmute() {
-  const success = await recordingStore.unmute();
-  if (success) {
-    // Re-check mute status and restart monitoring to pick up the change
-    await recordingStore.checkMuted();
-  }
-}
+
 
 
 </script>

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
@@ -270,6 +270,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       }
     }
+
+    triggerRef(transcriptions);
   }
 
   /** Resolve overlaps outward from a pivot index */
@@ -316,11 +318,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         t.wordOffsets.set(word.id, newOffset);
       }
     }
+
+    triggerRef(transcriptions);
   }
 
   function setEnableFalloff(trackId: string, enabled: boolean): void {
     const t = transcriptions.value.get(trackId);
-    if (t) t.enableFalloff = enabled;
+    if (t) {
+      t.enableFalloff = enabled;
+      triggerRef(transcriptions);
+    }
   }
 
   // ─── Word text editing ───
@@ -333,6 +340,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       useHistoryStore().pushState('Edit word');
       word.text = newText;
       t.fullText = t.words.map((w) => w.text).join(' ');
+      triggerRef(transcriptions);
       saveTranscription(trackId);
     }
   }
@@ -442,6 +450,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     t.words = newWords;
     t.fullText = newWords.map(w => w.text).join(' ');
+    triggerRef(transcriptions);
 
     console.log(`[Transcription] adjustForCut(${trackId}): removed ${idsToRemove.size} words, shifted remaining left by ${gapDuration.toFixed(2)}s`);
   }
@@ -470,6 +479,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     t.words = t.words.filter(w => !idsToRemove.has(w.id));
     t.fullText = t.words.map(w => w.text).join(' ');
+    triggerRef(transcriptions);
 
     console.log(`[Transcription] adjustForDelete(${trackId}): removed ${idsToRemove.size} words`);
   }
@@ -479,6 +489,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     console.log(`[Transcription][MAP] removeTranscription(${trackId.slice(0, 8)})`);
     logMapState('BEFORE removeTranscription');
     transcriptions.value.delete(trackId);
+    triggerRef(transcriptions);
     logMapState('AFTER removeTranscription');
     // Also remove any pending jobs for this track
     jobQueue.value = jobQueue.value.filter(j => j.trackId !== trackId);
@@ -647,6 +658,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           enableFalloff: true,
         });
         logMapState(`AFTER disk load set(${trackId.slice(0, 8)})`);
+        triggerRef(transcriptions);
 
         console.log(`[Transcription] Loaded from disk for track ${trackId}`);
         return true;
@@ -719,6 +731,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       enableFalloff: true,
     });
     logMapState(`AFTER set in runTranscriptionFromFile(${trackId.slice(0, 8)})`);
+    triggerRef(transcriptions);
 
     if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
@@ -816,6 +829,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       enableFalloff: true,
     });
     logMapState(`AFTER set in runTranscriptionFromBuffer(${trackId.slice(0, 8)})`);
+    triggerRef(transcriptions);
 
     if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };

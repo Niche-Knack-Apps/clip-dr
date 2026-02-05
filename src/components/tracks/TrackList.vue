@@ -292,9 +292,11 @@ function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number
     tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
   }
 
-  // Re-run transcription since audio positions have changed
-  if (transcriptionStore.hasTranscriptionForTrack(trackId)) {
-    console.log('[TrackList] Clip moved, re-queuing transcription...');
+  // Only re-transcribe multi-clip tracks where clip arrangement changed audio content.
+  // Single-buffer tracks only change trackStart, which getAdjustedWords() handles via trackOffset.
+  const movedTrack = tracksStore.tracks.find(t => t.id === trackId);
+  if (movedTrack?.clips && movedTrack.clips.length > 1 && transcriptionStore.hasTranscriptionForTrack(trackId)) {
+    console.log('[TrackList] Multi-clip track rearranged, re-queuing transcription...');
     transcriptionStore.removeTranscription(trackId);
     transcriptionStore.queueTranscription(trackId, 'normal');
   }
