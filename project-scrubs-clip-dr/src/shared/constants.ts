@@ -71,8 +71,8 @@ export const TRACK_HEIGHT = 60;
 export const WORD_HEIGHT = 24;
 export const TOOLBAR_ROW_HEIGHT = 40;
 export const TOOLBAR_HEIGHT = TOOLBAR_ROW_HEIGHT * 2; // Two rows
-export const WAVEFORM_HEIGHT = 150;
-export const ZOOMED_HEIGHT = 200;
+export const WAVEFORM_HEIGHT = 100;
+export const ZOOMED_HEIGHT = 130;
 
 // Track panel dimensions
 export const TRACK_PANEL_MIN_WIDTH = 80;

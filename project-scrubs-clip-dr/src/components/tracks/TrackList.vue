@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import TrackLane from './TrackLane.vue';
 import { useClipping } from '@/composables/useClipping';
 import { useAudioStore } from '@/stores/audio';
@@ -73,6 +73,10 @@ function handleZoomSlider(event: Event) {
 
 // Reference to the scroll container for zoom calculations
 const scrollContainerRef = ref<HTMLDivElement | null>(null);
+// Reference to the inner content wrapper to measure actual rendered width
+const contentRef = ref<HTMLDivElement | null>(null);
+const contentWidth = ref(0);
+let contentResizeObserver: ResizeObserver | null = null;
 
 // Timeline width based on zoom level
 // When zoomed all the way out, show all content plus 10% padding on the right
@@ -84,20 +88,21 @@ const timelineWidth = computed(() => {
 });
 
 // Selection window overlay position on track list
+// Uses actual rendered width (from ResizeObserver) to match ClipRegion's coordinate space
 const selectionOverlayLeft = computed(() => {
   const duration = tracksStore.timelineDuration;
-  if (duration <= 0) return 0;
-  const paddedDuration = duration * 1.1;
-  const timelineAreaWidth = timelineWidth.value - panelWidth.value;
-  return (selectionStore.selection.start / paddedDuration) * timelineAreaWidth + panelWidth.value;
+  if (duration <= 0 || contentWidth.value <= 0) return 0;
+  const timelineAreaWidth = contentWidth.value - panelWidth.value;
+  if (timelineAreaWidth <= 0) return 0;
+  return (selectionStore.selection.start / duration) * timelineAreaWidth + panelWidth.value;
 });
 
 const selectionOverlayWidth = computed(() => {
   const duration = tracksStore.timelineDuration;
-  if (duration <= 0) return 0;
-  const paddedDuration = duration * 1.1;
-  const timelineAreaWidth = timelineWidth.value - panelWidth.value;
-  return ((selectionStore.selection.end - selectionStore.selection.start) / paddedDuration) * timelineAreaWidth;
+  if (duration <= 0 || contentWidth.value <= 0) return 0;
+  const timelineAreaWidth = contentWidth.value - panelWidth.value;
+  if (timelineAreaWidth <= 0) return 0;
+  return ((selectionStore.selection.end - selectionStore.selection.start) / duration) * timelineAreaWidth;
 });
 
 // Auto zoom all the way out when tracks are added via import or record
@@ -314,6 +319,23 @@ function handleClipDragLeaveTrack() {
   }
 }
 
+// Measure actual rendered width of the content wrapper
+onMounted(() => {
+  if (contentRef.value) {
+    contentWidth.value = contentRef.value.clientWidth;
+    contentResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        contentWidth.value = entry.contentRect.width;
+      }
+    });
+    contentResizeObserver.observe(contentRef.value);
+  }
+});
+
+onUnmounted(() => {
+  contentResizeObserver?.disconnect();
+});
+
 // Clip select handler (click without drag)
 function handleClipSelect(trackId: string, clipId: string) {
   // Only change track selection if needed (avoid clearing clip selection via selectTrack)
@@ -343,6 +365,17 @@ function handleClipSelect(trackId: string, clipId: string) {
         >
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
             <path d="m15,0v11.807c0,1.638-1.187,3.035-2.701,3.179-.858.083-1.684-.189-2.316-.765-.625-.568-.983-1.377-.983-2.221V0H0v11.652c0,6.689,5,12.348,12.003,12.348,3.164,0,6.142-1.216,8.404-3.437,2.316-2.275,3.593-5.316,3.593-8.563V0h-9Zm6,12c0,2.435-.957,4.716-2.695,6.422-1.736,1.706-4.039,2.618-6.474,2.576-4.869-.089-8.831-4.282-8.831-9.347v-5.652h3v6c0,1.687.716,3.305,1.965,4.44,1.248,1.135,2.932,1.695,4.62,1.532,3.037-.29,5.416-2.998,5.416-6.166v-5.807h3v6Z"/>
+          </svg>
+        </button>
+        <!-- Add empty track button -->
+        <button
+          type="button"
+          class="p-1 rounded transition-colors bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white"
+          title="Add empty track"
+          @click="tracksStore.addEmptyTrack()"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
           </svg>
         </button>
       </div>
@@ -376,6 +409,7 @@ function handleClipSelect(trackId: string, clipId: string) {
       @wheel="handleWheel"
     >
       <div
+        ref="contentRef"
         class="relative"
         :style="{ minWidth: `${timelineWidth}px` }"
       >

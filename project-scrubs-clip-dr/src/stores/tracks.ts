@@ -5,6 +5,7 @@ import { TRACK_COLORS } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
+import { useAudioStore } from './audio';
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
@@ -14,6 +15,14 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Selected clip within a track (for segment operations)
   const selectedClipId = ref<string | null>(null);
+
+  // Pending drag position for single-clip tracks — decoupled from track.trackStart
+  // to prevent timelineDuration from changing during drag (which causes clip resizing)
+  const activeDrag = ref<{ trackId: string; position: number } | null>(null);
+
+  // Minimum timeline duration floor — prevents timeline from shrinking when dragging left.
+  // Gets expanded when dragging right, only resets when user manually zooms.
+  const minTimelineDuration = ref(0);
 
   // Track color counter for automatic color assignment
   let colorIndex = 0;
@@ -33,9 +42,11 @@ export const useTracksStore = defineStore('tracks', () => {
   });
 
   // Computed: Timeline duration is the max end time of all tracks
+  // Uses minTimelineDuration as a floor to prevent shrinking when dragging clips left
   const timelineDuration = computed(() => {
-    if (tracks.value.length === 0) return 0;
-    return Math.max(...tracks.value.map((t) => t.trackStart + t.duration));
+    if (tracks.value.length === 0) return minTimelineDuration.value;
+    const actualDuration = Math.max(...tracks.value.map((t) => t.trackStart + t.duration));
+    return Math.max(actualDuration, minTimelineDuration.value);
   });
 
   // Computed: Check if any track has audio loaded
@@ -387,6 +398,12 @@ export const useTracksStore = defineStore('tracks', () => {
     }
     useHistoryStore().pushState('Cut region');
 
+    // ── Multi-clip track: process each clip individually ──
+    if (track.clips && track.clips.length > 0) {
+      return cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext);
+    }
+
+    // ── Single-buffer track (original path) ──
     // Convert timeline coordinates to track-relative
     const trackStart = track.trackStart;
     const relativeIn = inPoint - trackStart;
@@ -496,6 +513,136 @@ export const useTracksStore = defineStore('tracks', () => {
     return { buffer: cutBuffer, waveformData: cutWaveform };
   }
 
+  // Cut a region from a multi-clip track, operating on each clip's own buffer
+  function cutRegionFromClips(
+    track: Track,
+    trackId: string,
+    inPoint: number,
+    outPoint: number,
+    audioContext: AudioContext
+  ): { buffer: AudioBuffer; waveformData: number[] } | null {
+    const clips = track.clips!;
+    const newClips: TrackClip[] = [];
+    const cutContributions: { buffer: AudioBuffer; offsetInRegion: number }[] = [];
+    let maxChannels = 1;
+    let sampleRate = 44100;
+
+    for (const clip of clips) {
+      const clipEnd = clip.clipStart + clip.duration;
+
+      // No overlap — keep clip unchanged
+      if (clip.clipStart >= outPoint || clipEnd <= inPoint) {
+        newClips.push(clip);
+        continue;
+      }
+
+      const buf = clip.buffer;
+      sampleRate = buf.sampleRate;
+      maxChannels = Math.max(maxChannels, buf.numberOfChannels);
+
+      // Calculate overlap in timeline coordinates
+      const overlapStart = Math.max(clip.clipStart, inPoint);
+      const overlapEnd = Math.min(clipEnd, outPoint);
+
+      // Convert to clip-relative sample positions
+      const relOverlapStart = overlapStart - clip.clipStart;
+      const relOverlapEnd = overlapEnd - clip.clipStart;
+      const oStartSample = Math.floor(relOverlapStart * buf.sampleRate);
+      const oEndSample = Math.floor(relOverlapEnd * buf.sampleRate);
+
+      // Extract the overlapping portion for the cut buffer
+      const oLength = oEndSample - oStartSample;
+      if (oLength > 0) {
+        const oBuf = audioContext.createBuffer(buf.numberOfChannels, oLength, buf.sampleRate);
+        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+          const src = buf.getChannelData(ch);
+          const dest = oBuf.getChannelData(ch);
+          for (let i = 0; i < oLength; i++) dest[i] = src[oStartSample + i];
+        }
+        cutContributions.push({ buffer: oBuf, offsetInRegion: overlapStart - inPoint });
+      }
+
+      // Keep audio BEFORE the cut region (if any)
+      if (oStartSample > 0) {
+        const beforeBuf = audioContext.createBuffer(buf.numberOfChannels, oStartSample, buf.sampleRate);
+        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+          const src = buf.getChannelData(ch);
+          const dest = beforeBuf.getChannelData(ch);
+          for (let i = 0; i < oStartSample; i++) dest[i] = src[i];
+        }
+        newClips.push({
+          id: generateId(),
+          buffer: beforeBuf,
+          waveformData: generateWaveformFromBuffer(beforeBuf),
+          clipStart: clip.clipStart,
+          duration: beforeBuf.duration,
+        });
+      }
+
+      // Keep audio AFTER the cut region (if any)
+      const afterStart = oEndSample;
+      const afterLen = buf.length - afterStart;
+      if (afterLen > 0) {
+        const afterBuf = audioContext.createBuffer(buf.numberOfChannels, afterLen, buf.sampleRate);
+        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+          const src = buf.getChannelData(ch);
+          const dest = afterBuf.getChannelData(ch);
+          for (let i = 0; i < afterLen; i++) dest[i] = src[afterStart + i];
+        }
+        newClips.push({
+          id: generateId(),
+          buffer: afterBuf,
+          waveformData: generateWaveformFromBuffer(afterBuf),
+          clipStart: overlapEnd,
+          duration: afterBuf.duration,
+        });
+      }
+    }
+
+    if (cutContributions.length === 0) return null;
+
+    // Mix all cut portions into a single buffer
+    const cutDuration = outPoint - inPoint;
+    const totalSamples = Math.ceil(cutDuration * sampleRate);
+    const mixedCut = audioContext.createBuffer(maxChannels, totalSamples, sampleRate);
+    for (const { buffer, offsetInRegion } of cutContributions) {
+      const offsetSamples = Math.floor(offsetInRegion * sampleRate);
+      for (let ch = 0; ch < maxChannels; ch++) {
+        const dest = mixedCut.getChannelData(ch);
+        const srcCh = Math.min(ch, buffer.numberOfChannels - 1);
+        const src = buffer.getChannelData(srcCh);
+        for (let i = 0; i < src.length && (offsetSamples + i) < totalSamples; i++) {
+          dest[offsetSamples + i] += src[i];
+        }
+      }
+    }
+    const cutWaveform = generateWaveformFromBuffer(mixedCut);
+
+    // Update track with remaining clips
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return { buffer: mixedCut, waveformData: cutWaveform };
+
+    if (newClips.length === 0) {
+      deleteTrack(trackId);
+      console.log('[Tracks] All clips cut from track, deleted');
+      return { buffer: mixedCut, waveformData: cutWaveform };
+    }
+
+    const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+
+    tracks.value[trackIndex] = {
+      ...track,
+      clips: newClips,
+      trackStart: firstClipStart,
+      duration: lastClipEnd - firstClipStart,
+    };
+    tracks.value = [...tracks.value];
+
+    console.log(`[Tracks] Cut region from ${clips.length} clips, ${newClips.length} clips remain`);
+    return { buffer: mixedCut, waveformData: cutWaveform };
+  }
+
   // Get all clips for a track (returns single-element array if no clips defined)
   function getTrackClips(trackId: string): TrackClip[] {
     const track = tracks.value.find((t) => t.id === trackId);
@@ -506,11 +653,16 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     // Convert single audioData to a clip for uniform handling
+    // Use activeDrag position if this track is being dragged, so clip moves visually
+    const clipStart = (activeDrag.value?.trackId === track.id)
+      ? activeDrag.value.position
+      : track.trackStart;
+
     return [{
       id: track.id + '-main',
       buffer: track.audioData.buffer,
       waveformData: track.audioData.waveformData,
-      clipStart: track.trackStart,
+      clipStart,
       duration: track.duration,
     }];
   }
@@ -608,11 +760,15 @@ export const useTracksStore = defineStore('tracks', () => {
     if (!track.clips || track.clips.length === 0) {
       // For tracks without clips array, clipId is "trackId-main"
       if (clipId === track.id + '-main') {
-        // For single-clip tracks, snap is handled differently (snap to other tracks' clips)
-        // For now, just constrain to >= 0
-        track.trackStart = Math.max(0, newClipStart);
-        // Trigger reactivity
-        tracks.value = [...tracks.value];
+        const newPosition = Math.max(0, newClipStart);
+        // Write to activeDrag instead of track.trackStart so timelineDuration
+        // stays stable during drag (prevents all clips from resizing)
+        activeDrag.value = { trackId: track.id, position: newPosition };
+        // Expand minTimelineDuration if dragging extends the timeline
+        const newExtent = newPosition + track.duration;
+        if (newExtent > minTimelineDuration.value) {
+          minTimelineDuration.value = newExtent;
+        }
       }
       return;
     }
@@ -638,6 +794,12 @@ export const useTracksStore = defineStore('tracks', () => {
       ...track.clips[clipIndex],
       clipStart: snappedStart,
     };
+
+    // Expand minTimelineDuration if dragging extends the timeline
+    const newExtent = snappedStart + clip.duration;
+    if (newExtent > minTimelineDuration.value) {
+      minTimelineDuration.value = newExtent;
+    }
 
     // Trigger reactivity
     tracks.value = [...tracks.value];
@@ -802,7 +964,16 @@ export const useTracksStore = defineStore('tracks', () => {
     if (trackIndex === -1) return;
 
     const track = tracks.value[trackIndex];
-    if (!track.clips || track.clips.length === 0) return;
+
+    // Handle single-clip track: commit activeDrag position to track.trackStart
+    if (!track.clips || track.clips.length === 0) {
+      if (activeDrag.value?.trackId === trackId) {
+        track.trackStart = activeDrag.value.position;
+        activeDrag.value = null;
+        tracks.value = [...tracks.value];
+      }
+      return;
+    }
 
     // Recalculate track bounds based on all clips
     const firstClipStart = Math.min(...track.clips.map(c => c.clipStart));
@@ -1005,6 +1176,21 @@ export const useTracksStore = defineStore('tracks', () => {
     return true;
   }
 
+  // Reset the minimum timeline duration floor (called when user manually zooms)
+  function resetMinTimelineDuration(): void {
+    minTimelineDuration.value = 0;
+  }
+
+  // Add an empty track (tiny silent buffer - essentially invisible)
+  function addEmptyTrack(): void {
+    const ctx = useAudioStore().getAudioContext();
+    const sampleRate = 44100;
+    const silentBuffer = ctx.createBuffer(1, 100, sampleRate); // ~2ms silence (invisible)
+    const name = `Track ${tracks.value.length + 1}`;
+    const track = createTrackFromBuffer(silentBuffer, null, name);
+    selectTrack(track.id);
+  }
+
   return {
     tracks,
     selectedTrackId,
@@ -1044,5 +1230,7 @@ export const useTracksStore = defineStore('tracks', () => {
     deleteClipFromTrack,
     splitClipAtTime,
     insertClipAtPlayhead,
+    addEmptyTrack,
+    resetMinTimelineDuration,
   };
 });

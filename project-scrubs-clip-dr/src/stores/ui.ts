@@ -7,6 +7,7 @@ import {
   WAVEFORM_HEIGHT,
   ZOOMED_HEIGHT,
 } from '@/shared/constants';
+import { useTracksStore } from './tracks';
 
 // Section height constraints
 const SECTION_MIN_HEIGHT = 80;
@@ -74,6 +75,8 @@ export const useUIStore = defineStore('ui', () => {
 
   function setTrackZoom(zoom: number): void {
     trackZoom.value = Math.max(TRACK_ZOOM_MIN, Math.min(TRACK_ZOOM_MAX, zoom));
+    // Reset the timeline duration floor when user manually zooms
+    useTracksStore().resetMinTimelineDuration();
   }
 
   function zoomTrackIn(): void {
