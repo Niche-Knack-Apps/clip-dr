@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue';
 import { useTranscriptionStore } from '@/stores/transcription';
+import { useTracksStore } from '@/stores/tracks';
 import { useSelectionStore } from '@/stores/selection';
 import { usePlaybackStore } from '@/stores/playback';
 import type { SearchResult } from '@/shared/types';
@@ -8,6 +9,7 @@ import { SEARCH_STOPWORDS, SEARCH_MIN_WORDS } from '@/shared/constants';
 
 export function useSearch() {
   const transcriptionStore = useTranscriptionStore();
+  const tracksStore = useTracksStore();
   const selectionStore = useSelectionStore();
   const playbackStore = usePlaybackStore();
 
@@ -25,14 +27,26 @@ export function useSearch() {
   // Padding around the matched phrase (in seconds)
   const SELECTION_PADDING = 0.5;
 
+  function getSelectedTrackId(): string | null {
+    const sel = tracksStore.selectedTrackId;
+    if (!sel || sel === 'ALL') return null;
+    return sel;
+  }
+
   const performSearch = debounce(() => {
+    const trackId = getSelectedTrackId();
+    if (!trackId) {
+      results.value = [];
+      isSearching.value = false;
+      return;
+    }
+
     const queryWords = query.value.trim().split(/\s+/).filter(Boolean);
     const wordCount = queryWords.length;
-    // Filter out stopwords when checking if we have enough meaningful words
     const meaningfulWords = queryWords.filter(w => !SEARCH_STOPWORDS.has(w.toLowerCase()));
 
     if (meaningfulWords.length >= SEARCH_MIN_WORDS) {
-      results.value = transcriptionStore.searchWords(query.value);
+      results.value = transcriptionStore.searchWords(trackId, query.value);
       currentResultIndex.value = 0;
 
       if (results.value.length > 0) {
@@ -61,28 +75,26 @@ export function useSearch() {
   function navigateToResult(index: number, matchedWordCount?: number): void {
     if (index < 0 || index >= results.value.length) return;
 
+    const trackId = getSelectedTrackId();
+    if (!trackId) return;
+
     currentResultIndex.value = index;
     const result = results.value[index];
-    const allWords = transcriptionStore.words;
+    const allWords = transcriptionStore.getAdjustedWords(trackId);
 
-    // Get the number of matched words from the result or passed parameter
     const wordCount = matchedWordCount ?? result.matchEnd;
 
-    // Get start time of first matched word
     const startWord = result.word;
     const startTime = startWord.start;
 
-    // Get end time of last matched word
     const lastWordIndex = result.wordIndex + wordCount - 1;
     const endWord = lastWordIndex < allWords.length ? allWords[lastWordIndex] : startWord;
     const endTime = endWord.end;
 
-    // Set the zoomed view selection to encompass the matched phrase with padding
     const paddedStart = Math.max(0, startTime - SELECTION_PADDING);
     const paddedEnd = endTime + SELECTION_PADDING;
     selectionStore.setSelection(paddedStart, paddedEnd);
 
-    // Move playhead to the start of the first matched word
     playbackStore.seek(startTime);
   }
 
@@ -105,10 +117,12 @@ export function useSearch() {
 
   function getHighlightedWordIndices(): Set<number> {
     const indices = new Set<number>();
-    const allWords = transcriptionStore.words;
+    const trackId = getSelectedTrackId();
+    if (!trackId) return indices;
+
+    const allWords = transcriptionStore.getAdjustedWords(trackId);
 
     for (const result of results.value) {
-      // Highlight all words in the matched phrase, not just the first one
       for (let i = 0; i < result.matchEnd; i++) {
         const wordIdx = result.wordIndex + i;
         if (wordIdx < allWords.length) {

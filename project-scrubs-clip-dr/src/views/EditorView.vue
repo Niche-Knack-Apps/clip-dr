@@ -32,17 +32,13 @@ const uiStore = useUIStore();
 
 const focusSearch = inject<() => void>('focusSearch');
 
-// Load transcription for the newly selected track
+// Load transcription for the newly selected track (non-blocking)
 watch(
   () => tracksStore.selectedTrackId,
-  (newId, oldId) => {
-    if (newId && newId !== oldId) {
-      // transcribeAudio checks for existing saved transcription first,
-      // falling back to running the model if needed
-      transcriptionStore.transcribeAudio().catch(() => {
-        // Silently fail - track may not have a transcription
-      });
-    }
+  (newId) => {
+    if (!newId || newId === 'ALL') return;
+    // Non-blocking: load from disk or queue background transcription
+    transcriptionStore.loadOrQueueTranscription(newId);
   }
 );
 

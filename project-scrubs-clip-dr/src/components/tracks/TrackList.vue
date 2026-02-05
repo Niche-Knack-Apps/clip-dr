@@ -293,11 +293,10 @@ function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number
   }
 
   // Re-run transcription since audio positions have changed
-  if (transcriptionStore.hasTranscription) {
-    console.log('[TrackList] Clip moved, re-running transcription...');
-    transcriptionStore.reTranscribe().catch((e) => {
-      console.error('[TrackList] Failed to re-transcribe after clip move:', e);
-    });
+  if (transcriptionStore.hasTranscriptionForTrack(trackId)) {
+    console.log('[TrackList] Clip moved, re-queuing transcription...');
+    transcriptionStore.removeTranscription(trackId);
+    transcriptionStore.queueTranscription(trackId, 'normal');
   }
 
   // Reset state

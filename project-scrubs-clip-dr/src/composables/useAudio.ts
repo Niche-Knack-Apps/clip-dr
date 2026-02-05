@@ -3,14 +3,12 @@ import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useTracksStore } from '@/stores/tracks';
-import { useTranscriptionStore } from '@/stores/transcription';
 
 export function useAudio() {
   const audioStore = useAudioStore();
   const playbackStore = usePlaybackStore();
   const selectionStore = useSelectionStore();
   const tracksStore = useTracksStore();
-  const transcriptionStore = useTranscriptionStore();
 
   // Use tracks store to determine if we have audio
   const hasFile = computed(() => tracksStore.hasAudio);
@@ -30,16 +28,13 @@ export function useAudio() {
     // Use the new importFile method which creates a track
     await audioStore.importFile(path);
     selectionStore.resetSelection();
-    transcriptionStore.clearTranscription();
-
-    // Transcription is now triggered in importFile
+    // Transcription is now triggered per-track by EditorView's selectedTrackId watcher
   }
 
   function unloadFile(): void {
     playbackStore.stop();
     audioStore.unloadAll();
     selectionStore.resetSelection();
-    transcriptionStore.clearTranscription();
   }
 
   async function play(): Promise<void> {

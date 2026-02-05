@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onUnmounted, inject } from 'vue';
 import TranscriptionWord from './TranscriptionWord.vue';
 import { useTranscriptionStore } from '@/stores/transcription';
+import { useTracksStore } from '@/stores/tracks';
 import { useSelectionStore } from '@/stores/selection';
 import { usePlaybackStore } from '@/stores/playback';
 import { useAudioStore } from '@/stores/audio';
@@ -13,12 +14,20 @@ import { useHistoryStore } from '@/stores/history';
 const openSettings = inject<() => void>('openSettings');
 
 const transcriptionStore = useTranscriptionStore();
+const tracksStore = useTracksStore();
 const selectionStore = useSelectionStore();
 const playbackStore = usePlaybackStore();
 const audioStore = useAudioStore();
 const { getHighlightedWordIndices } = useSearch();
 
 const hasAudio = computed(() => audioStore.hasAudio);
+
+// Current track ID for per-track operations
+const trackId = computed(() => {
+  const sel = tracksStore.selectedTrackId;
+  if (!sel || sel === 'ALL') return null;
+  return sel;
+});
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
@@ -28,18 +37,26 @@ const currentTime = computed(() => playbackStore.currentTime);
 const highlightedIndices = computed(() => getHighlightedWordIndices());
 
 // Drag state
-type DragMode = 'none' | 'word' | 'global';
+type DragMode = 'none' | 'word';
 const dragMode = ref<DragMode>('none');
 const dragWordId = ref<string | null>(null);
 const dragStartX = ref(0);
 const dragStartOffsetMs = ref(0);
 
 const visibleWords = computed(() => {
-  return transcriptionStore.getWordsInRange(selection.value.start, selection.value.end);
+  if (!trackId.value) return [];
+  return transcriptionStore.getWordsInRange(trackId.value, selection.value.start, selection.value.end);
 });
 
 const activeWord = computed(() => {
-  return transcriptionStore.getWordAtTime(currentTime.value);
+  if (!trackId.value) return null;
+  return transcriptionStore.getWordAtTime(trackId.value, currentTime.value);
+});
+
+// Get the per-track enableFalloff
+const enableFalloff = computed(() => {
+  if (!trackId.value) return true;
+  return transcriptionStore.getTranscription(trackId.value)?.enableFalloff ?? true;
 });
 
 let resizeObserver: ResizeObserver | null = null;
@@ -48,14 +65,6 @@ function updateWidth() {
   if (containerRef.value) {
     containerWidth.value = containerRef.value.clientWidth;
   }
-}
-
-function xToTime(clientX: number): number {
-  if (!containerRef.value) return selection.value.start;
-  const rect = containerRef.value.getBoundingClientRect();
-  const x = clientX - rect.left;
-  const range = selection.value.end - selection.value.start;
-  return (x / rect.width) * range + selection.value.start;
 }
 
 function xToMs(deltaX: number): number {
@@ -84,30 +93,20 @@ function handleWordClick(word: Word) {
 }
 
 function handleWordTextUpdate(wordId: string, newText: string) {
-  transcriptionStore.updateWordText(wordId, newText);
+  if (!trackId.value) return;
+  transcriptionStore.updateWordText(trackId.value, wordId, newText);
 }
 
 function handleWordDragStart(event: MouseEvent, word: Word) {
   event.preventDefault();
   event.stopPropagation();
+  if (!trackId.value) return;
 
   useHistoryStore().pushState('Adjust word timing');
   dragMode.value = 'word';
   dragWordId.value = word.id;
   dragStartX.value = event.clientX;
-  dragStartOffsetMs.value = transcriptionStore.getWordOffset(word.id);
-
-  document.addEventListener('mousemove', handleMouseMove);
-  document.addEventListener('mouseup', handleMouseUp);
-}
-
-function handleGlobalDragStart(event: MouseEvent) {
-  event.preventDefault();
-
-  useHistoryStore().pushState('Shift all words');
-  dragMode.value = 'global';
-  dragStartX.value = event.clientX;
-  dragStartOffsetMs.value = transcriptionStore.globalOffsetMs;
+  dragStartOffsetMs.value = transcriptionStore.getWordOffset(trackId.value, word.id);
 
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseup', handleMouseUp);
@@ -117,19 +116,15 @@ function handleMouseMove(event: MouseEvent) {
   const deltaX = event.clientX - dragStartX.value;
   const deltaMs = xToMs(deltaX);
 
-  if (dragMode.value === 'word' && dragWordId.value) {
+  if (dragMode.value === 'word' && dragWordId.value && trackId.value) {
     const newOffsetMs = dragStartOffsetMs.value + deltaMs;
-    transcriptionStore.setWordOffset(dragWordId.value, newOffsetMs);
-  } else if (dragMode.value === 'global') {
-    const newOffsetMs = dragStartOffsetMs.value + deltaMs;
-    transcriptionStore.setGlobalOffset(newOffsetMs);
+    transcriptionStore.setWordOffset(trackId.value, dragWordId.value, newOffsetMs);
   }
 }
 
 function handleMouseUp() {
-  if (dragMode.value !== 'none' && transcriptionStore.hasUnsavedChanges) {
-    // Auto-save timing adjustments
-    transcriptionStore.saveTimingMetadata();
+  if (dragMode.value !== 'none' && trackId.value) {
+    transcriptionStore.saveTranscription(trackId.value);
   }
 
   dragMode.value = 'none';
@@ -139,7 +134,7 @@ function handleMouseUp() {
 }
 
 function isWordHighlighted(word: Word): boolean {
-  const allWords = transcriptionStore.adjustedWords;
+  const allWords = trackId.value ? transcriptionStore.getAdjustedWords(trackId.value) : [];
   const index = allWords.findIndex((w) => w.id === word.id);
   return highlightedIndices.value.has(index);
 }
@@ -252,11 +247,10 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Global offset drag bar -->
+    <!-- Falloff toggle bar (replaces global offset drag bar) -->
     <div
       v-if="transcriptionStore.hasTranscription"
-      class="h-4 bg-gray-800 border-t border-gray-700 flex items-center transition-colors"
-      :class="{ 'bg-cyan-900/30': dragMode === 'global' }"
+      class="h-4 bg-gray-800 border-t border-gray-700 flex items-center"
     >
       <!-- Falloff toggle -->
       <label
@@ -266,29 +260,13 @@ onUnmounted(() => {
       >
         <input
           type="checkbox"
-          :checked="transcriptionStore.enableFalloff"
+          :checked="enableFalloff"
           class="w-2.5 h-2.5 rounded border-gray-600 bg-gray-700 text-cyan-500 focus:ring-0 focus:ring-offset-0 cursor-pointer"
-          @change="transcriptionStore.setEnableFalloff(($event.target as HTMLInputElement).checked)"
+          @change="trackId && transcriptionStore.setEnableFalloff(trackId, ($event.target as HTMLInputElement).checked)"
           @click.stop
         />
         Pull
       </label>
-
-      <!-- Drag area -->
-      <div
-        class="flex-1 h-full cursor-ew-resize flex items-center justify-center hover:bg-gray-750"
-        @mousedown="handleGlobalDragStart"
-      >
-        <div class="flex items-center gap-1 text-[9px] text-gray-500 select-none">
-          <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4" />
-          </svg>
-          <span v-if="transcriptionStore.globalOffsetMs !== 0">
-            {{ transcriptionStore.globalOffsetMs > 0 ? '+' : '' }}{{ Math.round(transcriptionStore.globalOffsetMs) }}ms
-          </span>
-          <span v-else>Drag to shift all words</span>
-        </div>
-      </div>
     </div>
   </div>
 </template>

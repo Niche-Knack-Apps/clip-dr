@@ -221,7 +221,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
         console.log(`[Clipboard] Ripple cut ${(outPoint - inPoint).toFixed(2)}s from ${results.buffers.length} track(s)`);
 
         // Shift transcription words to match the ripple delete
-        transcriptionStore.rippleShiftWords(inPoint, outPoint);
+        for (const track of tracksStore.tracks) {
+          transcriptionStore.adjustForCut(track.id, inPoint, outPoint);
+        }
       }
 
       // Clear I/O points after cut
@@ -345,6 +347,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
 
       if (cutCount > 0) {
+        // Adjust transcription: remove words in deleted region (no shift)
+        for (const trackId of trackIds) {
+          transcriptionStore.adjustForDelete(trackId, inPoint, outPoint);
+        }
         selectionStore.clearInOutPoints();
         console.log(`[Clipboard] deleteSelected: removed segment from ${cutCount} track(s)`);
       }
@@ -357,6 +363,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         return false;
       }
       console.log(`[Clipboard] deleteSelected: deleting entire track "${selectedTrack.name}" (${selectedTrack.id})`);
+      transcriptionStore.removeTranscription(selectedTrack.id);
       tracksStore.deleteTrack(selectedTrack.id);
       return true;
     }

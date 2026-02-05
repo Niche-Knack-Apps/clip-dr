@@ -19,6 +19,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useExportStore } from '@/stores/export';
 import { usePlaybackStore } from '@/stores/playback';
 import { useTranscriptionStore } from '@/stores/transcription';
+import { useTracksStore } from '@/stores/tracks';
 import { useRecordingStore } from '@/stores/recording';
 import { formatTime } from '@/shared/utils';
 import { SUPPORTED_FORMATS, TOOLBAR_ROW_HEIGHT, TOOLBAR_HEIGHT, LOOP_MODES } from '@/shared/constants';
@@ -93,8 +94,13 @@ watch(showRecordingPanel, (show) => {
 // Check for model on load
 transcriptionStore.checkModel();
 
-async function handleReTranscribe() {
-  await transcriptionStore.reTranscribe();
+function handleReTranscribe() {
+  const tracksStore = useTracksStore();
+  const sel = tracksStore.selectedTrackId;
+  if (sel && sel !== 'ALL') {
+    transcriptionStore.removeTranscription(sel);
+    transcriptionStore.queueTranscription(sel, 'high');
+  }
 }
 
 async function handleDetectSilence() {

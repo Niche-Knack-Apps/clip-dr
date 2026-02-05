@@ -5,6 +5,7 @@ import { TRACK_COLORS } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
+import { useTranscriptionStore } from './transcription';
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
@@ -138,6 +139,9 @@ export const useTracksStore = defineStore('tracks', () => {
     const index = tracks.value.findIndex((t) => t.id === trackId);
     if (index === -1) return;
     useHistoryStore().pushState('Delete track');
+
+    // Remove associated transcription
+    useTranscriptionStore().removeTranscription(trackId);
 
     tracks.value = tracks.value.filter((t) => t.id !== trackId);
     console.log('[Tracks] Deleted track:', trackId);
