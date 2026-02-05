@@ -22,6 +22,7 @@ export interface Word {
   confidence: number;
 }
 
+/** @deprecated Use TrackTranscription instead */
 export interface Transcription {
   audioId: string;
   words: Word[];
@@ -30,9 +31,28 @@ export interface Transcription {
   processedAt: number;
 }
 
+export interface TrackTranscription {
+  trackId: string;
+  words: Word[];           // 0-based timestamps relative to track audio start
+  fullText: string;
+  language: string;
+  processedAt: number;
+  wordOffsets: Map<string, number>;  // per-word timing adjustments (ms)
+  enableFalloff: boolean;
+}
+
+export interface TranscriptionJob {
+  id: string;
+  trackId: string;
+  priority: 'high' | 'normal';
+  status: 'queued' | 'running' | 'complete' | 'error';
+  progress: number;
+  error?: string;
+}
+
 /** Per-track audio data stored directly on the track */
 export interface TrackAudioData {
-  buffer: AudioBuffer;
+  buffer: AudioBuffer | null;
   waveformData: number[];
   sampleRate: number;
   channels: number;
