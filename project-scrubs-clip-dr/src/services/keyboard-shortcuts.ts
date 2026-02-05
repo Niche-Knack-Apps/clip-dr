@@ -35,6 +35,9 @@ export interface KeyboardActions {
   // Track selection cycling (Tab/Shift+Tab)
   onSelectNextTrack?: () => void;
   onSelectPrevTrack?: () => void;
+  // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z)
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -103,15 +106,28 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
       switch (event.key.toLowerCase()) {
         case 'x':
           event.preventDefault();
+          console.log('[Keyboard] Ctrl+X (cut)');
           actions.onCut?.();
           return;
         case 'c':
           event.preventDefault();
+          console.log('[Keyboard] Ctrl+C (copy)');
           actions.onCopy?.();
           return;
         case 'v':
           event.preventDefault();
+          console.log('[Keyboard] Ctrl+V (paste)');
           actions.onPaste?.();
+          return;
+        case 'z':
+          event.preventDefault();
+          if (event.shiftKey) {
+            console.log('[Keyboard] Ctrl+Shift+Z (redo)');
+            actions.onRedo?.();
+          } else {
+            console.log('[Keyboard] Ctrl+Z (undo)');
+            actions.onUndo?.();
+          }
           return;
       }
     }
@@ -254,6 +270,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
       case 'X':
         if (!isCtrlOrCmd) {
           event.preventDefault();
+          console.log('[Keyboard] X (cut direct)');
           actions.onCutDirect?.();
         }
         break;
@@ -262,6 +279,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
       case 'V':
         if (!isCtrlOrCmd) {
           event.preventDefault();
+          console.log('[Keyboard] V (paste direct)');
           actions.onPasteDirect?.();
         }
         break;
@@ -270,6 +288,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
       case 'Backspace':
         if (!isCtrlOrCmd) {
           event.preventDefault();
+          console.log(`[Keyboard] ${event.key} (delete)`);
           actions.onDeleteDirect?.();
         }
         break;

@@ -10,6 +10,7 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+import { useHistoryStore } from './history';
 
 // Helper to encode AudioBuffer to WAV format
 function encodeWav(buffer: AudioBuffer): Uint8Array {
@@ -135,6 +136,7 @@ export const useSilenceStore = defineStore('silence', () => {
 
   // Add a new silence region manually
   function addRegion(start: number, end: number): SilenceRegion | null {
+    useHistoryStore().pushState('Add silence region');
     // Ensure valid range
     const duration = tracksStore.timelineDuration;
     const regionStart = Math.max(0, Math.min(start, end));
@@ -174,6 +176,7 @@ export const useSilenceStore = defineStore('silence', () => {
   ): void {
     const region = silenceRegions.value.find(r => r.id === id);
     if (!region) return;
+    useHistoryStore().pushState('Update silence region');
 
     const duration = tracksStore.timelineDuration;
     const oldStart = region.start;
@@ -203,6 +206,7 @@ export const useSilenceStore = defineStore('silence', () => {
   function moveRegion(id: string, delta: number): void {
     const region = silenceRegions.value.find(r => r.id === id);
     if (!region) return;
+    useHistoryStore().pushState('Move silence region');
 
     const duration = tracksStore.timelineDuration;
     const regionDuration = region.end - region.start;
@@ -232,6 +236,7 @@ export const useSilenceStore = defineStore('silence', () => {
   function deleteRegion(id: string): void {
     const region = silenceRegions.value.find(r => r.id === id);
     if (region) {
+      useHistoryStore().pushState('Delete silence region');
       region.enabled = false;
       console.log('[Silence] Disabled region:', id, `${region.start.toFixed(2)}-${region.end.toFixed(2)}`);
       console.log('[Silence] Active regions now:', activeSilenceRegions.value.length);
@@ -240,6 +245,7 @@ export const useSilenceStore = defineStore('silence', () => {
 
   // Permanently remove a region from the list
   function removeRegion(id: string): void {
+    useHistoryStore().pushState('Remove silence region');
     const index = silenceRegions.value.findIndex(r => r.id === id);
     if (index !== -1) {
       silenceRegions.value.splice(index, 1);
@@ -250,12 +256,14 @@ export const useSilenceStore = defineStore('silence', () => {
   function restoreRegion(id: string): void {
     const region = silenceRegions.value.find(r => r.id === id);
     if (region) {
+      useHistoryStore().pushState('Restore silence region');
       region.enabled = true;
     }
   }
 
   // Toggle compression (skip silence on playback)
   function toggleCompression(enabled?: boolean): void {
+    useHistoryStore().pushState('Toggle compression');
     compressionEnabled.value = enabled ?? !compressionEnabled.value;
   }
 
@@ -616,6 +624,7 @@ export const useSilenceStore = defineStore('silence', () => {
 
   // Clear all silence regions
   function clear(): void {
+    useHistoryStore().pushState('Clear silence regions');
     silenceRegions.value = [];
     compressionEnabled.value = false;
   }

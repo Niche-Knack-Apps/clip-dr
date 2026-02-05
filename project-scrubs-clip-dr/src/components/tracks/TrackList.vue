@@ -9,6 +9,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import { useExportStore } from '@/stores/export';
 import { useSelectionStore } from '@/stores/selection';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
+import { useHistoryStore } from '@/stores/history';
 
 const audioStore = useAudioStore();
 const uiStore = useUIStore();
@@ -86,15 +87,17 @@ const timelineWidth = computed(() => {
 const selectionOverlayLeft = computed(() => {
   const duration = tracksStore.timelineDuration;
   if (duration <= 0) return 0;
+  const paddedDuration = duration * 1.1;
   const timelineAreaWidth = timelineWidth.value - panelWidth.value;
-  return (selectionStore.selection.start / duration) * timelineAreaWidth + panelWidth.value;
+  return (selectionStore.selection.start / paddedDuration) * timelineAreaWidth + panelWidth.value;
 });
 
 const selectionOverlayWidth = computed(() => {
   const duration = tracksStore.timelineDuration;
   if (duration <= 0) return 0;
+  const paddedDuration = duration * 1.1;
   const timelineAreaWidth = timelineWidth.value - panelWidth.value;
-  return ((selectionStore.selection.end - selectionStore.selection.start) / duration) * timelineAreaWidth;
+  return ((selectionStore.selection.end - selectionStore.selection.start) / paddedDuration) * timelineAreaWidth;
 });
 
 // Auto zoom all the way out when tracks are added via import or record
@@ -258,6 +261,7 @@ function handleDrop(event: DragEvent, targetTrackId: string) {
 
 // Clip drag handlers (for moving clips on timeline)
 function handleClipDragStart(trackId: string, clipId: string) {
+  useHistoryStore().pushState('Move clip');
   clipDraggingTrackId.value = trackId;
   clipDraggingClipId.value = clipId;
   clipDragTargetTrackId.value = trackId;

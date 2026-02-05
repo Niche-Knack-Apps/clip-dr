@@ -8,6 +8,7 @@ import { useAudioStore } from '@/stores/audio';
 import { useSearch } from '@/composables/useSearch';
 import type { Word } from '@/shared/types';
 import { WORD_HEIGHT } from '@/shared/constants';
+import { useHistoryStore } from '@/stores/history';
 
 const openSettings = inject<() => void>('openSettings');
 
@@ -90,6 +91,7 @@ function handleWordDragStart(event: MouseEvent, word: Word) {
   event.preventDefault();
   event.stopPropagation();
 
+  useHistoryStore().pushState('Adjust word timing');
   dragMode.value = 'word';
   dragWordId.value = word.id;
   dragStartX.value = event.clientX;
@@ -102,6 +104,7 @@ function handleWordDragStart(event: MouseEvent, word: Word) {
 function handleGlobalDragStart(event: MouseEvent) {
   event.preventDefault();
 
+  useHistoryStore().pushState('Shift all words');
   dragMode.value = 'global';
   dragStartX.value = event.clientX;
   dragStartOffsetMs.value = transcriptionStore.globalOffsetMs;

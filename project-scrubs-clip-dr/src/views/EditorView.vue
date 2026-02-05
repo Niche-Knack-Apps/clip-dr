@@ -11,6 +11,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useClipboardStore } from '@/stores/clipboard';
 import { useUIStore } from '@/stores/ui';
 import { useTranscriptionStore } from '@/stores/transcription';
+import { useHistoryStore } from '@/stores/history';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useClipping } from '@/composables/useClipping';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
@@ -26,6 +27,7 @@ const tracksStore = useTracksStore();
 const settingsStore = useSettingsStore();
 const clipboardStore = useClipboardStore();
 const transcriptionStore = useTranscriptionStore();
+const historyStore = useHistoryStore();
 const uiStore = useUIStore();
 
 const focusSearch = inject<() => void>('focusSearch');
@@ -183,6 +185,9 @@ useKeyboardShortcuts({
   onCut: () => clipboardStore.cut(),
   onCopy: () => clipboardStore.copy(),
   onPaste: () => clipboardStore.paste(),
+  // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z)
+  onUndo: () => historyStore.undo(),
+  onRedo: () => historyStore.redo(),
   // Direct shortcuts (X/V/Del without Ctrl)
   onCutDirect: () => clipboardStore.cut(),
   onPasteDirect: () => clipboardStore.paste(),
@@ -283,6 +288,7 @@ useKeyboardShortcuts({
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">X</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">V</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Del</kbd> Cut/Paste/Delete</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Tab</kbd> Next Track</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">+</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">-</kbd> Zoom</span>
+      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Ctrl</kbd>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Z</kbd> Undo</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Ctrl</kbd>+Scroll Zoom Tracks</span>
       <span v-if="playbackStore.playbackSpeed !== 1" class="text-cyan-400">{{ playbackStore.playbackSpeed > 0 ? '' : '-' }}{{ Math.abs(playbackStore.playbackSpeed) }}x</span>
     </div>

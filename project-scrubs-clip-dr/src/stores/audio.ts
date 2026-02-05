@@ -5,6 +5,7 @@ import type { AudioLoadResult } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { getFileName } from '@/shared/utils';
 import { useTracksStore } from './tracks';
+import { useHistoryStore } from './history';
 
 export const useAudioStore = defineStore('audio', () => {
   const loading = ref(false);
@@ -36,6 +37,8 @@ export const useAudioStore = defineStore('audio', () => {
 
   // Import a file and create a track from it
   async function importFile(path: string): Promise<void> {
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Import file');
     loading.value = true;
     error.value = null;
 
@@ -102,20 +105,19 @@ export const useAudioStore = defineStore('audio', () => {
 
       const fileName = getFileName(path);
       const trackStart = tracksStore.timelineDuration;
-      tracksStore.createTrackFromBuffer(buffer, waveformData, fileName, trackStart, path);
+      const newTrack = tracksStore.createTrackFromBuffer(buffer, waveformData, fileName, trackStart, path);
 
       selectionStore.resetSelection();
+      tracksStore.selectTrack(newTrack.id);
 
       console.log('Audio ready for playback');
-
-      // Auto-trigger transcription in background (fire-and-forget)
-      autoTranscribe();
     } catch (e) {
       console.error('Load error:', e);
       error.value = e instanceof Error ? e.message : 'Failed to load audio file';
       throw e;
     } finally {
       loading.value = false;
+      historyStore.endBatch();
     }
   }
 
@@ -126,21 +128,6 @@ export const useAudioStore = defineStore('audio', () => {
     useTracksStore().clearTracks();
     import('./cleaning').then(({ useCleaningStore }) => {
       useCleaningStore().clearCleanedAudio();
-    });
-  }
-
-  async function autoTranscribe(): Promise<void> {
-    const { useTranscriptionStore } = await import('./transcription');
-    const transcriptionStore = useTranscriptionStore();
-
-    const hasModel = await transcriptionStore.checkModel();
-    if (!hasModel) {
-      console.log('Whisper model not found, skipping auto-transcription');
-      return;
-    }
-
-    transcriptionStore.transcribeAudio().catch((e: Error) => {
-      console.error('Auto-transcription failed:', e);
     });
   }
 

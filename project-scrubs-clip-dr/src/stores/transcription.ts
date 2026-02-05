@@ -9,6 +9,7 @@ import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
 import { generateId, binarySearch } from '@/shared/utils';
 import { SEARCH_MIN_WORDS, SEARCH_STOPWORDS } from '@/shared/constants';
+import { useHistoryStore } from './history';
 
 // Helper to encode AudioBuffer to WAV format
 function encodeWav(buffer: AudioBuffer): Uint8Array {
@@ -138,6 +139,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const adjustedWords = computed((): Word[] => {
     if (!transcription.value) return [];
 
+    const trackOffset = tracksStore.selectedTrack?.trackStart ?? 0;
     const globalOffsetSec = globalOffsetMs.value / 1000;
 
     return transcription.value.words.map((word) => {
@@ -146,8 +148,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
       return {
         ...word,
-        start: Math.max(0, word.start + totalOffsetSec),
-        end: Math.max(0, word.end + totalOffsetSec),
+        start: Math.max(0, word.start + trackOffset + totalOffsetSec),
+        end: Math.max(0, word.end + trackOffset + totalOffsetSec),
       };
     });
   });
@@ -287,6 +289,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     const word = transcription.value.words.find((w) => w.id === wordId);
     if (word) {
+      useHistoryStore().pushState('Edit word');
       word.text = newText;
       // Update full text
       transcription.value.fullText = transcription.value.words.map((w) => w.text).join(' ');
@@ -301,8 +304,64 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return wordOffsetsMs.value.get(wordId) ?? 0;
   }
 
+  // Ripple shift transcription after a region is deleted:
+  // Remove words within [inPoint, outPoint], shift words after outPoint left by gapDuration
+  function rippleShiftWords(inPoint: number, outPoint: number): void {
+    if (!transcription.value) return;
+
+    const gapDuration = outPoint - inPoint;
+    if (gapDuration <= 0) return;
+    useHistoryStore().pushState('Shift words');
+
+    const adjustedWordsList = adjustedWords.value;
+    const originalWords = transcription.value.words;
+
+    // Build set of word IDs to remove (words entirely within the cut region)
+    const idsToRemove = new Set<string>();
+    for (const w of adjustedWordsList) {
+      if (w.start >= inPoint && w.end <= outPoint) {
+        idsToRemove.add(w.id);
+      }
+    }
+
+    // Filter out removed words and shift remaining ones
+    const trackOffset = tracksStore.selectedTrack?.trackStart ?? 0;
+    const newWords = originalWords
+      .filter(w => !idsToRemove.has(w.id))
+      .map(w => {
+        // Apply existing offsets to get current position
+        const offsetMs = wordOffsetsMs.value.get(w.id) ?? 0;
+        const adjStart = w.start + trackOffset + globalOffsetMs.value / 1000 + offsetMs / 1000;
+
+        if (adjStart >= outPoint) {
+          // Word is after the cut - shift its base timing left
+          return {
+            ...w,
+            start: w.start - gapDuration,
+            end: w.end - gapDuration,
+          };
+        }
+        return w;
+      });
+
+    transcription.value = {
+      ...transcription.value,
+      words: newWords,
+      fullText: newWords.map(w => w.text).join(' '),
+    };
+
+    // Clear per-word offsets for removed words
+    for (const id of idsToRemove) {
+      wordOffsetsMs.value.delete(id);
+    }
+
+    hasUnsavedChanges.value = true;
+    console.log(`[Transcription] Ripple shifted: removed ${idsToRemove.size} words, shifted ${newWords.filter((_, i) => i >= 0).length} words left by ${gapDuration.toFixed(2)}s`);
+  }
+
   // Clear all timing adjustments
   function clearTimingAdjustments(): void {
+    useHistoryStore().pushState('Clear timing');
     globalOffsetMs.value = 0;
     wordOffsetsMs.value.clear();
     hasUnsavedChanges.value = false;
@@ -457,6 +516,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // Try to load existing transcription, or run model if none exists
   async function transcribeAudio(): Promise<void> {
+    if (loading.value) {
+      console.log('[Transcription] Already running, skipping');
+      return;
+    }
     if (!tracksStore.hasAudio) {
       error.value = 'No audio file loaded';
       return;
@@ -732,6 +795,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     fullText,
     hasTranscription,
     globalOffsetMs,
+    wordOffsetsMs,
     hasUnsavedChanges,
     enableFalloff,
     checkModel,
@@ -747,6 +811,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     setWordOffset,
     getWordOffset,
     clearTimingAdjustments,
+    rippleShiftWords,
     saveTimingMetadata,
     saveTranscription,
     loadTimingMetadata,

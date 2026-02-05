@@ -4,6 +4,7 @@ import type { Track, TrackAudioData, TrackClip, ViewMode } from '@/shared/types'
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+import { useHistoryStore } from './history';
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
@@ -92,6 +93,7 @@ export const useTracksStore = defineStore('tracks', () => {
     trackStart: number = 0,
     sourcePath?: string
   ): Track {
+    useHistoryStore().pushState('Add track');
     // Generate waveform if not provided
     const waveform = waveformData ?? generateWaveformFromBuffer(buffer);
 
@@ -125,6 +127,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function deleteTrack(trackId: string): void {
     const index = tracks.value.findIndex((t) => t.id === trackId);
     if (index === -1) return;
+    useHistoryStore().pushState('Delete track');
 
     tracks.value = tracks.value.filter((t) => t.id !== trackId);
     console.log('[Tracks] Deleted track:', trackId);
@@ -153,11 +156,13 @@ export const useTracksStore = defineStore('tracks', () => {
   function setTrackMuted(trackId: string, muted: boolean): void {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
+      useHistoryStore().pushState('Toggle mute');
       track.muted = muted;
     }
   }
 
   function setTrackSolo(trackId: string, solo: boolean): void {
+    useHistoryStore().pushState('Toggle solo');
     // Exclusive solo - de-solo all other tracks when enabling
     tracks.value = tracks.value.map((t) => {
       if (t.id === trackId) {
@@ -173,6 +178,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function setTrackVolume(trackId: string, volume: number): void {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
+      useHistoryStore().pushState('Set volume');
       track.volume = Math.max(0, Math.min(1, volume));
     }
   }
@@ -180,11 +186,13 @@ export const useTracksStore = defineStore('tracks', () => {
   function renameTrack(trackId: string, name: string): void {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
+      useHistoryStore().pushState('Rename track');
       track.name = name;
     }
   }
 
   function clearTracks(): void {
+    useHistoryStore().pushState('Clear all');
     tracks.value = [];
     selectedTrackId.value = 'ALL';
     viewMode.value = 'all';
@@ -196,6 +204,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (toIndex < 0 || toIndex >= tracks.value.length) return;
     if (fromIndex === toIndex) return;
 
+    useHistoryStore().pushState('Reorder track');
     const newTracks = [...tracks.value];
     const [movedTrack] = newTracks.splice(fromIndex, 1);
     newTracks.splice(toIndex, 0, movedTrack);
@@ -265,6 +274,7 @@ export const useTracksStore = defineStore('tracks', () => {
       console.error('[Tracks] Track not found:', trackId);
       return false;
     }
+    useHistoryStore().pushState('Append audio');
 
     const existingBuffer = track.audioData.buffer;
 
@@ -375,6 +385,7 @@ export const useTracksStore = defineStore('tracks', () => {
       console.error('[Tracks] Track not found:', trackId);
       return null;
     }
+    useHistoryStore().pushState('Cut region');
 
     // Convert timeline coordinates to track-relative
     const trackStart = track.trackStart;
@@ -636,6 +647,7 @@ export const useTracksStore = defineStore('tracks', () => {
   // and clips within tracks that span the gap.
   function slideTracksLeft(gapStart: number, gapDuration: number): void {
     if (gapDuration <= 0) return;
+    useHistoryStore().pushState('Slide tracks');
     tracks.value = tracks.value.map(t => {
       const trackEnd = t.trackStart + t.duration;
 
@@ -675,6 +687,7 @@ export const useTracksStore = defineStore('tracks', () => {
     outPoint: number,
     audioContext: AudioContext
   ): { buffers: AudioBuffer[]; waveforms: number[][] } {
+    useHistoryStore().pushState('Ripple delete');
     const gapDuration = outPoint - inPoint;
     const cutResults: { buffers: AudioBuffer[]; waveforms: number[][] } = {
       buffers: [],
@@ -809,6 +822,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function deleteClipFromTrack(trackId: string, clipId: string): void {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return;
+    useHistoryStore().pushState('Delete clip');
 
     const track = tracks.value[trackIndex];
 
@@ -920,6 +934,7 @@ export const useTracksStore = defineStore('tracks', () => {
   ): boolean {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return false;
+    useHistoryStore().pushState('Insert clip');
 
     const track = tracks.value[trackIndex];
     const pasteDuration = buffer.duration;

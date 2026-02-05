@@ -4,6 +4,7 @@ import { useTracksStore } from './tracks';
 import type { Selection, InOutPoints } from '@/shared/types';
 import { DEFAULT_SELECTION_DURATION, MIN_SELECTION_DURATION } from '@/shared/constants';
 import { clamp } from '@/shared/utils';
+import { useHistoryStore } from './history';
 
 export const useSelectionStore = defineStore('selection', () => {
   // Always return full timeline duration so the selection window's
@@ -112,6 +113,7 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function setInPoint(time: number): void {
+    useHistoryStore().pushState('Set in point');
     // Always clamp to full timeline range (not selected track) so I/O points
     // work correctly regardless of which track is selected
     const tracksStore = useTracksStore();
@@ -123,6 +125,7 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function setOutPoint(time: number): void {
+    useHistoryStore().pushState('Set out point');
     const tracksStore = useTracksStore();
     inOutPoints.value.outPoint = clamp(time, 0, tracksStore.timelineDuration);
     if (inOutPoints.value.inPoint !== null && inOutPoints.value.inPoint > time) {
@@ -132,14 +135,17 @@ export const useSelectionStore = defineStore('selection', () => {
   }
 
   function clearInPoint(): void {
+    useHistoryStore().pushState('Clear in point');
     inOutPoints.value.inPoint = null;
   }
 
   function clearOutPoint(): void {
+    useHistoryStore().pushState('Clear out point');
     inOutPoints.value.outPoint = null;
   }
 
   function clearInOutPoints(): void {
+    useHistoryStore().pushState('Clear in/out points');
     inOutPoints.value = {
       inPoint: null,
       outPoint: null,

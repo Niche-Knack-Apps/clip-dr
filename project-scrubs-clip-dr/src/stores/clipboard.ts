@@ -7,6 +7,7 @@ import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import type { Track } from '@/shared/types';
+import { useHistoryStore } from './history';
 
 export interface AudioClipboard {
   samples: Float32Array[];
@@ -143,6 +144,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
   // Cut: selected clip > I/O region ripple delete > entire track
   function cut(): boolean {
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Cut');
+    try {
     // Priority 1: Selected clip - cut it to clipboard and slide remaining left
     const selClip = tracksStore.selectedClip;
     if (selClip) {
@@ -238,6 +242,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, slid remaining tracks left`);
       return true;
     }
+    } finally { historyStore.endBatch(); }
   }
 
   // Paste clipboard content - insert at playhead in selected track, or create new track
@@ -246,6 +251,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
       console.log('[Clipboard] Nothing to paste');
       return null;
     }
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Paste');
+    try {
 
     const ctx = audioStore.getAudioContext();
     const sourceBuffer = clipboardBuffer.value;
@@ -299,10 +307,14 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
     console.log(`[Clipboard] Pasted ${clipboard.value.duration.toFixed(2)}s, new track ID: ${newTrack.id}`);
     return newTrack;
+    } finally { historyStore.endBatch(); }
   }
 
   // Delete: selected clip > I/O points > entire track
   function deleteSelected(): boolean {
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Delete');
+    try {
     // Priority 1: Selected clip
     const selClip = tracksStore.selectedClip;
     if (selClip) {
@@ -348,6 +360,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       tracksStore.deleteTrack(selectedTrack.id);
       return true;
     }
+    } finally { historyStore.endBatch(); }
   }
 
   // Create clip: extract audio from I/O region across ALL tracks into a new track
@@ -357,6 +370,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
       console.log('[Clipboard] createClip: no I/O points set');
       return null;
     }
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Create clip');
+    try {
 
     const ctx = audioStore.getAudioContext();
     const extracted = tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
@@ -379,6 +395,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     console.log(`[Clipboard] Created clip "${trackName}" (${(outPoint - inPoint).toFixed(2)}s) at ${pasteTime.toFixed(2)}s`);
     selectionStore.clearInOutPoints();
     return newTrack;
+    } finally { historyStore.endBatch(); }
   }
 
   // Clear clipboard

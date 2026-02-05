@@ -9,6 +9,7 @@ import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import type { TrackPlacement, AudioLoadResult, Word, PartialTranscription, LiveTranscriptionState } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+import { useHistoryStore } from './history';
 
 export interface AudioDevice {
   id: string;
@@ -411,6 +412,8 @@ export const useRecordingStore = defineStore('recording', () => {
 
   // Create a track from recorded audio file
   async function createTrackFromRecording(path: string, _duration: number): Promise<void> {
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Record track');
     try {
       const ctx = audioStore.getAudioContext();
 
@@ -456,28 +459,24 @@ export const useRecordingStore = defineStore('recording', () => {
       const name = `Recording ${recordingNumber}`;
 
       // Create the track with source path for transcription/VAD
-      tracksStore.createTrackFromBuffer(buffer, waveformData, name, trackStart, path);
+      const newTrack = tracksStore.createTrackFromBuffer(buffer, waveformData, name, trackStart, path);
+
+      // Select the new track so transcription targets it
+      // (EditorView's selectedTrackId watcher will trigger transcribeAudio automatically)
+      tracksStore.selectTrack(newTrack.id);
 
       // Also update lastImportedPath for backwards compatibility
       audioStore.lastImportedPath = path;
 
-      console.log('[Recording] Created track at position:', trackStart);
+      console.log('[Recording] Created track at position:', trackStart, 'selected:', newTrack.id);
 
       // Clear live transcription state (was display-only during recording)
       liveTranscription.value = { words: [], isActive: false, lastChunkIndex: -1 };
-
-      // Re-transcribe the new track from the audio file for accurate timing
-      // Live transcription was for display only; this ensures words align with the track
-      const transcriptionStore = useTranscriptionStore();
-      if (path) {
-        console.log('[Recording] Triggering re-transcription for accurate timing');
-        transcriptionStore.reTranscribe().catch((e) => {
-          console.warn('[Recording] Re-transcription failed:', e);
-        });
-      }
     } catch (e) {
       console.error('[Recording] Failed to create track:', e);
       error.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      historyStore.endBatch();
     }
   }
 

@@ -10,6 +10,7 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { useVadStore } from './vad';
 import { generateId } from '@/shared/utils';
+import { useHistoryStore } from './history';
 
 // Helper to encode AudioBuffer to WAV format
 function encodeWav(buffer: AudioBuffer): Uint8Array {
@@ -152,6 +153,9 @@ export const useCleaningStore = defineStore('cleaning', () => {
       return null;
     }
 
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Clean track');
+
     const sourceTrack = tracksStore.selectedTrack;
 
     loading.value = true;
@@ -258,6 +262,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
       return null;
     } finally {
       loading.value = false;
+      historyStore.endBatch();
     }
   }
 
