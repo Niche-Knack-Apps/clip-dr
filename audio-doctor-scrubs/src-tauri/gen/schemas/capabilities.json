@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default permissions for Project Scrubs","local":true,"windows":["main"],"permissions":["core:default","dialog:default","fs:default"]}}
