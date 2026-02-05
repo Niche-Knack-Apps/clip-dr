@@ -10,7 +10,6 @@ use std::process::{ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::streaming_transcribe::{append_to_transcription_buffer, set_recording_format};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
@@ -237,9 +236,6 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
         sample_format
     );
 
-    // Set recording format for transcription resampling
-    set_recording_format(sample_rate, channels);
-
     // Debug: Log more details about the device config
     log::info!("Buffer size: {:?}", config.buffer_size());
 
@@ -415,8 +411,6 @@ where
                         }
                     }
 
-                    // Also append to transcription buffer for live transcription
-                    append_to_transcription_buffer(&samples);
                 }));
 
                 if result.is_err() {
@@ -795,10 +789,8 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                     .fold(0.0f32, f32::max);
                 CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
 
-                // When recording is active, also accumulate samples and feed transcription
+                // When recording is active, accumulate samples
                 if RECORDING_ACTIVE.load(Ordering::SeqCst) {
-                    append_to_transcription_buffer(&samples);
-
                     if let Ok(mut accumulated) = SYSTEM_AUDIO_SAMPLES.lock() {
                         accumulated.extend(&samples);
                     }
@@ -1060,9 +1052,6 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
                 output_path: output_path.clone(),
             });
         }
-
-        // Set recording format for transcription buffer
-        set_recording_format(44100, 2);
 
         // Activate recording — the monitor reader thread will start accumulating samples
         RECORDING_ACTIVE.store(true, Ordering::SeqCst);

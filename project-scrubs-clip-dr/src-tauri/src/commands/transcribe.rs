@@ -54,18 +54,7 @@ const WHISPER_MODELS: &[(&str, &[&str], u64)] = &[
 
 /// Get the path to the whisper models directory
 fn get_models_dir() -> Result<std::path::PathBuf, String> {
-    // Try app data directory first
-    let data_dir = dirs::data_dir()
-        .ok_or("Could not find data directory")?
-        .join("clip-doctor-scrubs")
-        .join("models");
-
-    if !data_dir.exists() {
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|e| format!("Failed to create models directory: {}", e))?;
-    }
-
-    Ok(data_dir)
+    crate::services::path_service::get_models_dir()
 }
 
 /// Get all possible filenames for a model
@@ -671,6 +660,35 @@ pub async fn list_available_models(app_handle: AppHandle, custom_path: Option<St
     }
 
     Ok(models)
+}
+
+/// Check if a bundled model exists
+#[tauri::command]
+pub fn get_bundled_model_info(app_handle: AppHandle) -> Result<Option<String>, String> {
+    // Production: Tauri resource dir
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        let bundled = resource_dir.join("models").join("ggml-tiny.bin");
+        if bundled.exists() {
+            return Ok(Some(bundled.to_string_lossy().to_string()));
+        }
+        let bundled_en = resource_dir.join("models").join("ggml-tiny.en.bin");
+        if bundled_en.exists() {
+            return Ok(Some(bundled_en.to_string_lossy().to_string()));
+        }
+    }
+
+    // Dev mode fallback
+    let dev_models_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("models");
+    for model_file in &["ggml-tiny.bin", "ggml-tiny.en.bin"] {
+        let dev_model = dev_models_dir.join(model_file);
+        if dev_model.exists() {
+            return Ok(Some(dev_model.to_string_lossy().to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Download a model file to the specified directory

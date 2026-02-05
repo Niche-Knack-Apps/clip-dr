@@ -6,4 +6,3 @@ pub mod vad;
 pub mod clean;
 pub mod metadata;
 pub mod recording;
-pub mod streaming_transcribe;

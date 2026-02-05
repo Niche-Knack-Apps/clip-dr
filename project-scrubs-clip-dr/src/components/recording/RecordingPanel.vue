@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { watch, onUnmounted, computed } from 'vue';
+import { watch, onUnmounted } from 'vue';
 import Button from '@/components/ui/Button.vue';
-import Toggle from '@/components/ui/Toggle.vue';
 import LevelMeter from './LevelMeter.vue';
 import LiveWaveform from '@/components/waveform/LiveWaveform.vue';
 import { useRecordingStore, type RecordingSource } from '@/stores/recording';
@@ -12,12 +11,6 @@ const emit = defineEmits<{
 }>();
 
 const recordingStore = useRecordingStore();
-
-// Show only the most recent words (~one line worth)
-const recentWords = computed(() => {
-  const words = recordingStore.liveTranscription.words;
-  return words.slice(-12);
-});
 
 const sources: { value: RecordingSource; label: string; icon: string }[] = [
   { value: 'microphone', label: 'Microphone', icon: 'M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z' },
@@ -126,9 +119,6 @@ async function handleUnmute() {
         </span>
         <span v-else-if="recordingStore.systemAudioInfo.available" class="text-green-500">
           System audio: {{ recordingStore.systemAudioInfo.method }}
-          <span v-if="recordingStore.systemAudioInfo.method === 'cpal-monitor'" class="text-gray-500">
-            (levels + live transcription)
-          </span>
         </span>
         <span v-else class="text-red-400">
           {{ recordingStore.systemAudioInfo.test_result || 'System audio not available' }}
@@ -183,33 +173,12 @@ async function handleUnmute() {
       <LevelMeter :level="recordingStore.currentLevel" />
     </div>
 
-    <!-- Live transcription toggle (before recording starts) -->
-    <div v-if="!recordingStore.isRecording" class="mb-4">
-      <Toggle
-        :model-value="recordingStore.enableLiveTranscription"
-        :disabled="!recordingStore.liveTranscriptionAvailable"
-        label="Live transcription"
-        @update:model-value="recordingStore.setEnableLiveTranscription"
-      />
-      <p class="text-[10px] text-gray-500 mt-1 ml-7">
-        <template v-if="recordingStore.liveTranscriptionAvailable">
-          Transcribe audio in real-time during recording
-        </template>
-        <template v-else>
-          No whisper model found. Configure in Settings.
-        </template>
-      </p>
-    </div>
-
     <!-- Recording status -->
     <div v-if="recordingStore.isRecording" class="mb-4">
       <div class="flex items-center gap-3 mb-3">
         <div class="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
         <span class="text-sm text-gray-200 font-mono">
           {{ formatTime(recordingStore.recordingDuration) }}
-        </span>
-        <span v-if="recordingStore.liveTranscription.isActive" class="text-[10px] text-cyan-400">
-          Transcribing...
         </span>
       </div>
 
@@ -220,25 +189,6 @@ async function handleUnmute() {
 
       <!-- Level meter -->
       <LevelMeter :level="recordingStore.currentLevel" />
-
-      <!-- Live transcription display - single line, most recent words only -->
-      <div
-        v-if="recordingStore.liveTranscription.isActive || recordingStore.liveTranscription.words.length > 0"
-        class="mt-3"
-      >
-        <label class="block text-[10px] text-gray-500 mb-1">Live Transcription</label>
-        <div class="text-sm text-gray-300 bg-gray-900 p-2 rounded whitespace-nowrap overflow-hidden text-ellipsis">
-          <span
-            v-for="word in recentWords"
-            :key="word.id"
-            class="mr-1"
-          >{{ word.text }}</span>
-          <span v-if="recordingStore.liveTranscription.isActive" class="animate-pulse text-cyan-400">|</span>
-          <span v-if="recordingStore.liveTranscription.words.length === 0 && recordingStore.liveTranscription.isActive" class="text-gray-500 italic">
-            Waiting for speech...
-          </span>
-        </div>
-      </div>
     </div>
 
     <!-- Error display -->
