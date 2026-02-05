@@ -212,7 +212,7 @@ onUnmounted(() => {
     >
       <div
         v-for="word in visibleWords"
-        :key="word.id"
+        :key="`${word.trackId}-${word.id}`"
         class="absolute top-0 flex items-center group"
         :class="{
           'cursor-grab': dragMode === 'none',

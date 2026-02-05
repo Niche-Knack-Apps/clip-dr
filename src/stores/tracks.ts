@@ -1388,5 +1388,6 @@ export const useTracksStore = defineStore('tracks', () => {
     insertClipAtPlayhead,
     addEmptyTrack,
     resetMinTimelineDuration,
+    activeDrag,
   };
 });

@@ -160,7 +160,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (!t) return [];
 
     const track = tracksStore.tracks.find(tr => tr.id === trackId);
-    const trackOffset = track?.trackStart ?? 0;
+    // Use activeDrag position during clip drag so words follow the clip in real-time
+    const drag = tracksStore.activeDrag;
+    const trackOffset = (drag?.trackId === trackId ? drag.position : track?.trackStart) ?? 0;
 
     return t.words.map((word) => {
       const individualOffsetMs = t.wordOffsets.get(word.id) ?? 0;
