@@ -17,7 +17,7 @@ APP_NAME="project-scrubs-clip-dr"
 BINARY_NAME="clip-doctor-scrubs"
 APP_ID="com.nicheknack.clip-doctor-scrubs"
 VERSION=$(node -p "require('./package.json').version")
-RELEASES_DIR="../_shared/releases/$APP_NAME/tauri"
+RELEASES_DIR="../_shared/releases/$APP_NAME"
 FLATPAK_DIR="$PROJECT_ROOT/packaging/flatpak"
 
 # Source shared VM build infrastructure
