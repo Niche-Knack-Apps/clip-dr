@@ -1,6 +1,6 @@
 # VM Setup for Package Building
 
-This document describes how to set up QEMU/KVM virtual machines for building distribution-specific packages for Project Scrubs: The Clip Dr.
+This document describes how to set up QEMU/KVM virtual machines for building distribution-specific packages for Clip Dr.
 
 ## Overview
 
@@ -63,18 +63,18 @@ makepkg -s
 makepkg -si
 
 # Or install with pacman
-sudo pacman -U clip-doctor-scrubs-0.1.1-1-x86_64.pkg.tar.zst
+sudo pacman -U clip-dr-0.1.1-1-x86_64.pkg.tar.zst
 ```
 
 ### Publishing to AUR
 
 ```bash
 # Clone your AUR repo
-git clone ssh://aur@aur.archlinux.org/clip-doctor-scrubs.git
+git clone ssh://aur@aur.archlinux.org/clip-dr.git
 
 # Copy PKGBUILD and .SRCINFO
-cp PKGBUILD clip-doctor-scrubs/
-cd clip-doctor-scrubs
+cp PKGBUILD clip-dr/
+cd clip-dr
 
 # Generate .SRCINFO
 makepkg --printsrcinfo > .SRCINFO
@@ -126,16 +126,16 @@ rpmdev-setuptree
 
 ```bash
 # Copy spec file to rpmbuild
-cp packaging/rpm/clip-doctor-scrubs.spec ~/rpmbuild/SPECS/
+cp packaging/rpm/clip-dr.spec ~/rpmbuild/SPECS/
 
 # Download/copy source tarball to SOURCES
 # (or build from local source)
 
 # Build the RPM
-rpmbuild -ba ~/rpmbuild/SPECS/clip-doctor-scrubs.spec
+rpmbuild -ba ~/rpmbuild/SPECS/clip-dr.spec
 
 # Install for testing
-sudo dnf install ~/rpmbuild/RPMS/x86_64/clip-doctor-scrubs-0.1.1-1.fc40.x86_64.rpm
+sudo dnf install ~/rpmbuild/RPMS/x86_64/clip-dr-0.1.1-1.fc40.x86_64.rpm
 ```
 
 ---
@@ -165,25 +165,25 @@ flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//23.08
 cd packaging/flatpak
 
 # Build the flatpak (first build downloads dependencies, takes a while)
-flatpak-builder --force-clean build-dir com.niche-knack.clip-doctor-scrubs.yml
+flatpak-builder --force-clean build-dir com.nicheknack.clip-dr.yml
 
 # Install locally for testing
-flatpak-builder --user --install --force-clean build-dir com.niche-knack.clip-doctor-scrubs.yml
+flatpak-builder --user --install --force-clean build-dir com.nicheknack.clip-dr.yml
 
 # Run the installed flatpak
-flatpak run com.niche-knack.clip-doctor-scrubs
+flatpak run com.nicheknack.clip-dr
 
 # Export to a repository for distribution
-flatpak-builder --repo=repo --force-clean build-dir com.niche-knack.clip-doctor-scrubs.yml
+flatpak-builder --repo=repo --force-clean build-dir com.nicheknack.clip-dr.yml
 
 # Create a single-file bundle (.flatpak)
-flatpak build-bundle repo clip-doctor-scrubs.flatpak com.niche-knack.clip-doctor-scrubs
+flatpak build-bundle repo clip-dr.flatpak com.nicheknack.clip-dr
 ```
 
 ### Publishing to Flathub
 
 1. Fork https://github.com/flathub/flathub
-2. Create a new repository named `com.niche-knack.clip-doctor-scrubs`
+2. Create a new repository named `com.nicheknack.clip-dr`
 3. Add the manifest and submit a PR
 4. See: https://github.com/flathub/flathub/wiki/App-Submission
 

@@ -687,7 +687,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const modelAvailable = await checkModel();
     if (!modelAvailable) {
       const customPath = getCustomPath();
-      const dir = customPath || modelsDirectory.value || '~/.local/share/clip-doctor-scrubs/models';
+      const dir = customPath || modelsDirectory.value || '~/.local/share/clip-dr/models';
       throw new Error(`Whisper model not found. Download ggml-tiny.bin from huggingface.co/ggerganov/whisper.cpp and place in: ${dir}`);
     }
 

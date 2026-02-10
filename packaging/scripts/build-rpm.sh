@@ -13,31 +13,31 @@ VERSION=$(grep '^version' "$PROJECT_ROOT/src-tauri/Cargo.toml" | head -1 | sed '
 
 echo "Building RPM package..."
 echo "Version: $VERSION"
-echo "Spec file: $RPM_DIR/clip-doctor-scrubs.spec"
+echo "Spec file: $RPM_DIR/clip-dr.spec"
 
 # Ensure rpmbuild directory structure exists
 rpmdev-setuptree 2>/dev/null || mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
 # Copy spec file
-cp "$RPM_DIR/clip-doctor-scrubs.spec" ~/rpmbuild/SPECS/
+cp "$RPM_DIR/clip-dr.spec" ~/rpmbuild/SPECS/
 
 # Create source tarball
 echo "Creating source tarball..."
 cd "$PROJECT_ROOT/.."
-tar czf ~/rpmbuild/SOURCES/clip-doctor-scrubs-$VERSION.tar.gz \
-    --transform "s,^project-scrubs-clip-dr,project-scrubs-clip-dr-$VERSION," \
+tar czf ~/rpmbuild/SOURCES/clip-dr-$VERSION.tar.gz \
+    --transform "s,^clip-dr,clip-dr-$VERSION," \
     --exclude='.git' \
     --exclude='node_modules' \
     --exclude='target' \
     --exclude='dist' \
-    project-scrubs-clip-dr
+    clip-dr
 
 echo "Building RPM..."
-rpmbuild -ba ~/rpmbuild/SPECS/clip-doctor-scrubs.spec
+rpmbuild -ba ~/rpmbuild/SPECS/clip-dr.spec
 
 echo ""
 echo "=== Build complete ==="
-echo "RPM: $(ls ~/rpmbuild/RPMS/x86_64/clip-doctor-scrubs-*.rpm 2>/dev/null | head -1 || echo 'not found')"
-echo "SRPM: $(ls ~/rpmbuild/SRPMS/clip-doctor-scrubs-*.rpm 2>/dev/null | head -1 || echo 'not found')"
+echo "RPM: $(ls ~/rpmbuild/RPMS/x86_64/clip-dr-*.rpm 2>/dev/null | head -1 || echo 'not found')"
+echo "SRPM: $(ls ~/rpmbuild/SRPMS/clip-dr-*.rpm 2>/dev/null | head -1 || echo 'not found')"
 echo ""
-echo "To install: sudo dnf install ~/rpmbuild/RPMS/x86_64/clip-doctor-scrubs-$VERSION-*.rpm"
+echo "To install: sudo dnf install ~/rpmbuild/RPMS/x86_64/clip-dr-$VERSION-*.rpm"

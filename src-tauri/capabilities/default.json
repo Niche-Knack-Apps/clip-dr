@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for Project Scrubs",
+  "description": "Default permissions for Clip Dr.",
   "windows": ["main"],
   "permissions": [
     "core:default",

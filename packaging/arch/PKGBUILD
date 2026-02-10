@@ -1,10 +1,10 @@
 # Maintainer: Niche-Knack Apps <support@niche-knack.com>
-pkgname=clip-doctor-scrubs
-pkgver=0.1.1
+pkgname=clip-dr
+pkgver=0.4.1
 pkgrel=1
 pkgdesc="Audio cleaning and clip-making application with CPU-only ASR"
 arch=('x86_64')
-url="https://github.com/niche-knack/project-scrubs-clip-dr"
+url="https://github.com/niche-knack/clip-dr"
 license=('MIT')
 depends=(
     'webkit2gtk-4.1'
@@ -33,15 +33,15 @@ optdepends=(
     'gst-plugins-bad: Additional audio format support'
     'gst-libav: FFmpeg-based audio decoding'
 )
-provides=('clip-doctor-scrubs' 'project-scrubs')
-conflicts=('clip-doctor-scrubs-bin' 'clip-doctor-scrubs-git')
+provides=('clip-dr')
+conflicts=('clip-dr-bin' 'clip-dr-git')
 source=(
-    "$pkgname-$pkgver.tar.gz::https://github.com/niche-knack/project-scrubs-clip-dr/archive/v$pkgver.tar.gz"
+    "$pkgname-$pkgver.tar.gz::https://github.com/niche-knack/clip-dr/archive/v$pkgver.tar.gz"
 )
-sha256sums=('SKIP')  # Update with actual checksum for release
+sha256sums=('SKIP')
 
 build() {
-    cd "$srcdir/project-scrubs-clip-dr-$pkgver"
+    cd "$srcdir/$pkgname-$pkgver"
 
     # Install frontend dependencies
     npm ci
@@ -55,16 +55,16 @@ build() {
 }
 
 package() {
-    cd "$srcdir/project-scrubs-clip-dr-$pkgver"
+    cd "$srcdir/$pkgname-$pkgver"
 
     # Install binary
-    install -Dm755 "src-tauri/target/release/clip-doctor-scrubs" \
-        "$pkgdir/usr/lib/$pkgname/clip-doctor-scrubs"
+    install -Dm755 "src-tauri/target/release/clip-dr" \
+        "$pkgdir/usr/lib/$pkgname/clip-dr"
 
     # Install wrapper script with Intel GPU workaround
-    install -Dm755 /dev/stdin "$pkgdir/usr/bin/clip-doctor-scrubs" << 'EOF'
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/clip-dr" << 'EOF'
 #!/bin/bash
-# Wrapper script for Project Scrubs: The Clip Dr.
+# Wrapper script for Clip Dr.
 # Includes workaround for Intel Alder Lake+ GPU EGL issues
 
 # Fix for WebKitGTK EGL initialization on Intel 12th gen+ iGPUs
@@ -73,16 +73,16 @@ export WEBKIT_DISABLE_DMABUF_RENDERER=1
 # Optional: Uncomment if you still have issues
 # export WEBKIT_DISABLE_COMPOSITING_MODE=1
 
-exec /usr/lib/clip-doctor-scrubs/clip-doctor-scrubs "$@"
+exec /usr/lib/clip-dr/clip-dr "$@"
 EOF
 
     # Install desktop file
     install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/$pkgname.desktop" << EOF
 [Desktop Entry]
-Name=Project Scrubs: The Clip Dr.
+Name=Clip Dr.
 Comment=Audio cleaning and clip-making application
-Exec=clip-doctor-scrubs %F
-Icon=clip-doctor-scrubs
+Exec=clip-dr %F
+Icon=clip-dr
 Terminal=false
 Type=Application
 Categories=AudioVideo;Audio;AudioVideoEditing;

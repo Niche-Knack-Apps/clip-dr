@@ -48,11 +48,20 @@
       "WebFetch(domain:wiki.archlinux.org)",
       "WebFetch(domain:pipewire.pages.freedesktop.org)",
       "WebFetch(domain:docs.rs)",
-      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/project-scrubs-clip-dr status -u)",
-      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/project-scrubs-clip-dr diff:*)",
-      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/project-scrubs-clip-dr log --oneline -10)",
-      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/project-scrubs-clip-dr status)",
-      "Bash(git checkout:*)"
+      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr status -u)",
+      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr diff:*)",
+      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr log --oneline -10)",
+      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr status)",
+      "Bash(git checkout:*)",
+      "Bash(git merge:*)",
+      "Bash(git stash:*)",
+      "Bash(grep:*)",
+      "Bash(git branch:*)",
+      "Bash(git mv:*)",
+      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr ls-files:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npx eslint:*)",
+      "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr log --oneline -5)"
     ]
   }
 }

@@ -1,5 +1,5 @@
 ## Project
-Clip Doctor Scrubs -- Audio editing app with transcription, cleaning, silence detection, and recording.
+Clip Dr. -- Audio editing app with transcription, cleaning, silence detection, and recording.
 
 ## Stack
 - Vue 3 + TypeScript (strict), Pinia (14 stores), Vite 5, Tauri 2, Tailwind CSS
@@ -17,7 +17,7 @@ Clip Doctor Scrubs -- Audio editing app with transcription, cleaning, silence de
 - Typecheck: `npm run typecheck` / Lint: `npm run lint`
 - Build: `npm run build` (targets: deb, appimage, rpm)
 - Release: `npm run build:release` -- builds + copies to _shared/releases/
-- Arch pkg: `../_shared/builders/arch/build.sh project-scrubs-clip-dr` (Podman) or via arch-build VM
+- Arch pkg: `../_shared/builders/arch/build.sh clip-dr` (Podman) or via arch-build VM
 
 ## Verification
 After changes, run in order:
@@ -32,7 +32,7 @@ After changes, run in order:
 - TrackList.vue uses 10% padding (duration * 1.1); selection overlays must use same paddedDuration
 - Drag operations: capture state BEFORE drag starts, not on each setClipStart/setWordOffset call
 - Path aliases: `@` -> src/, `@shared` -> ../_shared/
-- Releases output to ../_shared/releases/project-scrubs-clip-dr/
+- Releases output to ../_shared/releases/clip-dr/
 - Arch/AUR packages built via Podman (see _shared/builders/arch/) or arch-build VM (builder:builder)
 - Windows builds run on win11-build VM (user: builder, pass: builder) -- project shared via Samba on Z:\
 

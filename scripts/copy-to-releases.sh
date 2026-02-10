@@ -13,9 +13,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 # App-specific configuration
-APP_NAME="project-scrubs-clip-dr"
-BINARY_NAME="clip-doctor-scrubs"
-APP_ID="com.nicheknack.clip-doctor-scrubs"
+APP_NAME="clip-dr"
+BINARY_NAME="clip-dr"
+APP_ID="com.nicheknack.clip-dr"
 VERSION=$(node -p "require('./package.json').version")
 RELEASES_DIR="../_shared/releases/$APP_NAME"
 FLATPAK_DIR="$PROJECT_ROOT/packaging/flatpak"
@@ -64,7 +64,7 @@ echo "  Local artifacts copied."
 echo ""
 echo "[Phase 2] Building Flatpak..."
 
-if command -v flatpak-builder &> /dev/null && [[ -f "$FLATPAK_DIR/$APP_ID.dev.yml" ]]; then
+if command -v flatpak-builder &> /dev/null && [[ -f "$FLATPAK_DIR/com.nicheknack.clip-dr.dev.yml" ]]; then
     if [[ -f "src-tauri/target/release/$BINARY_NAME" ]]; then
         (
             cd "$FLATPAK_DIR"
@@ -74,7 +74,7 @@ if command -v flatpak-builder &> /dev/null && [[ -f "$FLATPAK_DIR/$APP_ID.dev.ym
 
             # Build to repo
             echo "  Creating Flatpak repo..."
-            flatpak-builder --force-clean --disable-rofiles-fuse --repo=repo build-dir $APP_ID.dev.yml
+            flatpak-builder --force-clean --disable-rofiles-fuse --repo=repo build-dir com.nicheknack.clip-dr.dev.yml
 
             # Create bundle with runtime repo URL for easy distribution
             FLATPAK_BUNDLE="${BINARY_NAME}-${VERSION}.flatpak"

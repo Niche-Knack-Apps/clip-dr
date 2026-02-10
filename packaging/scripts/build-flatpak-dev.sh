@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 FLATPAK_DIR="$PROJECT_ROOT/packaging/flatpak"
 
-echo "=== Project Scrubs Flatpak Development Build ==="
+echo "=== Clip Dr. Flatpak Development Build ==="
 echo "Project root: $PROJECT_ROOT"
 echo ""
 
@@ -36,12 +36,12 @@ cargo build --release
 cd ..
 
 # Verify binary exists
-if [[ ! -f "src-tauri/target/release/clip-doctor-scrubs" ]]; then
-    echo "Error: Binary not found at src-tauri/target/release/clip-doctor-scrubs"
+if [[ ! -f "src-tauri/target/release/clip-dr" ]]; then
+    echo "Error: Binary not found at src-tauri/target/release/clip-dr"
     exit 1
 fi
 
-echo "Binary built: $(ls -lh src-tauri/target/release/clip-doctor-scrubs | awk '{print $5}')"
+echo "Binary built: $(ls -lh src-tauri/target/release/clip-dr | awk '{print $5}')"
 echo ""
 
 # Step 2: Build Flatpak using the dev manifest
@@ -52,19 +52,19 @@ cd "$FLATPAK_DIR"
 rm -rf build-dir .flatpak-builder/build
 
 # Build using development manifest
-flatpak-builder --force-clean --disable-rofiles-fuse build-dir com.nicheknack.clip-doctor-scrubs.dev.yml
+flatpak-builder --force-clean --disable-rofiles-fuse build-dir com.nicheknack.clip-dr.dev.yml
 
 echo ""
 echo "=== Step 3: Installing locally ==="
 
 # Install for current user
-flatpak-builder --user --install --force-clean build-dir com.nicheknack.clip-doctor-scrubs.dev.yml
+flatpak-builder --user --install --force-clean build-dir com.nicheknack.clip-dr.dev.yml
 
 echo ""
 echo "=== Build complete! ==="
 echo ""
-echo "To run: flatpak run com.nicheknack.clip-doctor-scrubs"
+echo "To run: flatpak run com.nicheknack.clip-dr"
 echo ""
 echo "To create a distributable bundle:"
-echo "  flatpak-builder --repo=repo --force-clean build-dir com.nicheknack.clip-doctor-scrubs.dev.yml"
-echo "  flatpak build-bundle repo clip-doctor-scrubs.flatpak com.nicheknack.clip-doctor-scrubs"
+echo "  flatpak-builder --repo=repo --force-clean build-dir com.nicheknack.clip-dr.dev.yml"
+echo "  flatpak build-bundle repo clip-dr.flatpak com.nicheknack.clip-dr"

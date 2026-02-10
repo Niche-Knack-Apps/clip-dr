@@ -6,7 +6,7 @@ import './assets/styles/main.css';
 import { DebugLogger, setLogger } from '@/services/debug-logger';
 
 // Initialize debug logger
-const logger = new DebugLogger({ appName: 'Project Scrubs' });
+const logger = new DebugLogger({ appName: 'Clip Dr.' });
 logger.init();
 setLogger(logger);
 

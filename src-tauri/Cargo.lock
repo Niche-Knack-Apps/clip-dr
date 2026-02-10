@@ -457,8 +457,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "clip-doctor-scrubs"
-version = "0.4.0"
+name = "clip-dr"
+version = "0.4.1"
 dependencies = [
  "biquad",
  "chrono",

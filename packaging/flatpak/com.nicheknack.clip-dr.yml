@@ -1,4 +1,4 @@
-app-id: com.nicheknack.clip-doctor-scrubs
+app-id: com.nicheknack.clip-dr
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
@@ -6,7 +6,7 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
   - org.freedesktop.Sdk.Extension.node22
 
-command: clip-doctor-scrubs
+command: clip-dr
 
 finish-args:
   # Display access
@@ -35,39 +35,39 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
   env:
-    CARGO_HOME: /run/build/clip-doctor-scrubs/cargo
+    CARGO_HOME: /run/build/clip-dr/cargo
     npm_config_nodedir: /usr/lib/sdk/node22
 
 modules:
-  - name: clip-doctor-scrubs
+  - name: clip-dr
     buildsystem: simple
     build-options:
       env:
-        CARGO_HOME: /run/build/clip-doctor-scrubs/cargo
-        HOME: /run/build/clip-doctor-scrubs
+        CARGO_HOME: /run/build/clip-dr/cargo
+        HOME: /run/build/clip-dr
     build-commands:
       # Install npm dependencies (use install instead of ci for sandbox compatibility)
-      - HOME=/run/build/clip-doctor-scrubs npm install --legacy-peer-deps
+      - HOME=/run/build/clip-dr npm install --legacy-peer-deps
 
       # Build frontend
-      - HOME=/run/build/clip-doctor-scrubs npm run build
+      - HOME=/run/build/clip-dr npm run build
 
       # Build Rust backend
       - cd src-tauri && cargo build --release
 
       # Install binary
-      - install -Dm755 src-tauri/target/release/clip-doctor-scrubs /app/bin/clip-doctor-scrubs
+      - install -Dm755 src-tauri/target/release/clip-dr /app/bin/clip-dr
 
       # Install icons
-      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.nicheknack.clip-doctor-scrubs.png
-      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.nicheknack.clip-doctor-scrubs.png
-      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.nicheknack.clip-doctor-scrubs.png
+      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.nicheknack.clip-dr.png
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.nicheknack.clip-dr.png
+      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.nicheknack.clip-dr.png
 
       # Install desktop file
-      - install -Dm644 packaging/flatpak/com.nicheknack.clip-doctor-scrubs.desktop /app/share/applications/com.nicheknack.clip-doctor-scrubs.desktop
+      - install -Dm644 packaging/flatpak/com.nicheknack.clip-dr.desktop /app/share/applications/com.nicheknack.clip-dr.desktop
 
       # Install metainfo
-      - install -Dm644 packaging/flatpak/com.nicheknack.clip-doctor-scrubs.metainfo.xml /app/share/metainfo/com.nicheknack.clip-doctor-scrubs.metainfo.xml
+      - install -Dm644 packaging/flatpak/com.nicheknack.clip-dr.metainfo.xml /app/share/metainfo/com.nicheknack.clip-dr.metainfo.xml
 
     sources:
       - type: dir

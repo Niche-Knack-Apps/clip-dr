@@ -176,7 +176,7 @@ export const useSettingsStore = defineStore('settings', () => {
     if (custom && custom.trim() !== '') {
       return custom;
     }
-    // Default: app local data dir (~/.local/share/com.niche-knack.clip-doctor-scrubs/)
+    // Default: app local data dir (~/.local/share/com.niche-knack.clip-dr/)
     try {
       return await appLocalDataDir();
     } catch (e) {

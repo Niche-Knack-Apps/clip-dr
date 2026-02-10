@@ -1,10 +1,10 @@
-Name:           clip-doctor-scrubs
+Name:           clip-dr
 Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Audio cleaning and clip-making application with CPU-only ASR
 
 License:        MIT
-URL:            https://github.com/niche-knack/project-scrubs-clip-dr
+URL:            https://github.com/niche-knack/clip-dr
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  rust >= 1.70
@@ -40,7 +40,7 @@ Recommends:     gstreamer1-plugins-bad-free
 Recommends:     gstreamer1-libav
 
 %description
-Project Scrubs: The Clip Dr. is a desktop application for cleaning up audio
+Clip Dr. is a desktop application for cleaning up audio
 recordings and creating clips. It features CPU-only speech recognition powered
 by OpenAI's Whisper model, making it accessible on any hardware without
 requiring a GPU.
@@ -54,7 +54,7 @@ Features:
 
 
 %prep
-%autosetup -n project-scrubs-clip-dr-%{version}
+%autosetup -n clip-dr-%{version}
 
 
 %build
@@ -78,12 +78,12 @@ mkdir -p %{buildroot}%{_datadir}/icons/hicolor/128x128/apps
 mkdir -p %{buildroot}%{_datadir}/icons/hicolor/512x512/apps
 
 # Install binary
-install -m 755 src-tauri/target/release/clip-doctor-scrubs %{buildroot}%{_libdir}/%{name}/
+install -m 755 src-tauri/target/release/clip-dr %{buildroot}%{_libdir}/%{name}/
 
 # Install wrapper script with Intel GPU workaround
-cat > %{buildroot}%{_bindir}/clip-doctor-scrubs << 'EOF'
+cat > %{buildroot}%{_bindir}/clip-dr << 'EOF'
 #!/bin/bash
-# Wrapper script for Project Scrubs: The Clip Dr.
+# Wrapper script for Clip Dr.
 # Includes workaround for Intel Alder Lake+ GPU EGL issues
 
 # Fix for WebKitGTK EGL initialization on Intel 12th gen+ iGPUs
@@ -92,18 +92,18 @@ export WEBKIT_DISABLE_DMABUF_RENDERER=1
 # Optional: Uncomment if you still have issues
 # export WEBKIT_DISABLE_COMPOSITING_MODE=1
 
-exec %{_libdir}/%{name}/clip-doctor-scrubs "$@"
+exec %{_libdir}/%{name}/clip-dr "$@"
 EOF
-chmod 755 %{buildroot}%{_bindir}/clip-doctor-scrubs
+chmod 755 %{buildroot}%{_bindir}/clip-dr
 
 # Install desktop file
 cat > %{buildroot}%{_datadir}/applications/%{name}.desktop << 'EOF'
 [Desktop Entry]
-Name=Project Scrubs: The Clip Dr.
+Name=Clip Dr.
 GenericName=Audio Editor
 Comment=Audio cleaning and clip-making application with CPU-only speech recognition
-Exec=clip-doctor-scrubs %F
-Icon=clip-doctor-scrubs
+Exec=clip-dr %F
+Icon=clip-dr
 Terminal=false
 Type=Application
 Categories=AudioVideo;Audio;AudioVideoEditing;
@@ -125,7 +125,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/%{name}.desktop
 %files
 %license LICENSE
 %doc README.md
-%{_bindir}/clip-doctor-scrubs
+%{_bindir}/clip-dr
 %{_libdir}/%{name}/
 %{_datadir}/applications/%{name}.desktop
 %{_datadir}/icons/hicolor/*/apps/%{name}.png

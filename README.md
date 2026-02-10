@@ -1,4 +1,4 @@
-# Project Scrubs: The Clip Dr.
+# Clip Dr.
 
 A multi-track audio editor for cutting, arranging, and exporting clips. Built with Vue 3, Pinia, and Tauri.
 

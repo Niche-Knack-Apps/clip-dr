@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.nicheknack.clip-doctor-scrubs</id>
+  <id>com.nicheknack.clip-dr</id>
 
-  <name>Project Scrubs: The Clip Dr.</name>
+  <name>Clip Dr.</name>
   <summary>Audio cleaning and clip-making application</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -14,7 +14,7 @@
 
   <description>
     <p>
-      Project Scrubs: The Clip Dr. is a desktop application for cleaning up audio
+      Clip Dr. is a desktop application for cleaning up audio
       recordings and creating clips. It features CPU-only speech recognition powered
       by OpenAI's Whisper model, making it accessible on any hardware without
       requiring a GPU.
@@ -30,15 +30,15 @@
     </ul>
   </description>
 
-  <url type="homepage">https://niche-knack.com/apps/project-scrubs</url>
-  <url type="bugtracker">https://github.com/niche-knack/project-scrubs-clip-dr/issues</url>
+  <url type="homepage">https://niche-knack.com/apps/clip-dr</url>
+  <url type="bugtracker">https://github.com/niche-knack/clip-dr/issues</url>
 
-  <launchable type="desktop-id">com.nicheknack.clip-doctor-scrubs.desktop</launchable>
+  <launchable type="desktop-id">com.nicheknack.clip-dr.desktop</launchable>
 
   <screenshots>
     <screenshot type="default">
       <caption>Main editor view with waveform and transcription</caption>
-      <image>https://niche-knack.com/screenshots/project-scrubs/editor.png</image>
+      <image>https://niche-knack.com/screenshots/clip-dr/editor.png</image>
     </screenshot>
   </screenshots>
 

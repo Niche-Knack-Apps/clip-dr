@@ -444,7 +444,7 @@ onMounted(async () => {
         <div>
           <h3 class="text-sm font-medium text-gray-300 mb-3">About</h3>
           <AboutPanel
-            app-name="Project Scrubs: The Clip Dr."
+            app-name="Clip Dr."
             :app-version="APP_VERSION"
           />
         </div>

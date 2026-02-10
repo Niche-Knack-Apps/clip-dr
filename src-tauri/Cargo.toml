@@ -1,5 +1,5 @@
 [package]
-name = "clip-doctor-scrubs"
+name = "clip-dr"
 version = "0.4.1"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
