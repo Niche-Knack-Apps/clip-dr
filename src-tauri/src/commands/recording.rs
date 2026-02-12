@@ -28,15 +28,6 @@ pub struct RecordingResult {
     pub channels: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordingChunk {
-    pub path: String,
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub offset_seconds: f64,
-    pub duration_seconds: f64,
-}
-
 // Global recording state
 lazy_static::lazy_static! {
     static ref RECORDING_STATE: Arc<Mutex<Option<RecordingState>>> = Arc::new(Mutex::new(None));
@@ -49,8 +40,6 @@ lazy_static::lazy_static! {
     static ref RECORDING_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     // For streaming system audio - accumulate samples from stdout
     static ref SYSTEM_AUDIO_SAMPLES: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-    // Tracks how many samples have been fetched for background transcription
-    static ref LAST_CHUNK_OFFSET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 }
 
 struct RecordingState {
@@ -275,7 +264,6 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
 
     RECORDING_ACTIVE.store(true, Ordering::SeqCst);
     DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
-    LAST_CHUNK_OFFSET.store(0, Ordering::SeqCst);
 
     // Increment epoch so any leaked streams from previous recordings stop writing
     let epoch = RECORDING_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
@@ -514,98 +502,6 @@ pub fn get_recording_level() -> f32 {
 #[tauri::command]
 pub fn is_recording() -> bool {
     RECORDING_ACTIVE.load(Ordering::SeqCst)
-}
-
-/// Get a chunk of recorded audio since the last fetch, written as a temp WAV file.
-/// Used by background transcription to stream audio chunks during recording.
-#[tauri::command]
-pub async fn get_recording_chunk() -> Result<RecordingChunk, String> {
-    if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
-        return Err("No recording in progress".to_string());
-    }
-
-    let offset = LAST_CHUNK_OFFSET.load(Ordering::SeqCst);
-
-    // Get recording metadata (brief lock)
-    let (sample_rate, channels, use_system) = {
-        let guard = RECORDING_STATE.lock().unwrap();
-        match guard.as_ref() {
-            Some(s) => (s.sample_rate, s.channels, s.use_system_buffer),
-            None => return Err("Recording state not found".to_string()),
-        }
-    };
-
-    // Get new samples since last offset (brief lock on the appropriate buffer)
-    let (chunk_samples, new_offset) = if use_system {
-        let guard = SYSTEM_AUDIO_SAMPLES.lock().unwrap();
-        if offset < guard.len() {
-            (guard[offset..].to_vec(), guard.len())
-        } else {
-            (Vec::new(), guard.len())
-        }
-    } else {
-        let guard = RECORDING_STATE.lock().unwrap();
-        match guard.as_ref() {
-            Some(s) => {
-                if offset < s.samples.len() {
-                    (s.samples[offset..].to_vec(), s.samples.len())
-                } else {
-                    (Vec::new(), s.samples.len())
-                }
-            }
-            None => return Err("Recording state not found".to_string()),
-        }
-    };
-
-    if chunk_samples.is_empty() {
-        return Err("No new audio data".to_string());
-    }
-
-    LAST_CHUNK_OFFSET.store(new_offset, Ordering::SeqCst);
-
-    // Write chunk to temp WAV file
-    let temp_dir = std::env::temp_dir();
-    let temp_filename = format!("clip_dr_chunk_{}.wav", chrono::Utc::now().timestamp_millis());
-    let temp_path = temp_dir.join(&temp_filename);
-
-    let spec = WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-
-    let file = File::create(&temp_path)
-        .map_err(|e| format!("Failed to create temp WAV: {}", e))?;
-    let writer = BufWriter::new(file);
-    let mut wav_writer = WavWriter::new(writer, spec)
-        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
-
-    for &sample in &chunk_samples {
-        wav_writer
-            .write_sample(sample)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
-    }
-
-    wav_writer
-        .finalize()
-        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-
-    let offset_seconds = offset as f64 / (sample_rate as f64 * channels as f64);
-    let duration_seconds = chunk_samples.len() as f64 / (sample_rate as f64 * channels as f64);
-
-    log::info!(
-        "Recording chunk: offset={:.1}s, duration={:.1}s, samples={}",
-        offset_seconds, duration_seconds, chunk_samples.len()
-    );
-
-    Ok(RecordingChunk {
-        path: temp_path.to_string_lossy().to_string(),
-        sample_rate,
-        channels,
-        offset_seconds,
-        duration_seconds,
-    })
 }
 
 #[tauri::command]
@@ -1163,7 +1059,6 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
         // Activate recording — the monitor reader thread will start accumulating samples
         RECORDING_ACTIVE.store(true, Ordering::SeqCst);
         DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
-        LAST_CHUNK_OFFSET.store(0, Ordering::SeqCst);
 
         log::info!("System audio recording active (reusing monitor process)");
         Ok(output_path.to_string_lossy().to_string())
