@@ -8,7 +8,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "preview": "vite preview",
-    "build:release": "tauri build && ./scripts/copy-to-releases.sh",
+    "build:release": "cd src-tauri && cargo clean --release && cd .. && tauri build && ./scripts/copy-to-releases.sh",
     "lint": "eslint src --ext .ts,.vue",
     "typecheck": "vue-tsc --noEmit"
   },
