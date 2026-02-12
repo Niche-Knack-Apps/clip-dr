@@ -181,7 +181,7 @@ async function handleDeviceChange(deviceId: string) {
           @input="handleTriggerPhrasesChange"
         />
         <p class="mt-1 text-[10px] text-gray-500">
-          Comma-separated words/phrases. Auto-marks placed when detected in live transcription.
+          Comma-separated words/phrases. Auto-marks added after transcription completes.
         </p>
       </div>
     </div>
