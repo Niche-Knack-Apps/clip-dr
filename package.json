@@ -1,6 +1,6 @@
 {
   "name": "clip-dr",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Audio cleaning and clip-making application with CPU-only ASR",
   "license": "Apache-2.0",
   "type": "module",
