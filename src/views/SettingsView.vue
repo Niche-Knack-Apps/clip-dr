@@ -11,7 +11,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile, Mp3Bitrate } from '@/shared/types';
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.7.0';
 
 const emit = defineEmits<{
   close: [];
