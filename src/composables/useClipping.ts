@@ -50,6 +50,14 @@ export function useClipping() {
       inPoint
     );
 
+    // Mute source tracks that contributed audio to the clip
+    for (const t of tracksStore.tracks) {
+      if (t.id === newTrack.id) continue;
+      if (t.trackStart < outPoint && t.trackStart + t.duration > inPoint) {
+        tracksStore.setTrackMuted(t.id, true);
+      }
+    }
+
     // Position playhead at the beginning of the new clip
     playbackStore.seek(inPoint);
     console.log(`[Clipping] Created clip (${(outPoint - inPoint).toFixed(2)}s) at timeline ${inPoint.toFixed(2)}s`);

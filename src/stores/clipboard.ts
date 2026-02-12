@@ -404,6 +404,14 @@ export const useClipboardStore = defineStore('clipboard', () => {
       pasteTime
     );
 
+    // Mute source tracks that contributed audio to the clip
+    for (const t of tracksStore.tracks) {
+      if (t.id === newTrack.id) continue;
+      if (t.trackStart < outPoint! && t.trackStart + t.duration > inPoint!) {
+        tracksStore.setTrackMuted(t.id, true);
+      }
+    }
+
     // Position playhead at the beginning of the new clip
     playbackStore.seek(pasteTime);
     console.log(`[Clipboard] Created clip "${trackName}" (${(outPoint - inPoint).toFixed(2)}s) at ${pasteTime.toFixed(2)}s`);
