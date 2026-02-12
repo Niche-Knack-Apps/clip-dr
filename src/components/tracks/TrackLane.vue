@@ -408,11 +408,6 @@ onUnmounted(() => {
         @click.stop="handleTimemarkClick(mark.time)"
         @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
       >
-        <!-- Vertical line -->
-        <div
-          class="absolute top-0 bottom-0 left-1 w-px opacity-60 group-hover/tm:opacity-100"
-          :style="{ backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24') }"
-        />
         <!-- Triangle flag at top -->
         <div
           class="absolute top-0 left-0"
