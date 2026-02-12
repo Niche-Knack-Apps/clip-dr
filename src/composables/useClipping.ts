@@ -2,12 +2,14 @@ import { computed } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
 import { useSelectionStore } from '@/stores/selection';
 import { useAudioStore } from '@/stores/audio';
+import { usePlaybackStore } from '@/stores/playback';
 import type { Track } from '@/shared/types';
 
 export function useClipping() {
   const tracksStore = useTracksStore();
   const selectionStore = useSelectionStore();
   const audioStore = useAudioStore();
+  const playbackStore = usePlaybackStore();
 
   const tracks = computed(() => tracksStore.tracks);
   const selectedTrack = computed(() => tracksStore.selectedTrack);
@@ -48,6 +50,8 @@ export function useClipping() {
       inPoint
     );
 
+    // Position playhead at the beginning of the new clip
+    playbackStore.seek(inPoint);
     console.log(`[Clipping] Created clip (${(outPoint - inPoint).toFixed(2)}s) at timeline ${inPoint.toFixed(2)}s`);
     return newTrack;
   }
