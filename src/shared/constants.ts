@@ -58,10 +58,16 @@ export const KEYBOARD_SHORTCUTS = {
   FOCUS_SEARCH: 'f',
   // New navigation shortcuts
   JUMP_LAYER_START: 's',
-  JUMP_LAYER_END: 'e',
+  JUMP_LAYER_END: 'd',
   SPEED_UP: '.',
   SPEED_DOWN: ',',
   MARK_TIME: 'm',
+  // Loop mode shortcuts
+  LOOP_FULL: 'q',
+  LOOP_ZOOM: 'w',
+  LOOP_INOUT: 'e',
+  LOOP_ACTIVE: 'r',
+  LOOP_CLIP: 't',
 } as const;
 
 export const SUPPORTED_FORMATS = [

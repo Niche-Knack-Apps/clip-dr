@@ -1,5 +1,6 @@
 import { onMounted, onUnmounted } from 'vue';
 import { KEYBOARD_SHORTCUTS } from '@/shared/constants';
+import type { LoopMode } from '@/shared/constants';
 import { useRecordingStore } from '@/stores/recording';
 
 export interface KeyboardActions {
@@ -43,6 +44,8 @@ export interface KeyboardActions {
   onAddTimemark?: () => void;
   // Quick Re-Export (Ctrl+Shift+E)
   onQuickExport?: () => void;
+  // Loop mode shortcuts (Q/W/E/R/T)
+  onSetLoopMode?: (mode: LoopMode) => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -318,6 +321,38 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
           event.preventDefault();
           console.log(`[Keyboard] ${event.key} (delete)`);
           actions.onDeleteDirect?.();
+        }
+        break;
+
+      // Loop mode shortcuts (Q/W/E/R/T)
+      case KEYBOARD_SHORTCUTS.LOOP_FULL:
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          actions.onSetLoopMode?.('full');
+        }
+        break;
+      case KEYBOARD_SHORTCUTS.LOOP_ZOOM:
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          actions.onSetLoopMode?.('zoom');
+        }
+        break;
+      case KEYBOARD_SHORTCUTS.LOOP_INOUT:
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          actions.onSetLoopMode?.('inout');
+        }
+        break;
+      case KEYBOARD_SHORTCUTS.LOOP_ACTIVE:
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          actions.onSetLoopMode?.('active');
+        }
+        break;
+      case KEYBOARD_SHORTCUTS.LOOP_CLIP:
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          actions.onSetLoopMode?.('clip');
         }
         break;
     }

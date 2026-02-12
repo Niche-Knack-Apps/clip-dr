@@ -6,7 +6,7 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 
 **Import:** MP3, WAV, FLAC, M4A, OGG, AAC, WMA
 
-**Export:** WAV, MP3 (128/192/256/320 kbps), FLAC, OGG
+**Export:** WAV, MP3 (128/192/256/320 kbps)
 
 ## Features
 
@@ -101,9 +101,21 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 | `[` | Jump to In point |
 | `]` | Jump to Out point |
 | `S` | Jump to selected track/clip start |
-| `E` | Jump to selected track/clip end |
+| `D` | Jump to selected track/clip end |
 | `Tab` | Select next track |
 | `Shift+Tab` | Select previous track |
+
+### Loop Modes
+
+| Key | Loop Mode |
+|-----|-----------|
+| `Q` | Full |
+| `W` | Zoom |
+| `E` | I/O |
+| `R` | Active Tracks |
+| `T` | Clip |
+
+Pressing a loop mode key also enables looping if it was disabled.
 
 ### Editing
 
@@ -129,6 +141,12 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 | `-` | Zoom out (track timeline) |
 | `Ctrl+Scroll` | Zoom tracks at mouse position |
 | `Scroll` (on waveform panels) | Zoom selection window |
+
+### Export
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+Shift+E` | Quick Re-Export (same path + profile) |
 
 ### Other
 
