@@ -67,23 +67,34 @@ const visibleSilenceRegions = computed(() =>
 // Hit detection threshold in pixels
 const MARKER_HIT_THRESHOLD = 10;
 
-// Watch playhead and auto-scroll if follow mode is enabled
+// Watch playhead and auto-scroll if follow mode is enabled (rAF-throttled)
+let autoScrollRafId: number | null = null;
+
 watch(currentTime, (time) => {
-  if (!followPlayhead.value) return;
-  if (!playbackStore.isPlaying) return;
+  if (!followPlayhead.value || !playbackStore.isPlaying) return;
 
   const viewStart = selection.value.start;
   const viewEnd = selection.value.end;
 
-  // If playhead is outside the current view, scroll to center it
   if (time < viewStart || time > viewEnd) {
-    const viewDuration = viewEnd - viewStart;
-    const newStart = Math.max(0, time - viewDuration * 0.25); // Put playhead at 25% of view
-    const newEnd = Math.min(effectiveDuration.value, newStart + viewDuration);
-    selectionStore.setSelection(
-      newEnd - viewDuration < 0 ? 0 : newEnd - viewDuration,
-      newEnd
-    );
+    // Coalesce: only schedule one scroll per frame
+    if (autoScrollRafId === null) {
+      autoScrollRafId = requestAnimationFrame(() => {
+        autoScrollRafId = null;
+        const t = currentTime.value;
+        const vs = selection.value.start;
+        const ve = selection.value.end;
+        if (t < vs || t > ve) {
+          const viewDuration = ve - vs;
+          const newStart = Math.max(0, t - viewDuration * 0.25);
+          const newEnd = Math.min(effectiveDuration.value, newStart + viewDuration);
+          selectionStore.setSelection(
+            newEnd - viewDuration < 0 ? 0 : newEnd - viewDuration,
+            newEnd
+          );
+        }
+      });
+    }
   }
 });
 
@@ -355,6 +366,9 @@ onUnmounted(() => {
   }
   if (dragRafId !== null) {
     cancelAnimationFrame(dragRafId);
+  }
+  if (autoScrollRafId !== null) {
+    cancelAnimationFrame(autoScrollRafId);
   }
 });
 </script>
