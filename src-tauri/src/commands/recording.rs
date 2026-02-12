@@ -171,7 +171,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
         .default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-    // Try to find a better config - prefer mono with good sample format (F32 > I16 > I32)
+    // Try to find a better config - prefer stereo with good sample format (F32 > I16 > I32)
     let supported_configs: Vec<_> = device.supported_input_configs()
         .map_err(|e| format!("Failed to get supported configs: {}", e))?
         .collect();
@@ -183,11 +183,12 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
             cfg.min_sample_rate().0, cfg.max_sample_rate().0);
     }
 
-    // Score configs: prefer mono, prefer F32/I16, prefer matching sample rate
+    // Score configs: prefer stereo, prefer F32/I16, prefer matching sample rate
     fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
         let mut score = 0;
-        // Prefer mono (avoids bad channel issues)
-        if cfg.channels() == 1 { score += 100; }
+        // Prefer stereo for higher-quality recording (transcription handles mono downmix separately)
+        if cfg.channels() == 2 { score += 100; }
+        else if cfg.channels() == 1 { score += 50; }
         // Prefer good sample formats
         match cfg.sample_format() {
             SampleFormat::F32 => score += 50,
