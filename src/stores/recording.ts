@@ -6,11 +6,10 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
-import type { TrackPlacement, AudioLoadResult, TimeMark, Word } from '@/shared/types';
+import type { TrackPlacement, AudioLoadResult, TimeMark } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { generateId } from '@/shared/utils';
-import { useBackgroundTranscription } from '@/composables/useBackgroundTranscription';
 
 export interface AudioDevice {
   id: string;
@@ -60,18 +59,6 @@ export const useRecordingStore = defineStore('recording', () => {
   const timemarks = ref<TimeMark[]>([]);
   const triggerPhrases = ref<string[]>([]);
   let timemarkCounter = 0;
-
-  // Background transcription during recording
-  const {
-    backgroundWords,
-    backgroundTranscriptionActive,
-    startBackgroundTranscription,
-    stopBackgroundTranscription,
-  } = useBackgroundTranscription({
-    onChunkTranscribed: (newWords) => {
-      checkForTriggerPhrases(newWords);
-    },
-  });
 
   // System audio probe result
   const systemAudioInfo = ref<SystemAudioInfo | null>(null);
@@ -202,36 +189,6 @@ export const useRecordingStore = defineStore('recording', () => {
     triggerPhrases.value = phrases;
   }
 
-  function checkForTriggerPhrases(words: Word[]): void {
-    if (!isRecording.value || triggerPhrases.value.length === 0 || words.length === 0) return;
-
-    for (const phrase of triggerPhrases.value) {
-      const normalizedPhrase = phrase.trim().toLowerCase();
-      if (!normalizedPhrase) continue;
-
-      const phraseWords = normalizedPhrase.split(/\s+/);
-
-      // Scan through the transcribed words looking for phrase matches
-      for (let i = 0; i <= words.length - phraseWords.length; i++) {
-        const window = words.slice(i, i + phraseWords.length);
-        const windowText = window.map(w => w.text.toLowerCase().replace(/[.,!?;:]/g, '')).join(' ');
-
-        if (windowText.includes(normalizedPhrase)) {
-          // Use the actual timestamp of the first word in the match
-          const matchTime = words[i].start;
-
-          // Avoid duplicate auto-marks at similar times
-          const existingNearby = timemarks.value.find(
-            m => m.source === 'auto' && m.label.toLowerCase() === normalizedPhrase && Math.abs(m.time - matchTime) < 3,
-          );
-          if (!existingNearby) {
-            addTimemark(phrase.trim(), 'auto', matchTime);
-          }
-        }
-      }
-    }
-  }
-
   function setPlacement(newPlacement: TrackPlacement): void {
     placement.value = newPlacement;
   }
@@ -305,8 +262,6 @@ export const useRecordingStore = defineStore('recording', () => {
         recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
       }, 100);
 
-      // Start background transcription for timemarks
-      startBackgroundTranscription();
     } catch (e) {
       console.error('[Recording] Failed to start:', e);
       error.value = e instanceof Error ? e.message : String(e);
@@ -327,9 +282,6 @@ export const useRecordingStore = defineStore('recording', () => {
       clearInterval(durationInterval);
       durationInterval = null;
     }
-
-    // Stop background transcription and capture accumulated words
-    stopBackgroundTranscription();
 
     try {
       const wasSystemAudio = source.value === 'system';
@@ -445,9 +397,6 @@ export const useRecordingStore = defineStore('recording', () => {
       clearInterval(durationInterval);
       durationInterval = null;
     }
-
-    // Stop background transcription (discard words)
-    stopBackgroundTranscription();
 
     try {
       if (source.value === 'system') {
@@ -593,15 +542,11 @@ export const useRecordingStore = defineStore('recording', () => {
     probeSystemAudio,
     lockRecording,
     unlockRecording,
-    // Background transcription
-    backgroundWords,
-    backgroundTranscriptionActive,
     // Timemark actions
     addTimemark,
     removeTimemark,
     clearTimemarks,
     setTriggerPhrases,
-    checkForTriggerPhrases,
     startRecording,
     stopRecording,
     cancelRecording,
