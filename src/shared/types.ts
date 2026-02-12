@@ -244,6 +244,7 @@ export interface VadOptions {
   minSegmentDuration: number;
   frameSizeMs: number;
   padding: number;
+  minSilenceDuration: number;
 }
 
 export type MainsFrequency = 'auto' | 'hz50' | 'hz60';

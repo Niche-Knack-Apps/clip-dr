@@ -37,6 +37,8 @@ pub struct VadOptions {
     pub frame_size_ms: f64,
     /// Padding to add before/after speech segments in seconds
     pub padding: f64,
+    /// Minimum silence gap duration in seconds to count as a silence region
+    pub min_silence_duration: f64,
 }
 
 impl Default for VadOptions {
@@ -46,6 +48,7 @@ impl Default for VadOptions {
             min_segment_duration: 0.1,
             frame_size_ms: 30.0,
             padding: 0.15,
+            min_silence_duration: 0.3,
         }
     }
 }
@@ -298,24 +301,30 @@ pub async fn detect_speech_segments(
         }
     }
 
-    // Calculate silence segments (gaps between speech)
+    // Calculate silence segments (gaps between speech), filtering by min_silence_duration
     let mut prev_end = 0.0;
     for speech in &speech_segments {
         if speech.start > prev_end {
-            silence_segments.push(SpeechSegment {
-                start: prev_end,
-                end: speech.start,
-                is_speech: false,
-            });
+            let gap = speech.start - prev_end;
+            if gap >= opts.min_silence_duration {
+                silence_segments.push(SpeechSegment {
+                    start: prev_end,
+                    end: speech.start,
+                    is_speech: false,
+                });
+            }
         }
         prev_end = speech.end;
     }
     if prev_end < total_duration {
-        silence_segments.push(SpeechSegment {
-            start: prev_end,
-            end: total_duration,
-            is_speech: false,
-        });
+        let gap = total_duration - prev_end;
+        if gap >= opts.min_silence_duration {
+            silence_segments.push(SpeechSegment {
+                start: prev_end,
+                end: total_duration,
+                is_speech: false,
+            });
+        }
     }
 
     let total_speech: f64 = speech_segments.iter().map(|s| s.end - s.start).sum();

@@ -363,7 +363,13 @@ fn load_audio_16khz(path: &Path) -> Result<Vec<f32>, String> {
 
 /// Transcribe audio file using Whisper
 #[tauri::command]
-pub async fn transcribe_audio(path: String, models_path: Option<String>) -> Result<TranscriptionResult, String> {
+pub async fn transcribe_audio(
+    path: String,
+    models_path: Option<String>,
+    beam_size: Option<i32>,
+    best_of: Option<i32>,
+    temperature: Option<f32>,
+) -> Result<TranscriptionResult, String> {
     let audio_path = Path::new(&path);
     let custom_path = models_path.as_deref();
 
@@ -390,8 +396,17 @@ pub async fn transcribe_audio(path: String, models_path: Option<String>) -> Resu
     let mut state = ctx.create_state()
         .map_err(|e| format!("Failed to create whisper state: {}", e))?;
 
-    // Configure parameters
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    // Configure parameters — use BeamSearch when beam_size > 1
+    let bs = beam_size.unwrap_or(1);
+    let bo = best_of.unwrap_or(1);
+    let temp = temperature.unwrap_or(0.0);
+
+    let mut params = if bs > 1 {
+        FullParams::new(SamplingStrategy::BeamSearch { beam_size: bs, patience: 1.0 })
+    } else {
+        FullParams::new(SamplingStrategy::Greedy { best_of: bo })
+    };
+    params.set_temperature(temp);
     params.set_language(Some("en"));
     params.set_token_timestamps(true);
     params.set_print_special(false);

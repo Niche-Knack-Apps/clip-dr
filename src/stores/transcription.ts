@@ -82,6 +82,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const jobQueue = ref<TranscriptionJob[]>([]);
   let processorRunning = false;
 
+  // ─── Transcription quality options ───
+  type TranscriptionQuality = 'fast' | 'balanced' | 'best';
+
+  const transcriptionQuality = ref<TranscriptionQuality>('fast');
+
+  const transcriptionOptions = computed(() => {
+    switch (transcriptionQuality.value) {
+      case 'fast':
+        return { beamSize: 1, bestOf: 1, temperature: 0.0 };
+      case 'balanced':
+        return { beamSize: 3, bestOf: 3, temperature: 0.0 };
+      case 'best':
+        return { beamSize: 5, bestOf: 5, temperature: 0.0 };
+    }
+  });
+
+  function setTranscriptionQuality(quality: TranscriptionQuality): void {
+    transcriptionQuality.value = quality;
+  }
+
   // ─── Global state ───
   const loading = ref(false);
   const progress = ref<TranscriptionProgress>({
@@ -772,11 +792,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     const customPath = getCustomPath();
+    const opts = transcriptionOptions.value;
     const result = await invoke<{ words: Word[]; text: string; language: string }>(
       'transcribe_audio',
       {
         path: audioPath,
         modelsPath: customPath,
+        beamSize: opts.beamSize,
+        bestOf: opts.bestOf,
+        temperature: opts.temperature,
       }
     );
 
@@ -870,11 +894,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     const customPath = getCustomPath();
+    const opts = transcriptionOptions.value;
     const result = await invoke<{ words: Word[]; text: string; language: string }>(
       'transcribe_audio',
       {
         path: tempPath,
         modelsPath: customPath,
+        beamSize: opts.beamSize,
+        bestOf: opts.bestOf,
+        temperature: opts.temperature,
       }
     );
 
@@ -940,6 +968,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     modelPath,
     modelsDirectory,
     availableModels,
+    // Transcription quality
+    transcriptionQuality,
+    transcriptionOptions,
+    setTranscriptionQuality,
     // Misc
     loading,
     progress,

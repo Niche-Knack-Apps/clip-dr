@@ -266,19 +266,33 @@ export const useSilenceStore = defineStore('silence', () => {
     compressionEnabled.value = enabled ?? !compressionEnabled.value;
   }
 
-  // Check if a time falls within an active silence region
+  // Check if a time falls within an active silence region (O(log n) binary search)
   function isInSilence(time: number): SilenceRegion | null {
     if (!compressionEnabled.value) return null;
+    const regions = activeSilenceRegions.value;
+    if (regions.length === 0) return null;
 
-    return activeSilenceRegions.value.find(
-      r => time >= r.start && time < r.end
-    ) || null;
+    let lo = 0, hi = regions.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const r = regions[mid];
+      if (time < r.start) hi = mid - 1;
+      else if (time >= r.end) lo = mid + 1;
+      else return r; // time is inside this region
+    }
+    return null;
   }
 
-  // Get the end time of silence region at given time (for skipping)
+  // Get the end time of silence region at given time (for skipping forward)
   function getNextSpeechTime(time: number): number {
     const region = isInSilence(time);
     return region ? region.end : time;
+  }
+
+  // Get the start time of silence region at given time (for skipping backward)
+  function getPrevSpeechTime(time: number): number {
+    const region = isInSilence(time);
+    return region ? region.start : time;
   }
 
   // Merge overlapping regions
@@ -663,6 +677,7 @@ export const useSilenceStore = defineStore('silence', () => {
     toggleCompression,
     isInSilence,
     getNextSpeechTime,
+    getPrevSpeechTime,
     getRegionsInRange,
     cutSilenceToNewTrack,
     getBufferForTrack,

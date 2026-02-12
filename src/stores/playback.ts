@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue';
 import { useAudioStore } from './audio';
 import { useSelectionStore } from './selection';
 import { useTracksStore } from './tracks';
+import { useSilenceStore } from './silence';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
 
@@ -17,6 +18,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   const audioStore = useAudioStore();
   const selectionStore = useSelectionStore();
   const tracksStore = useTracksStore();
+  const silenceStore = useSilenceStore();
 
   const isPlaying = ref(false);
   const currentTime = ref(0);
@@ -295,7 +297,13 @@ export const usePlaybackStore = defineStore('playback', () => {
       pause();
     }
 
-    const seekTime = Math.max(0, Math.min(time, getEffectiveDuration()));
+    let seekTime = Math.max(0, Math.min(time, getEffectiveDuration()));
+
+    // If skip-silence is enabled and seeking into silence, snap forward
+    if (silenceStore.compressionEnabled) {
+      seekTime = silenceStore.getNextSpeechTime(seekTime);
+    }
+
     currentTime.value = seekTime;
 
     if (wasPlaying) {
@@ -457,6 +465,27 @@ export const usePlaybackStore = defineStore('playback', () => {
         } else if (!loopEnabled.value && newTime <= region.start) {
           newTime = region.start;
           pause();
+        }
+      }
+
+      // Skip silence regions when compression is enabled
+      if (silenceStore.compressionEnabled) {
+        if (playbackSpeed.value > 0) {
+          const skipTo = silenceStore.getNextSpeechTime(newTime);
+          if (skipTo !== newTime) {
+            newTime = skipTo;
+            needsRestart = true;
+            startTime = ctx.currentTime;
+            startOffset = newTime;
+          }
+        } else {
+          const skipTo = silenceStore.getPrevSpeechTime(newTime);
+          if (skipTo !== newTime) {
+            newTime = skipTo;
+            needsRestart = true;
+            startTime = ctx.currentTime;
+            startOffset = newTime;
+          }
         }
       }
 

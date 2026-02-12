@@ -12,7 +12,8 @@ import { useAudio } from '@/composables/useAudio';
 import { usePlayback } from '@/composables/usePlayback';
 import { useSelection } from '@/composables/useSelection';
 import { useClipping } from '@/composables/useClipping';
-import { useVadStore } from '@/stores/vad';
+import { useVadStore, VAD_PRESETS } from '@/stores/vad';
+import type { VadPresetName } from '@/stores/vad';
 import { useSilenceStore } from '@/stores/silence';
 import { useCleaningStore } from '@/stores/cleaning';
 import { useSettingsStore } from '@/stores/settings';
@@ -467,10 +468,31 @@ defineExpose({ focusSearch });
         <!-- VAD Settings Popover -->
         <div
           v-if="showVadSettings"
-          class="absolute top-full left-0 mt-2 p-3 bg-gray-800 rounded-lg shadow-xl border border-gray-700 z-50 min-w-[200px]"
+          class="absolute top-full left-0 mt-2 p-3 bg-gray-800 rounded-lg shadow-xl border border-gray-700 z-50 min-w-[240px]"
         >
           <div class="text-xs text-gray-400 mb-2 font-medium">Silence Detection</div>
           <div class="space-y-3">
+            <!-- Preset selector -->
+            <div>
+              <label class="text-[10px] text-gray-500 block mb-1">Preset</label>
+              <div class="flex gap-1">
+                <button
+                  v-for="preset in VAD_PRESETS"
+                  :key="preset.name"
+                  type="button"
+                  :class="[
+                    'px-2 py-1 text-[10px] rounded transition-colors',
+                    vadStore.activePreset === preset.name
+                      ? 'bg-cyan-600 text-white'
+                      : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
+                  ]"
+                  :title="preset.description"
+                  @click="vadStore.setPreset(preset.name as VadPresetName)"
+                >
+                  {{ preset.label }}
+                </button>
+              </div>
+            </div>
             <div>
               <label class="text-[10px] text-gray-500 block mb-1">
                 Sensitivity: {{ (vadStore.options.energyThreshold * 100).toFixed(0) }}%
@@ -494,6 +516,45 @@ defineExpose({ focusSearch });
                 :step="0.01"
                 @update:model-value="(v: number) => vadStore.setOptions({ padding: v })"
               />
+            </div>
+            <div>
+              <label class="text-[10px] text-gray-500 block mb-1">
+                Min Silence: {{ (vadStore.options.minSilenceDuration * 1000).toFixed(0) }}ms
+              </label>
+              <Slider
+                :model-value="vadStore.options.minSilenceDuration"
+                :min="0.1"
+                :max="2.0"
+                :step="0.05"
+                @update:model-value="(v: number) => vadStore.setOptions({ minSilenceDuration: v })"
+              />
+            </div>
+            <div>
+              <label class="text-[10px] text-gray-500 block mb-1">
+                Frame Size: {{ vadStore.options.frameSizeMs }}ms
+              </label>
+              <div class="flex gap-1">
+                <button
+                  v-for="fs in [10, 20, 30]"
+                  :key="fs"
+                  type="button"
+                  :class="[
+                    'px-2 py-0.5 text-[10px] rounded transition-colors',
+                    vadStore.options.frameSizeMs === fs
+                      ? 'bg-cyan-600 text-white'
+                      : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
+                  ]"
+                  @click="vadStore.setOptions({ frameSizeMs: fs })"
+                >
+                  {{ fs }}ms
+                </button>
+              </div>
+            </div>
+            <!-- Detection stats -->
+            <div v-if="vadStore.hasResult" class="text-[10px] text-gray-500 pt-1 border-t border-gray-700">
+              Speech: {{ vadStore.totalSpeechDuration.toFixed(1) }}s
+              | Silence: {{ vadStore.totalSilenceDuration.toFixed(1) }}s
+              ({{ vadStore.silencePercentage.toFixed(0) }}%)
             </div>
           </div>
           <div class="mt-3 pt-2 border-t border-gray-700">
@@ -553,19 +614,43 @@ defineExpose({ focusSearch });
       <div class="w-px h-5 bg-gray-700" />
 
       <!-- Transcription -->
-      <Button
-        variant="secondary"
-        size="sm"
-        :disabled="!hasFile || !transcriptionStore.hasModel"
-        :loading="transcriptionStore.loading"
-        :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : 'Re-run transcription'"
-        @click="handleReTranscribe"
-      >
-        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-        </svg>
-        Re-transcribe
-      </Button>
+      <div class="flex items-center gap-1 relative">
+        <Button
+          variant="secondary"
+          size="sm"
+          :disabled="!hasFile || !transcriptionStore.hasModel"
+          :loading="transcriptionStore.loading"
+          :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : 'Re-run transcription'"
+          @click="handleReTranscribe"
+        >
+          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+          </svg>
+          Re-transcribe
+        </Button>
+        <!-- Quality selector -->
+        <div class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
+          <button
+            v-for="q in ([
+              { value: 'fast', label: 'Fast', title: 'Greedy, best_of=1 — fastest' },
+              { value: 'balanced', label: 'Bal', title: 'Beam search, beam=3 — balanced' },
+              { value: 'best', label: 'Best', title: 'Beam search, beam=5 — most accurate' },
+            ] as const)"
+            :key="q.value"
+            type="button"
+            :class="[
+              'px-1.5 py-0.5 text-[10px] rounded transition-colors',
+              transcriptionStore.transcriptionQuality === q.value
+                ? 'bg-cyan-600 text-white'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
+            ]"
+            :title="q.title"
+            @click="transcriptionStore.setTranscriptionQuality(q.value)"
+          >
+            {{ q.label }}
+          </button>
+        </div>
+      </div>
 
       <div class="w-px h-5 bg-gray-700" />
 

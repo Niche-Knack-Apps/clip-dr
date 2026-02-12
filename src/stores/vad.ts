@@ -58,6 +58,54 @@ function writeWavString(view: DataView, offset: number, str: string): void {
   }
 }
 
+export type VadPresetName = 'gentle' | 'moderate' | 'aggressive';
+
+export interface VadPreset {
+  name: VadPresetName;
+  label: string;
+  description: string;
+  options: VadOptions;
+}
+
+export const VAD_PRESETS: VadPreset[] = [
+  {
+    name: 'gentle',
+    label: 'Gentle',
+    description: 'Podcast / studio — keeps more audio',
+    options: {
+      energyThreshold: 0.08,
+      minSegmentDuration: 0.1,
+      frameSizeMs: 30,
+      padding: 0.2,
+      minSilenceDuration: 0.5,
+    },
+  },
+  {
+    name: 'moderate',
+    label: 'Moderate',
+    description: 'Balanced — good for most audio',
+    options: {
+      energyThreshold: 0.15,
+      minSegmentDuration: 0.1,
+      frameSizeMs: 30,
+      padding: 0.15,
+      minSilenceDuration: 0.3,
+    },
+  },
+  {
+    name: 'aggressive',
+    label: 'Aggressive',
+    description: 'Noisy audio — removes more silence',
+    options: {
+      energyThreshold: 0.25,
+      minSegmentDuration: 0.1,
+      frameSizeMs: 30,
+      padding: 0.1,
+      minSilenceDuration: 0.2,
+    },
+  },
+];
+
 export const useVadStore = defineStore('vad', () => {
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
@@ -66,12 +114,14 @@ export const useVadStore = defineStore('vad', () => {
   const loading = ref(false);
   const error = ref<string | null>(null);
   const speechTracksCreated = ref(false);
+  const activePreset = ref<VadPresetName>('moderate');
 
   const options = ref<VadOptions>({
     energyThreshold: 0.15,
     minSegmentDuration: 0.1,
     frameSizeMs: 30,
     padding: 0.15,
+    minSilenceDuration: 0.3,
   });
 
   const hasResult = computed(() => result.value !== null);
@@ -200,6 +250,22 @@ export const useVadStore = defineStore('vad', () => {
 
   function setOptions(newOptions: Partial<VadOptions>): void {
     options.value = { ...options.value, ...newOptions };
+    // If manually adjusting options, mark preset as no longer matching
+    const match = VAD_PRESETS.find(p =>
+      p.options.energyThreshold === options.value.energyThreshold &&
+      p.options.padding === options.value.padding &&
+      p.options.minSilenceDuration === options.value.minSilenceDuration &&
+      p.options.frameSizeMs === options.value.frameSizeMs
+    );
+    activePreset.value = match?.name ?? 'moderate';
+  }
+
+  function setPreset(presetName: VadPresetName): void {
+    const preset = VAD_PRESETS.find(p => p.name === presetName);
+    if (preset) {
+      activePreset.value = presetName;
+      options.value = { ...preset.options };
+    }
   }
 
   function clear(): void {
@@ -223,10 +289,12 @@ export const useVadStore = defineStore('vad', () => {
     totalSilenceDuration,
     silencePercentage,
     speechTracksCreated,
+    activePreset,
     detectSilence,
     createSpeechTracks,
     removeSpeechTracks,
     setOptions,
+    setPreset,
     clear,
   };
 });
