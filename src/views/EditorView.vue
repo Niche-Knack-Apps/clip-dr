@@ -12,6 +12,7 @@ import { useClipboardStore } from '@/stores/clipboard';
 import { useUIStore } from '@/stores/ui';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useHistoryStore } from '@/stores/history';
+import { useRecordingStore } from '@/stores/recording';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useClipping } from '@/composables/useClipping';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
@@ -28,6 +29,7 @@ const settingsStore = useSettingsStore();
 const clipboardStore = useClipboardStore();
 const transcriptionStore = useTranscriptionStore();
 const historyStore = useHistoryStore();
+const recordingStore = useRecordingStore();
 const uiStore = useUIStore();
 
 const focusSearch = inject<() => void>('focusSearch');
@@ -191,6 +193,7 @@ useKeyboardShortcuts({
   // Zoom shortcuts (+/-)
   onZoomIn: () => uiStore.zoomTrackIn(),
   onZoomOut: () => uiStore.zoomTrackOut(),
+  onAddTimemark: () => recordingStore.addTimemark(),
   // Track selection cycling (Tab/Shift+Tab)
   onSelectNextTrack: () => {
     const tracks = tracksStore.tracks;
