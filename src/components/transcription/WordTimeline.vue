@@ -75,7 +75,7 @@ const wordsTooSmallToRead = computed(() => {
   if (range <= 0 || containerWidth.value <= 0) return false;
   const avgWordDuration = range / visibleWords.value.length;
   const avgWordPx = (avgWordDuration / range) * containerWidth.value;
-  return avgWordPx < 40;
+  return avgWordPx < 25;
 });
 
 // rAF-throttled active word to avoid per-frame recomputation
