@@ -223,6 +223,13 @@ useKeyboardShortcuts({
   },
   // Quick Re-Export (Ctrl+Shift+E)
   onQuickExport: () => exportStore.quickReExport(),
+  // Loop mode shortcuts (Q/W/E/R/T) — also enables looping if disabled
+  onSetLoopMode: (mode) => {
+    if (!playbackStore.loopEnabled) {
+      playbackStore.setLoopEnabled(true);
+    }
+    playbackStore.setLoopMode(mode);
+  },
 });
 </script>
 
