@@ -3,7 +3,7 @@ import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata } from '@/shared/types';
+import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
@@ -93,6 +93,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const modelPath = ref<string | null>(null);
   const modelsDirectory = ref<string | null>(null);
   const availableModels = ref<ModelInfo[]>([]);
+
+  // Pending trigger phrases for auto-timemarks (keyed by trackId)
+  const pendingTriggerPhrases = new Map<string, string[]>();
 
   function getCustomPath(): string | null {
     const path = settingsStore.settings.modelsPath;
@@ -486,6 +489,64 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     console.log(`[Transcription] adjustForDelete(${trackId}): removed ${idsToRemove.size} words`);
   }
 
+  // ─── Auto-timemark trigger phrases ───
+
+  function registerPendingTriggerPhrases(trackId: string, phrases: string[]): void {
+    if (phrases.length > 0) {
+      pendingTriggerPhrases.set(trackId, phrases);
+      console.log(`[Transcription] Registered ${phrases.length} trigger phrases for track ${trackId.slice(0, 8)}`);
+    }
+  }
+
+  function applyAutoTimemarks(trackId: string): void {
+    const phrases = pendingTriggerPhrases.get(trackId);
+    if (!phrases || phrases.length === 0) return;
+    pendingTriggerPhrases.delete(trackId);
+
+    const t = transcriptions.value.get(trackId);
+    if (!t || t.words.length === 0) return;
+
+    const track = tracksStore.tracks.find(tr => tr.id === trackId);
+    if (!track) return;
+
+    const newMarks: TimeMark[] = [];
+
+    for (const phrase of phrases) {
+      const normalizedPhrase = phrase.trim().toLowerCase();
+      if (!normalizedPhrase) continue;
+
+      const phraseWords = normalizedPhrase.split(/\s+/);
+
+      for (let i = 0; i <= t.words.length - phraseWords.length; i++) {
+        const window = t.words.slice(i, i + phraseWords.length);
+        const windowText = window.map(w => w.text.toLowerCase().replace(/[.,!?;:]/g, '')).join(' ');
+
+        if (windowText.includes(normalizedPhrase)) {
+          const matchTime = t.words[i].start;
+
+          // Avoid duplicate auto-marks at similar times
+          const existingNearby = [...(track.timemarks || []), ...newMarks].find(
+            m => m.source === 'auto' && m.label.toLowerCase() === normalizedPhrase && Math.abs(m.time - matchTime) < 3,
+          );
+          if (!existingNearby) {
+            newMarks.push({
+              id: generateId(),
+              time: matchTime,
+              label: phrase.trim(),
+              source: 'auto',
+              color: '#fbbf24',
+            });
+          }
+        }
+      }
+    }
+
+    if (newMarks.length > 0) {
+      track.timemarks = [...(track.timemarks || []), ...newMarks];
+      console.log(`[Transcription] Applied ${newMarks.length} auto-timemarks to track ${trackId.slice(0, 8)}`);
+    }
+  }
+
   /** Remove an entire track's transcription */
   function removeTranscription(trackId: string): void {
     console.log(`[Transcription][MAP] removeTranscription(${trackId.slice(0, 8)})`);
@@ -554,6 +615,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     try {
       await runTranscriptionForTrack(job.trackId);
+      applyAutoTimemarks(job.trackId);
       job.status = 'complete';
       job.progress = 100;
     } catch (e) {
@@ -857,6 +919,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     queueTranscription,
     loadOrQueueTranscription,
     removeTranscription,
+    registerPendingTriggerPhrases,
     // Word editing
     setWordOffset,
     shiftAllWords,
