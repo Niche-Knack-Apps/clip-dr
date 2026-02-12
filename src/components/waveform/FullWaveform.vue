@@ -8,6 +8,7 @@ import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useSettingsStore } from '@/stores/settings';
 import { useSilenceStore } from '@/stores/silence';
+import { useTracksStore } from '@/stores/tracks';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { formatTime } from '@/shared/utils';
 import { WAVEFORM_HEIGHT } from '@/shared/constants';
@@ -25,6 +26,7 @@ const playbackStore = usePlaybackStore();
 const selectionStore = useSelectionStore();
 const settingsStore = useSettingsStore();
 const silenceStore = useSilenceStore();
+const tracksStore = useTracksStore();
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
@@ -36,6 +38,32 @@ const selection = computed(() => selectionStore.selection);
 const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const selectionColor = computed(() => settingsStore.settings.selectionColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
+
+// All timemarks from all tracks with pixel positions (full timeline: 0 to duration)
+const allTimemarks = computed(() => {
+  const dur = duration.value;
+  if (dur <= 0 || containerWidth.value <= 0) return [];
+  const marks: { id: string; label: string; color: string; pixelLeft: number; time: number; trackStart: number }[] = [];
+  for (const track of tracksStore.tracks) {
+    if (!track.timemarks) continue;
+    for (const mark of track.timemarks) {
+      const absTime = track.trackStart + mark.time;
+      marks.push({
+        id: mark.id,
+        label: mark.label,
+        color: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
+        pixelLeft: (absTime / dur) * containerWidth.value,
+        time: mark.time,
+        trackStart: track.trackStart,
+      });
+    }
+  }
+  return marks;
+});
+
+function handleTimemarkClick(trackStart: number, time: number) {
+  playbackStore.seek(trackStart + time);
+}
 
 // Zoom constraints (same as ZoomedWaveform)
 const MIN_ZOOM_DURATION = 0.5;
@@ -200,6 +228,30 @@ onUnmounted(() => {
         @resize-start="handleResizeStart"
         @resize-end="handleResizeEnd"
       />
+
+      <!-- Timemark indicators -->
+      <div
+        v-for="mark in allTimemarks"
+        :key="mark.id"
+        class="absolute top-0 bottom-0 z-10 cursor-pointer group/tm"
+        :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
+        :title="mark.label"
+        @click.stop="handleTimemarkClick(mark.trackStart, mark.time)"
+      >
+        <div
+          class="absolute top-0 left-0"
+          :style="{
+            width: 0,
+            height: 0,
+            borderLeft: '5px solid transparent',
+            borderRight: '5px solid transparent',
+            borderTop: `8px solid ${mark.color}`,
+          }"
+        />
+        <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20">
+          {{ mark.label }}
+        </div>
+      </div>
 
       <Playhead
         :position="currentTime"
