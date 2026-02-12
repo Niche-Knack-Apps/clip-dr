@@ -44,7 +44,7 @@ function cloneClip(clip: TrackClip): TrackClip {
   return {
     id: clip.id,
     buffer: clip.buffer,               // shared by reference
-    waveformData: [...clip.waveformData],
+    waveformData: clip.waveformData,   // shared by reference (immutable display data)
     clipStart: clip.clipStart,
     duration: clip.duration,
   };
@@ -55,7 +55,7 @@ function cloneTrack(track: Track): Track {
     ...track,
     audioData: {
       buffer: track.audioData.buffer,   // shared by reference
-      waveformData: [...track.audioData.waveformData],
+      waveformData: track.audioData.waveformData,   // shared by reference (immutable display data)
       sampleRate: track.audioData.sampleRate,
       channels: track.audioData.channels,
     },

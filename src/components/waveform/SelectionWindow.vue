@@ -27,6 +27,10 @@ const isResizingStart = ref(false);
 const isResizingEnd = ref(false);
 const lastX = ref(0);
 
+// rAF-based throttle for drag/resize mousemove
+let moveRafId: number | null = null;
+let pendingMoveEvent: MouseEvent | null = null;
+
 const pixelsPerSecond = computed(() => {
   if (props.duration <= 0) return 1;
   return props.containerWidth / props.duration;
@@ -84,6 +88,18 @@ function handleResizeEndMouseDown(event: MouseEvent) {
 }
 
 function handleMouseMove(event: MouseEvent) {
+  pendingMoveEvent = event;
+  if (moveRafId === null) {
+    moveRafId = requestAnimationFrame(flushMove);
+  }
+}
+
+function flushMove() {
+  moveRafId = null;
+  const event = pendingMoveEvent;
+  if (!event) return;
+  pendingMoveEvent = null;
+
   if (isDragging.value) {
     const deltaX = event.clientX - lastX.value;
     lastX.value = event.clientX;
@@ -99,6 +115,15 @@ function handleMouseMove(event: MouseEvent) {
 }
 
 function handleMouseUp() {
+  // Flush any pending move before ending
+  if (pendingMoveEvent) {
+    flushMove();
+  }
+  if (moveRafId !== null) {
+    cancelAnimationFrame(moveRafId);
+    moveRafId = null;
+  }
+
   isDragging.value = false;
   isResizingStart.value = false;
   isResizingEnd.value = false;

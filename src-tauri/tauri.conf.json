@@ -4,9 +4,9 @@
   "version": "0.4.1",
   "identifier": "com.niche-knack.clip-dr",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npx vite",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npx vite build",
     "frontendDist": "../dist"
   },
   "app": {

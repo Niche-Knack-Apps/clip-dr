@@ -24,6 +24,10 @@ const emit = defineEmits<{
 const isDragging = ref(false);
 const playheadRef = ref<HTMLDivElement | null>(null);
 
+// rAF-based throttle for mousemove during drag
+let dragRafId: number | null = null;
+let pendingDragClientX: number | null = null;
+
 const xPosition = computed(() => {
   const range = props.endTime - props.startTime;
   if (range <= 0) return 0;
@@ -63,11 +67,32 @@ function handleMouseDown(event: MouseEvent) {
 
 function handleMouseMove(event: MouseEvent) {
   if (!isDragging.value) return;
-  const time = xToTime(event.clientX);
-  emit('drag', time);
+  pendingDragClientX = event.clientX;
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(flushDrag);
+  }
+}
+
+function flushDrag() {
+  dragRafId = null;
+  if (pendingDragClientX !== null && isDragging.value) {
+    const time = xToTime(pendingDragClientX);
+    pendingDragClientX = null;
+    emit('drag', time);
+  }
 }
 
 function handleMouseUp() {
+  // Flush any pending drag before ending
+  if (pendingDragClientX !== null) {
+    const time = xToTime(pendingDragClientX);
+    pendingDragClientX = null;
+    emit('drag', time);
+  }
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
   isDragging.value = false;
   emit('dragEnd');
   document.removeEventListener('mousemove', handleMouseMove);

@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, shallowRef, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import type { VadResult, VadOptions, SpeechSegment } from '@/shared/types';
+import type { VadResult, VadOptions } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 
@@ -62,7 +62,7 @@ export const useVadStore = defineStore('vad', () => {
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
 
-  const result = ref<VadResult | null>(null);
+  const result = shallowRef<VadResult | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
   const speechTracksCreated = ref(false);
@@ -161,7 +161,7 @@ export const useVadStore = defineStore('vad', () => {
 
       result.value = vadResult;
       speechTracksCreated.value = false;
-      console.log('VAD result:', vadResult);
+      console.log(`[VAD] Result: ${vadResult.segments?.length ?? 0} segments, ${vadResult.speechSegments?.length ?? 0} speech, ${vadResult.silenceSegments?.length ?? 0} silence, speech: ${vadResult.totalSpeechDuration?.toFixed(1)}s, silence: ${vadResult.totalSilenceDuration?.toFixed(1)}s`);
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to detect silence';
       console.error('VAD error:', e);

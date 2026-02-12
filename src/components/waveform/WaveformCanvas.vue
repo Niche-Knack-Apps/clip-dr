@@ -23,6 +23,7 @@ const width = ref(0);
 const { getBucketsForRange, renderWaveform, waveformData, duration } = useWaveform();
 
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
 
 // Version counter that increments whenever waveform data reference changes.
 // Watching the array reference directly ensures re-render on any track
@@ -54,15 +55,26 @@ function render() {
 
 function updateSize() {
   if (containerRef.value) {
-    width.value = containerRef.value.clientWidth;
+    const newWidth = containerRef.value.clientWidth;
+    if (newWidth === width.value) return; // No change, skip redraw
+    width.value = newWidth;
     render();
   }
+}
+
+// Debounce ResizeObserver to avoid redundant redraws during zoom/resize
+function handleResize() {
+  if (resizeRafId !== null) return;
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    updateSize();
+  });
 }
 
 onMounted(() => {
   updateSize();
 
-  resizeObserver = new ResizeObserver(updateSize);
+  resizeObserver = new ResizeObserver(handleResize);
   if (containerRef.value) {
     resizeObserver.observe(containerRef.value);
   }
@@ -70,6 +82,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+  }
 });
 
 // Watch for props changes and waveform data changes (when tracks are modified)

@@ -1345,6 +1345,13 @@ export const useTracksStore = defineStore('tracks', () => {
     selectTrack(track.id);
   }
 
+  function removeTrackTimemark(trackId: string, timemarkId: string): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (track?.timemarks) {
+      track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
+    }
+  }
+
   return {
     tracks,
     selectedTrackId,
@@ -1389,5 +1396,6 @@ export const useTracksStore = defineStore('tracks', () => {
     addEmptyTrack,
     resetMinTimelineDuration,
     activeDrag,
+    removeTrackTimemark,
   };
 });

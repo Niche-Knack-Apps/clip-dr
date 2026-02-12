@@ -142,16 +142,26 @@ onMounted(() => {
   nextTick(drawWaveform);
 });
 
-// ResizeObserver for the canvas container
+// ResizeObserver for the canvas container (debounced with rAF)
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
 onMounted(() => {
   if (canvasRef.value) {
-    resizeObserver = new ResizeObserver(() => drawWaveform());
+    resizeObserver = new ResizeObserver(() => {
+      if (resizeRafId !== null) return;
+      resizeRafId = requestAnimationFrame(() => {
+        resizeRafId = null;
+        drawWaveform();
+      });
+    });
     resizeObserver.observe(canvasRef.value);
   }
 });
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+  }
 });
 
 function handleMouseDown(event: MouseEvent) {

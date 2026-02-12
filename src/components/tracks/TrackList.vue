@@ -180,6 +180,9 @@ function handleSetVolume(trackId: string, volume: number) {
 }
 
 // Panel resize handlers
+let resizeRafId: number | null = null;
+let pendingResizeEvent: MouseEvent | null = null;
+
 function startResize(event: MouseEvent) {
   event.preventDefault();
   isResizing.value = true;
@@ -194,8 +197,17 @@ function startResize(event: MouseEvent) {
 
 function handleResizeMove(event: MouseEvent) {
   if (!isResizing.value) return;
+  pendingResizeEvent = event;
+  if (resizeRafId === null) {
+    resizeRafId = requestAnimationFrame(flushResize);
+  }
+}
 
-  const delta = event.clientX - resizeStartX.value;
+function flushResize() {
+  resizeRafId = null;
+  if (!pendingResizeEvent || !isResizing.value) return;
+  const delta = pendingResizeEvent.clientX - resizeStartX.value;
+  pendingResizeEvent = null;
   const newWidth = Math.max(
     TRACK_PANEL_MIN_WIDTH,
     Math.min(TRACK_PANEL_MAX_WIDTH, resizeStartWidth.value + delta)
@@ -204,6 +216,11 @@ function handleResizeMove(event: MouseEvent) {
 }
 
 function stopResize() {
+  if (pendingResizeEvent) flushResize();
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+    resizeRafId = null;
+  }
   isResizing.value = false;
   document.removeEventListener('mousemove', handleResizeMove);
   document.removeEventListener('mouseup', stopResize);

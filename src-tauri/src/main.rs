@@ -65,6 +65,7 @@ fn main() {
             recording::unmute_input,
             recording::reset_recording_state,
             recording::test_audio_device,
+            recording::get_recording_chunk,
             recording::start_system_audio_recording,
             recording::stop_system_audio_recording,
             recording::start_system_audio_monitoring,

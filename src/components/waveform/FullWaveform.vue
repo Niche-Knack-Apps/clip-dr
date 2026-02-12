@@ -39,7 +39,6 @@ const playheadColor = computed(() => settingsStore.settings.playheadColor);
 
 // Zoom constraints (same as ZoomedWaveform)
 const MIN_ZOOM_DURATION = 0.5;
-const MAX_ZOOM_DURATION = 60;
 const ZOOM_FACTOR = 0.15;
 
 // Scroll wheel zoom handler - resizes selection window (same behavior as Panel 2)
@@ -88,6 +87,7 @@ function handleWheel(event: WheelEvent) {
 }
 
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
 
 function updateWidth() {
   if (containerRef.value) {
@@ -95,6 +95,14 @@ function updateWidth() {
     containerWidth.value = rect.width;
     containerLeft.value = rect.left;
   }
+}
+
+function handleResize() {
+  if (resizeRafId !== null) return;
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    updateWidth();
+  });
 }
 
 function handlePlayheadDrag(time: number) {
@@ -132,7 +140,7 @@ function handleSilenceRestore(id: string) {
 onMounted(() => {
   updateWidth();
 
-  resizeObserver = new ResizeObserver(updateWidth);
+  resizeObserver = new ResizeObserver(handleResize);
   if (containerRef.value) {
     resizeObserver.observe(containerRef.value);
   }
@@ -140,6 +148,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+  }
 });
 </script>
 

@@ -55,7 +55,7 @@ export const useAudioStore = defineStore('audio', () => {
 
       const loadTime = performance.now() - startTime;
       console.log(`Audio loaded in ${(loadTime / 1000).toFixed(2)}s`);
-      console.log('Metadata:', result.metadata);
+      console.log(`Metadata: ${JSON.stringify(result.metadata)}`);
       console.log('Waveform buckets:', result.waveform.length);
       console.log('Channels:', result.channels.length, 'x', result.channels[0]?.length ?? 0, 'samples');
 

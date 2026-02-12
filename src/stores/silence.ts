@@ -8,7 +8,6 @@ import { useVadStore } from './vad';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
-import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
 
@@ -400,7 +399,7 @@ export const useSilenceStore = defineStore('silence', () => {
 
       console.log('[CutSilence] Total silence regions:', silenceRegions.value.length);
       console.log('[CutSilence] Active (enabled) silence regions:', sorted.length);
-      console.log('[CutSilence] Active regions:', sorted.map(r => `${r.start.toFixed(2)}-${r.end.toFixed(2)}`).join(', '));
+      console.log(`[CutSilence] Active regions: ${sorted.length} (first: ${sorted[0]?.start.toFixed(2)}-${sorted[0]?.end.toFixed(2)}, last: ${sorted[sorted.length - 1]?.start.toFixed(2)}-${sorted[sorted.length - 1]?.end.toFixed(2)})`);
 
       // Create speech segments (inverse of silence)
       const speechSegments: Array<{ start: number; end: number; isSpeech: boolean }> = [];
@@ -427,7 +426,7 @@ export const useSilenceStore = defineStore('silence', () => {
       }
 
       console.log('[CutSilence] Speech segments:', speechSegments.length);
-      console.log('[CutSilence] Speech segments (KEEPING):', speechSegments.map(s => `${s.start.toFixed(2)}-${s.end.toFixed(2)}`).join(', '));
+      console.log(`[CutSilence] Speech segments (KEEPING): ${speechSegments.length}`);
 
       // Log what's being removed (for debugging)
       const totalSpeechDuration = speechSegments.reduce((sum, s) => sum + (s.end - s.start), 0);

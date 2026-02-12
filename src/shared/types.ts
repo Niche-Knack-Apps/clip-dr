@@ -71,6 +71,15 @@ export interface TrackClip {
   duration: number;
 }
 
+/** A timemark/reference point placed during recording */
+export interface TimeMark {
+  id: string;
+  time: number;
+  label: string;
+  source: 'manual' | 'auto';
+  color?: string;
+}
+
 /** Track placement options for recording */
 export type TrackPlacement = 'append' | 'playhead' | 'zero';
 
@@ -109,6 +118,8 @@ export interface Track {
   sourcePath?: string;
   /** Multiple clips within this track (if present, takes precedence over audioData for rendering) */
   clips?: TrackClip[];
+  /** Timemarks/reference points placed during recording */
+  timemarks?: TimeMark[];
 }
 
 /** @deprecated Clips are now part of tracks */

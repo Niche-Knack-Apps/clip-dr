@@ -7,9 +7,7 @@ import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
-import { usePlaybackStore } from './playback';
 import { useVadStore } from './vad';
-import { generateId } from '@/shared/utils';
 import { useHistoryStore } from './history';
 
 // Helper to encode AudioBuffer to WAV format
@@ -219,7 +217,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
         options: backendOptions,
         silenceSegments: silenceSegments.length > 0 ? silenceSegments : null,
       });
-      console.log('[Clean] Backend result:', result);
+      console.log(`[Clean] Backend result: duration=${result.duration?.toFixed(2)}s, path=${result.outputPath}`);
 
       lastResult.value = result;
 

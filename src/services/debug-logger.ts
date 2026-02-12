@@ -316,7 +316,7 @@ export class DebugLogger {
    * Initialize IndexedDB for storage
    */
   private _initIndexedDB(): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       try {
         const request = indexedDB.open(this.config.dbName, 1);
 
@@ -443,6 +443,10 @@ export class DebugLogger {
       return `${arg.name}: ${arg.message}${arg.stack ? '\n' + arg.stack : ''}`;
     }
     try {
+      const json = JSON.stringify(arg);
+      if (json.length > 2000) {
+        return json.slice(0, 2000) + `... [truncated, ${json.length} chars total]`;
+      }
       return JSON.stringify(arg, null, 2);
     } catch {
       return String(arg);

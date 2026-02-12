@@ -55,6 +55,7 @@ export const KEYBOARD_SHORTCUTS = {
   JUMP_LAYER_END: 'e',
   SPEED_UP: '.',
   SPEED_DOWN: ',',
+  MARK_TIME: 'm',
 } as const;
 
 export const SUPPORTED_FORMATS = [

@@ -6,9 +6,11 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
-import type { TrackPlacement, AudioLoadResult } from '@/shared/types';
+import type { TrackPlacement, AudioLoadResult, TimeMark, Word } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
+import { generateId } from '@/shared/utils';
+import { useBackgroundTranscription } from '@/composables/useBackgroundTranscription';
 
 export interface AudioDevice {
   id: string;
@@ -52,6 +54,24 @@ export const useRecordingStore = defineStore('recording', () => {
   const source = ref<RecordingSource>('microphone');
   const error = ref<string | null>(null);
   const isMuted = ref(false);
+  const isLocked = ref(false);
+
+  // Timemark state
+  const timemarks = ref<TimeMark[]>([]);
+  const triggerPhrases = ref<string[]>([]);
+  let timemarkCounter = 0;
+
+  // Background transcription during recording
+  const {
+    backgroundWords,
+    backgroundTranscriptionActive,
+    startBackgroundTranscription,
+    stopBackgroundTranscription,
+  } = useBackgroundTranscription({
+    onChunkTranscribed: (newWords) => {
+      checkForTriggerPhrases(newWords);
+    },
+  });
 
   // System audio probe result
   const systemAudioInfo = ref<SystemAudioInfo | null>(null);
@@ -128,7 +148,7 @@ export const useRecordingStore = defineStore('recording', () => {
       const info = await invoke<SystemAudioInfo>('probe_system_audio');
       systemAudioInfo.value = info;
 
-      console.log('[Recording] System audio probe result:', info);
+      console.log(`[Recording] System audio probe: available=${info.available}, method=${info.method || 'none'}`);
 
       if (!info.available) {
         error.value = `System audio not available: ${info.test_result || 'Unknown reason'}`;
@@ -141,6 +161,74 @@ export const useRecordingStore = defineStore('recording', () => {
       return null;
     } finally {
       systemAudioProbing.value = false;
+    }
+  }
+
+  function lockRecording(): void {
+    if (isRecording.value) {
+      isLocked.value = true;
+    }
+  }
+
+  function unlockRecording(): void {
+    isLocked.value = false;
+  }
+
+  // Timemark actions
+  function addTimemark(label?: string, source: 'manual' | 'auto' = 'manual', atTime?: number): void {
+    if (!isRecording.value) return;
+    timemarkCounter++;
+    const mark: TimeMark = {
+      id: generateId(),
+      time: atTime ?? recordingDuration.value,
+      label: label || `Mark ${timemarkCounter}`,
+      source,
+      color: source === 'manual' ? '#00d4ff' : '#fbbf24',
+    };
+    timemarks.value = [...timemarks.value, mark];
+    console.log('[Recording] Added timemark:', mark.label, 'at', mark.time.toFixed(2) + 's');
+  }
+
+  function removeTimemark(id: string): void {
+    timemarks.value = timemarks.value.filter(m => m.id !== id);
+  }
+
+  function clearTimemarks(): void {
+    timemarks.value = [];
+    timemarkCounter = 0;
+  }
+
+  function setTriggerPhrases(phrases: string[]): void {
+    triggerPhrases.value = phrases;
+  }
+
+  function checkForTriggerPhrases(words: Word[]): void {
+    if (!isRecording.value || triggerPhrases.value.length === 0 || words.length === 0) return;
+
+    for (const phrase of triggerPhrases.value) {
+      const normalizedPhrase = phrase.trim().toLowerCase();
+      if (!normalizedPhrase) continue;
+
+      const phraseWords = normalizedPhrase.split(/\s+/);
+
+      // Scan through the transcribed words looking for phrase matches
+      for (let i = 0; i <= words.length - phraseWords.length; i++) {
+        const window = words.slice(i, i + phraseWords.length);
+        const windowText = window.map(w => w.text.toLowerCase().replace(/[.,!?;:]/g, '')).join(' ');
+
+        if (windowText.includes(normalizedPhrase)) {
+          // Use the actual timestamp of the first word in the match
+          const matchTime = words[i].start;
+
+          // Avoid duplicate auto-marks at similar times
+          const existingNearby = timemarks.value.find(
+            m => m.source === 'auto' && m.label.toLowerCase() === normalizedPhrase && Math.abs(m.time - matchTime) < 3,
+          );
+          if (!existingNearby) {
+            addTimemark(phrase.trim(), 'auto', matchTime);
+          }
+        }
+      }
     }
   }
 
@@ -167,6 +255,7 @@ export const useRecordingStore = defineStore('recording', () => {
 
     error.value = null;
     isPreparing.value = true;
+    clearTimemarks();
 
     const isSystemSubprocess = source.value === 'system' &&
       systemAudioInfo.value?.method !== 'cpal-monitor';
@@ -202,19 +291,22 @@ export const useRecordingStore = defineStore('recording', () => {
       recordingStartTime = Date.now();
       recordingDuration.value = 0;
 
-      // Start polling level
+      // Start polling level (100ms = 10Hz, sufficient for visual meter)
       levelPollInterval = window.setInterval(async () => {
         try {
           currentLevel.value = await invoke<number>('get_recording_level');
         } catch (e) {
           // Ignore polling errors
         }
-      }, 50);
+      }, 100);
 
       // Start duration counter
       durationInterval = window.setInterval(() => {
         recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
       }, 100);
+
+      // Start background transcription for timemarks
+      startBackgroundTranscription();
     } catch (e) {
       console.error('[Recording] Failed to start:', e);
       error.value = e instanceof Error ? e.message : String(e);
@@ -236,6 +328,9 @@ export const useRecordingStore = defineStore('recording', () => {
       durationInterval = null;
     }
 
+    // Stop background transcription and capture accumulated words
+    stopBackgroundTranscription();
+
     try {
       const wasSystemAudio = source.value === 'system';
       const wasUsingSubprocess = wasSystemAudio &&
@@ -249,9 +344,10 @@ export const useRecordingStore = defineStore('recording', () => {
       }
 
       isRecording.value = false;
+      isLocked.value = false;
       currentLevel.value = 0;
 
-      console.log('[Recording] Stopped:', result);
+      console.log(`[Recording] Stopped: path=${result.path}, duration=${result.duration?.toFixed(1)}s, rate=${result.sample_rate}, ch=${result.channels}`);
 
       // Create a new track from the recorded audio
       if (result.path) {
@@ -263,6 +359,7 @@ export const useRecordingStore = defineStore('recording', () => {
       console.error('[Recording] Failed to stop:', e);
       error.value = e instanceof Error ? e.message : String(e);
       isRecording.value = false;
+      isLocked.value = false;
       return null;
     }
   }
@@ -312,6 +409,12 @@ export const useRecordingStore = defineStore('recording', () => {
 
       const newTrack = tracksStore.createTrackFromBuffer(buffer, waveformData, name, trackStart, path);
 
+      // Transfer timemarks to the new track
+      if (timemarks.value.length > 0) {
+        newTrack.timemarks = [...timemarks.value];
+        console.log('[Recording] Transferred', timemarks.value.length, 'timemarks to track');
+      }
+
       // Select the new track
       tracksStore.selectTrack(newTrack.id);
 
@@ -343,6 +446,9 @@ export const useRecordingStore = defineStore('recording', () => {
       durationInterval = null;
     }
 
+    // Stop background transcription (discard words)
+    stopBackgroundTranscription();
+
     try {
       if (source.value === 'system') {
         try {
@@ -354,6 +460,7 @@ export const useRecordingStore = defineStore('recording', () => {
         await invoke('cancel_recording');
       }
       isRecording.value = false;
+      isLocked.value = false;
       currentLevel.value = 0;
       recordingDuration.value = 0;
       recordingPath.value = null;
@@ -422,7 +529,7 @@ export const useRecordingStore = defineStore('recording', () => {
         } catch (e) {
           // Ignore polling errors
         }
-      }, 50);
+      }, 100);
     } catch (e) {
       console.error('[Recording] Failed to start monitoring:', e);
       error.value = e instanceof Error ? e.message : String(e);
@@ -468,6 +575,10 @@ export const useRecordingStore = defineStore('recording', () => {
     error,
     placement,
     isMuted,
+    isLocked,
+    // Timemarks
+    timemarks,
+    triggerPhrases,
     microphoneDevices,
     loopbackDevices,
     selectedDevice,
@@ -480,6 +591,17 @@ export const useRecordingStore = defineStore('recording', () => {
     setSource,
     setPlacement,
     probeSystemAudio,
+    lockRecording,
+    unlockRecording,
+    // Background transcription
+    backgroundWords,
+    backgroundTranscriptionActive,
+    // Timemark actions
+    addTimemark,
+    removeTimemark,
+    clearTimemarks,
+    setTriggerPhrases,
+    checkForTriggerPhrases,
     startRecording,
     stopRecording,
     cancelRecording,

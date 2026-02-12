@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useRecordingStore } from '@/stores/recording';
 import { useSettingsStore } from '@/stores/settings';
 
@@ -16,7 +16,8 @@ const containerRef = ref<HTMLDivElement | null>(null);
 const canvasWidth = ref(800);
 
 // Store recent level samples for waveform visualization
-const levelHistory = ref<number[]>([]);
+// Plain array (not reactive) - only read by draw(), no need for Vue tracking
+let levelHistory: number[] = [];
 const maxHistoryLength = 200; // Show last N samples
 
 let rafId: number | null = null;
@@ -40,7 +41,7 @@ function draw() {
   ctx.fillRect(0, 0, width, height);
 
   // Draw waveform from level history
-  if (levelHistory.value.length === 0) {
+  if (levelHistory.length === 0) {
     // Draw waiting indicator
     ctx.fillStyle = '#4b5563'; // gray-600
     ctx.font = '12px system-ui';
@@ -49,7 +50,7 @@ function draw() {
     return;
   }
 
-  const samples = levelHistory.value;
+  const samples = levelHistory;
   const barWidth = width / maxHistoryLength;
 
   ctx.fillStyle = color;
@@ -73,34 +74,45 @@ function draw() {
   ctx.stroke();
 }
 
-// Animation loop for smooth updates
+// Animation loop — only runs while recording to avoid idle CPU usage
 function animate() {
+  if (!recordingStore.isRecording) {
+    // Recording stopped: do a final redraw then stop the loop
+    if (levelHistory.length > 0) {
+      draw();
+    }
+    rafId = null;
+    return;
+  }
+
   const now = performance.now();
 
-  if (recordingStore.isRecording && now - lastUpdateTime >= updateInterval) {
-    // Add current level to history
-    levelHistory.value.push(recordingStore.currentLevel);
+  if (now - lastUpdateTime >= updateInterval) {
+    levelHistory.push(recordingStore.currentLevel);
 
-    // Trim history to max length
-    if (levelHistory.value.length > maxHistoryLength) {
-      levelHistory.value.shift();
+    if (levelHistory.length > maxHistoryLength) {
+      levelHistory.shift();
     }
 
     lastUpdateTime = now;
-    draw();
-  } else if (!recordingStore.isRecording && levelHistory.value.length > 0) {
-    // Recording stopped, clear history gradually or just redraw
     draw();
   }
 
   rafId = requestAnimationFrame(animate);
 }
 
-// Watch recording state to clear history on start
+function startAnimationLoop() {
+  if (rafId !== null) return; // already running
+  rafId = requestAnimationFrame(animate);
+}
+
+// Watch recording state to start/stop the rAF loop
 watch(() => recordingStore.isRecording, (isRecording) => {
   if (isRecording) {
-    levelHistory.value = [];
+    levelHistory = [];
+    startAnimationLoop();
   }
+  // Stop is handled inside animate() when isRecording becomes false
 });
 
 // Handle container resize
@@ -121,7 +133,12 @@ onMounted(() => {
     resizeObserver.observe(containerRef.value);
   }
 
-  rafId = requestAnimationFrame(animate);
+  // Only start the rAF loop if already recording; otherwise the watcher handles it
+  if (recordingStore.isRecording) {
+    startAnimationLoop();
+  } else {
+    draw(); // draw the idle state once
+  }
 });
 
 onUnmounted(() => {

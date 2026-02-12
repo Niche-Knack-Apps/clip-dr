@@ -45,6 +45,10 @@ const clipDragStartX = ref(0);
 const clipDragOriginalStart = ref(0);
 const draggingClipId = ref<string | null>(null);
 
+// rAF-based throttle for clip drag mousemove
+let clipDragRafId: number | null = null;
+let pendingClipDragEvent: MouseEvent | null = null;
+
 // Minimum pixels to move before drag starts (to allow click-to-select)
 const DRAG_THRESHOLD = 5;
 
@@ -62,6 +66,24 @@ const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH
 // Get clips for this track (supports multi-clip tracks)
 const trackClips = computed(() => tracksStore.getTrackClips(props.track.id));
 
+// Track timemarks with pixel positions
+const trackTimemarks = computed(() => {
+  if (!props.track.timemarks || props.track.timemarks.length === 0 || duration.value <= 0) return [];
+  return props.track.timemarks.map(mark => ({
+    ...mark,
+    // Time is relative to the recording; add trackStart for absolute timeline position
+    pixelLeft: ((props.track.trackStart + mark.time) / duration.value) * containerWidth.value,
+  }));
+});
+
+function handleTimemarkClick(time: number) {
+  playbackStore.seek(props.track.trackStart + time);
+}
+
+function handleTimemarkDelete(markId: string) {
+  tracksStore.removeTrackTimemark(props.track.id, markId);
+}
+
 // Format track duration
 const formattedDuration = computed(() => {
   const d = props.track.duration;
@@ -71,11 +93,20 @@ const formattedDuration = computed(() => {
 });
 
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
 
 function updateWidth() {
   if (containerRef.value) {
     containerWidth.value = containerRef.value.clientWidth;
   }
+}
+
+function handleResize() {
+  if (resizeRafId !== null) return;
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    updateWidth();
+  });
 }
 
 // Clip drag handlers - called from ClipRegion
@@ -103,21 +134,40 @@ function handleClipDragMove(event: MouseEvent) {
 
   const deltaX = event.clientX - clipDragStartX.value;
 
-  // Check if we've crossed the drag threshold
+  // Check if we've crossed the drag threshold (synchronous - don't defer)
   if (!isClipDragging.value && Math.abs(deltaX) >= DRAG_THRESHOLD) {
     isClipDragging.value = true;
     emit('clipDragStart', props.track.id, draggingClipId.value);
   }
 
-  // Only update position if actually dragging
+  // Throttle position updates to rAF rate
   if (isClipDragging.value) {
+    pendingClipDragEvent = event;
+    if (clipDragRafId === null) {
+      clipDragRafId = requestAnimationFrame(flushClipDrag);
+    }
+  }
+}
+
+function flushClipDrag() {
+  clipDragRafId = null;
+  if (pendingClipDragEvent && isClipDragging.value && draggingClipId.value) {
+    const deltaX = pendingClipDragEvent.clientX - clipDragStartX.value;
     const deltaTime = (deltaX / containerWidth.value) * duration.value;
     const newStart = Math.max(0, clipDragOriginalStart.value + deltaTime);
+    pendingClipDragEvent = null;
     emit('clipDrag', props.track.id, draggingClipId.value, newStart);
   }
 }
 
 function handleClipDragEnd(event: MouseEvent) {
+  // Cancel any pending rAF
+  if (clipDragRafId !== null) {
+    cancelAnimationFrame(clipDragRafId);
+    clipDragRafId = null;
+  }
+  pendingClipDragEvent = null;
+
   const wasDragging = isClipDragging.value;
   const clipId = draggingClipId.value;
 
@@ -177,7 +227,7 @@ function handleVolumeChange(value: number) {
 onMounted(() => {
   updateWidth();
 
-  resizeObserver = new ResizeObserver(updateWidth);
+  resizeObserver = new ResizeObserver(handleResize);
   if (containerRef.value) {
     resizeObserver.observe(containerRef.value);
   }
@@ -185,6 +235,12 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+  }
+  if (clipDragRafId !== null) {
+    cancelAnimationFrame(clipDragRafId);
+  }
 });
 </script>
 
@@ -341,6 +397,39 @@ onUnmounted(() => {
         :is-selected="clip.id === tracksStore.selectedClipId"
         @drag-start="handleClipDragStart"
       />
+
+      <!-- Timemark indicators -->
+      <div
+        v-for="mark in trackTimemarks"
+        :key="mark.id"
+        class="absolute top-0 bottom-0 z-10 cursor-pointer group/tm"
+        :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
+        :title="mark.label"
+        @click.stop="handleTimemarkClick(mark.time)"
+        @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
+      >
+        <!-- Vertical line -->
+        <div
+          class="absolute top-0 bottom-0 left-1 w-px opacity-60 group-hover/tm:opacity-100"
+          :style="{ backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24') }"
+        />
+        <!-- Triangle flag at top -->
+        <div
+          class="absolute top-0 left-0"
+          :style="{
+            width: 0,
+            height: 0,
+            borderLeft: '5px solid transparent',
+            borderRight: '5px solid transparent',
+            borderTop: `8px solid ${mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24')}`,
+          }"
+        />
+        <!-- Tooltip on hover -->
+        <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20">
+          {{ mark.label }}
+          <span class="text-gray-500 ml-1">(right-click to delete)</span>
+        </div>
+      </div>
 
       <Playhead
         :position="currentTime"

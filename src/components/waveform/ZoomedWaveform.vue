@@ -38,12 +38,15 @@ const dragStartTime = ref(0);
 const dragStartX = ref(0);
 const hasDragged = ref(false);
 
+// rAF-based throttle for drag mousemove
+let dragRafId: number | null = null;
+let pendingDragEvent: MouseEvent | null = null;
+
 // Minimum pixels moved to count as a drag vs click
 const DRAG_THRESHOLD = 5;
 
 // Zoom constraints
 const MIN_ZOOM_DURATION = 0.5; // Minimum 0.5 seconds visible
-const MAX_ZOOM_DURATION = 60; // Maximum 60 seconds visible (or full duration)
 const ZOOM_FACTOR = 0.15; // 15% zoom per scroll step
 
 const selection = computed(() => selectionStore.selection);
@@ -85,11 +88,20 @@ watch(currentTime, (time) => {
 });
 
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
 
 function updateWidth() {
   if (containerRef.value) {
     containerWidth.value = containerRef.value.clientWidth;
   }
+}
+
+function handleResize() {
+  if (resizeRafId !== null) return;
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    updateWidth();
+  });
 }
 
 function timeToX(time: number): number {
@@ -161,13 +173,11 @@ function handleMouseDown(event: MouseEvent) {
 function handleMouseMove(event: MouseEvent) {
   if (dragMode.value === 'none') return;
 
-  const time = xToTime(event.clientX);
   const distanceMoved = Math.abs(event.clientX - dragStartX.value);
 
-  // Check if we've moved enough to count as a drag
+  // Threshold check must be synchronous to feel responsive
   if (!hasDragged.value && distanceMoved >= DRAG_THRESHOLD) {
     hasDragged.value = true;
-    // Starting a selection drag - set initial in point
     if (dragMode.value === 'select') {
       selectionStore.setInPoint(dragStartTime.value);
     }
@@ -175,22 +185,34 @@ function handleMouseMove(event: MouseEvent) {
 
   if (!hasDragged.value) return;
 
+  // Throttle the actual position updates to rAF rate
+  pendingDragEvent = event;
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(flushDragMove);
+  }
+}
+
+function flushDragMove() {
+  dragRafId = null;
+  const event = pendingDragEvent;
+  if (!event || dragMode.value === 'none') return;
+  pendingDragEvent = null;
+
+  const time = xToTime(event.clientX);
+
   if (dragMode.value === 'in') {
-    // Dragging in point - ensure it stays before out point
     if (outPoint.value !== null && time >= outPoint.value) {
       selectionStore.setInPoint(outPoint.value - 0.001);
     } else {
       selectionStore.setInPoint(time);
     }
   } else if (dragMode.value === 'out') {
-    // Dragging out point - ensure it stays after in point
     if (inPoint.value !== null && time <= inPoint.value) {
       selectionStore.setOutPoint(inPoint.value + 0.001);
     } else {
       selectionStore.setOutPoint(time);
     }
   } else if (dragMode.value === 'select') {
-    // Selecting a range - set out point (swap if needed)
     if (time < dragStartTime.value) {
       selectionStore.setInPoint(time);
       selectionStore.setOutPoint(dragStartTime.value);
@@ -202,6 +224,15 @@ function handleMouseMove(event: MouseEvent) {
 }
 
 function handleMouseUp(event: MouseEvent) {
+  // Flush any pending drag
+  if (pendingDragEvent) {
+    flushDragMove();
+  }
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
+
   // If it was just a click (no drag) in select mode
   if (!hasDragged.value && dragMode.value === 'select') {
     const time = xToTime(event.clientX);
@@ -311,7 +342,7 @@ function handleSilenceRestore(id: string) {
 onMounted(() => {
   updateWidth();
 
-  resizeObserver = new ResizeObserver(updateWidth);
+  resizeObserver = new ResizeObserver(handleResize);
   if (containerRef.value) {
     resizeObserver.observe(containerRef.value);
   }
@@ -319,6 +350,12 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+  }
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+  }
 });
 </script>
 

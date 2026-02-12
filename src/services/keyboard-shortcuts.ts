@@ -1,5 +1,6 @@
 import { onMounted, onUnmounted } from 'vue';
 import { KEYBOARD_SHORTCUTS } from '@/shared/constants';
+import { useRecordingStore } from '@/stores/recording';
 
 export interface KeyboardActions {
   onPlayPause?: () => void;
@@ -38,6 +39,8 @@ export interface KeyboardActions {
   // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z)
   onUndo?: () => void;
   onRedo?: () => void;
+  // Recording timemark
+  onAddTimemark?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -180,10 +183,16 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
     }
 
     switch (event.key) {
-      case KEYBOARD_SHORTCUTS.PLAY_PAUSE:
+      case KEYBOARD_SHORTCUTS.PLAY_PAUSE: {
         event.preventDefault();
+        // Block spacebar stop when recording is locked
+        const recStore = useRecordingStore();
+        if (recStore.isRecording && recStore.isLocked) {
+          return;
+        }
         actions.onPlayPause?.();
         break;
+      }
 
       case KEYBOARD_SHORTCUTS.SET_IN:
         if (!isCtrlOrCmd) {
@@ -281,6 +290,16 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
           event.preventDefault();
           console.log('[Keyboard] V (paste direct)');
           actions.onPasteDirect?.();
+        }
+        break;
+
+      case KEYBOARD_SHORTCUTS.MARK_TIME:
+        if (!isCtrlOrCmd) {
+          const recStoreForMark = useRecordingStore();
+          if (recStoreForMark.isRecording) {
+            event.preventDefault();
+            actions.onAddTimemark?.();
+          }
         }
         break;
 
