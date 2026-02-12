@@ -375,8 +375,14 @@ export const useRecordingStore = defineStore('recording', () => {
 
       console.log('[Recording] Created track at position:', trackStart, 'selected:', newTrack.id);
 
-      // Queue background transcription for the new track
-      useTranscriptionStore().queueTranscription(newTrack.id, 'high');
+      // Queue transcription for the new track
+      const transcriptionStore = useTranscriptionStore();
+      transcriptionStore.queueTranscription(newTrack.id, 'high');
+
+      // Register trigger phrases for post-transcription auto-marks
+      if (triggerPhrases.value.length > 0) {
+        transcriptionStore.registerPendingTriggerPhrases(newTrack.id, [...triggerPhrases.value]);
+      }
     } catch (e) {
       console.error('[Recording] Failed to create track:', e);
       error.value = e instanceof Error ? e.message : String(e);
