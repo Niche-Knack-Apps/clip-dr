@@ -180,9 +180,22 @@ export interface Settings {
   lastRecordingSource: RecordingSource;
   // Export defaults
   defaultMp3Bitrate: Mp3Bitrate;
+  // Export profiles
+  exportProfiles: ExportProfile[];
+  lastExportProfileId: string;
+  lastExportPath: string;
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';
+
+export interface ExportProfile {
+  id: string;
+  name: string;
+  format: ExportFormat;
+  mp3Bitrate?: Mp3Bitrate;
+  isDefault?: boolean;     // built-in, not deletable
+  isFavorite?: boolean;    // starred = used for Quick Re-Export
+}
 
 export interface ExportOptions {
   format: ExportFormat;

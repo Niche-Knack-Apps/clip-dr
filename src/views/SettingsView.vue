@@ -9,6 +9,7 @@ import AboutPanel from '@/components/settings/AboutPanel.vue';
 import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
+import type { ExportFormat, ExportProfile, Mp3Bitrate } from '@/shared/types';
 
 const APP_VERSION = '0.4.0';
 
@@ -25,6 +26,32 @@ const downloadingModel = ref<string | null>(null);
 const downloadError = ref<string | null>(null);
 const bundledModelPath = ref<string | null>(null);
 const defaultProjectFolder = ref<string>('');
+
+// Export profile management
+const showNewProfileForm = ref(false);
+const newProfileName = ref('');
+const newProfileFormat = ref<ExportFormat>('mp3');
+const newProfileBitrate = ref<Mp3Bitrate>(192);
+
+function handleAddProfile() {
+  if (!newProfileName.value.trim()) return;
+  const id = `custom-${Date.now()}`;
+  const profile: ExportProfile = {
+    id,
+    name: newProfileName.value.trim(),
+    format: newProfileFormat.value,
+    ...(newProfileFormat.value === 'mp3' ? { mp3Bitrate: newProfileBitrate.value } : {}),
+  };
+  settingsStore.addExportProfile(profile);
+  showNewProfileForm.value = false;
+  newProfileName.value = '';
+  newProfileFormat.value = 'mp3';
+  newProfileBitrate.value = 192;
+}
+
+function handleDeleteProfile(id: string) {
+  settingsStore.deleteExportProfile(id);
+}
 
 const displayPath = computed(() => {
   const path = settingsStore.settings.modelsPath;
@@ -240,23 +267,105 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- Export -->
+        <!-- Export Profiles -->
         <div>
-          <h3 class="text-sm font-medium text-gray-300 mb-3">Export</h3>
-          <div class="space-y-3">
-            <div>
-              <label class="block text-xs text-gray-400 mb-1">Default MP3 Bitrate</label>
-              <select
-                :value="settingsStore.settings.defaultMp3Bitrate"
-                class="w-full h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                @change="settingsStore.setDefaultMp3Bitrate(Number(($event.target as HTMLSelectElement).value) as any)"
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Export Profiles</h3>
+          <div class="space-y-2">
+            <div
+              v-for="profile in settingsStore.getExportProfiles()"
+              :key="profile.id"
+              class="flex items-center gap-2 py-1.5 px-2 bg-gray-800 rounded text-xs"
+            >
+              <!-- Favorite star -->
+              <button
+                type="button"
+                class="text-sm leading-none"
+                :class="profile.isFavorite ? 'text-yellow-400' : 'text-gray-500 hover:text-gray-300'"
+                title="Set as Quick Re-Export default"
+                @click="settingsStore.setFavoriteProfile(profile.id)"
               >
-                <option :value="128">128 kbps</option>
-                <option :value="192">192 kbps</option>
-                <option :value="256">256 kbps</option>
-                <option :value="320">320 kbps</option>
-              </select>
+                {{ profile.isFavorite ? '\u2605' : '\u2606' }}
+              </button>
+              <!-- Profile info -->
+              <span class="text-gray-200 flex-1">
+                {{ profile.name }}
+                <span class="text-gray-500 ml-1">
+                  ({{ profile.format.toUpperCase() }}{{ profile.mp3Bitrate ? ` ${profile.mp3Bitrate}kbps` : '' }})
+                </span>
+              </span>
+              <!-- Built-in badge or delete button -->
+              <span v-if="profile.isDefault" class="text-[10px] text-gray-500">Built-in</span>
+              <button
+                v-else
+                type="button"
+                class="text-gray-500 hover:text-red-400 transition-colors p-0.5"
+                title="Delete profile"
+                @click="handleDeleteProfile(profile.id)"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
             </div>
+
+            <!-- Add profile form -->
+            <div v-if="showNewProfileForm" class="p-2 bg-gray-800 rounded border border-gray-700 space-y-2">
+              <input
+                v-model="newProfileName"
+                type="text"
+                placeholder="Profile name"
+                class="w-full h-7 px-2 text-xs bg-gray-900 border border-gray-600 rounded text-gray-200
+                       focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              />
+              <div class="flex gap-2">
+                <label v-for="fmt in (['wav', 'mp3'] as const)" :key="fmt" class="flex items-center gap-1 text-xs">
+                  <input
+                    type="radio"
+                    name="newProfileFormat"
+                    :value="fmt"
+                    :checked="newProfileFormat === fmt"
+                    class="text-cyan-500"
+                    @change="newProfileFormat = fmt"
+                  />
+                  <span class="text-gray-300">{{ fmt.toUpperCase() }}</span>
+                </label>
+              </div>
+              <div v-if="newProfileFormat === 'mp3'" class="flex gap-1">
+                <button
+                  v-for="br in ([128, 192, 256, 320] as const)"
+                  :key="br"
+                  type="button"
+                  :class="[
+                    'px-2 py-0.5 text-[10px] rounded transition-colors',
+                    newProfileBitrate === br
+                      ? 'bg-cyan-600 text-white'
+                      : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                  ]"
+                  @click="newProfileBitrate = br"
+                >
+                  {{ br }}
+                </button>
+              </div>
+              <div class="flex gap-2 justify-end">
+                <Button variant="ghost" size="sm" @click="showNewProfileForm = false">Cancel</Button>
+                <Button variant="primary" size="sm" :disabled="!newProfileName.trim()" @click="handleAddProfile">Save</Button>
+              </div>
+            </div>
+
+            <Button
+              v-if="!showNewProfileForm"
+              variant="ghost"
+              size="sm"
+              class="w-full"
+              @click="showNewProfileForm = true"
+            >
+              + Add Profile
+            </Button>
+
+            <p class="text-[10px] text-gray-500">
+              <span class="text-yellow-400/70">\u2605</span> = default for Quick Re-Export (Ctrl+Shift+E).
+              Built-in profiles can't be deleted.
+            </p>
           </div>
         </div>
 

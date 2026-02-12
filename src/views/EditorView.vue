@@ -13,6 +13,7 @@ import { useUIStore } from '@/stores/ui';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useHistoryStore } from '@/stores/history';
 import { useRecordingStore } from '@/stores/recording';
+import { useExportStore } from '@/stores/export';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useClipping } from '@/composables/useClipping';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
@@ -30,6 +31,7 @@ const clipboardStore = useClipboardStore();
 const transcriptionStore = useTranscriptionStore();
 const historyStore = useHistoryStore();
 const recordingStore = useRecordingStore();
+const exportStore = useExportStore();
 const uiStore = useUIStore();
 
 const focusSearch = inject<() => void>('focusSearch');
@@ -219,6 +221,8 @@ useKeyboardShortcuts({
       tracksStore.selectTrack(tracks[prevIdx].id);
     }
   },
+  // Quick Re-Export (Ctrl+Shift+E)
+  onQuickExport: () => exportStore.quickReExport(),
 });
 </script>
 

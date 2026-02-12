@@ -161,9 +161,7 @@ async function handleExport(trackId: string) {
 
   try {
     exporting.value = true;
-    // Sync MP3 bitrate from settings to export store
-    exportStore.setMp3Bitrate(settingsStore.settings.defaultMp3Bitrate || 192);
-    // Native save dialog handles format selection
+    // Uses favorite export profile (single-filter dialog)
     const result = await exportStore.exportTrack(track);
     if (result) {
       console.log('[TrackList] Exported track:', track.name, 'to:', result);

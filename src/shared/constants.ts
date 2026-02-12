@@ -39,6 +39,10 @@ export const DEFAULT_SETTINGS = {
   lastRecordingSource: 'system' as const,
   // Export defaults
   defaultMp3Bitrate: 192 as const,
+  // Export profiles
+  exportProfiles: [] as ExportProfile[],  // merged with DEFAULT_EXPORT_PROFILES at load time
+  lastExportProfileId: 'mp3-192',
+  lastExportPath: '',
 };
 
 export const KEYBOARD_SHORTCUTS = {
@@ -91,7 +95,13 @@ export const LOOP_MODES: { value: LoopMode; label: string }[] = [
   { value: 'clip', label: 'Clip' },
 ];
 
-import type { CleaningOptions, CleaningPreset } from './types';
+import type { CleaningOptions, CleaningPreset, ExportProfile } from './types';
+
+export const DEFAULT_EXPORT_PROFILES: ExportProfile[] = [
+  { id: 'mp3-192', name: 'MP3 Standard', format: 'mp3', mp3Bitrate: 192, isDefault: true, isFavorite: true },
+  { id: 'mp3-320', name: 'MP3 High Quality', format: 'mp3', mp3Bitrate: 320, isDefault: true },
+  { id: 'wav', name: 'WAV Lossless', format: 'wav', isDefault: true },
+];
 
 export const DEFAULT_CLEANING_OPTIONS: CleaningOptions = {
   highpassEnabled: true,
