@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, inject } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted, inject } from 'vue';
 import TranscriptionWord from './TranscriptionWord.vue';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useTracksStore } from '@/stores/tracks';
@@ -68,12 +68,31 @@ const hasAnyTranscription = computed(() => {
   return tracksStore.tracks.some(t => transcriptionStore.hasTranscriptionForTrack(t.id));
 });
 
-const activeWord = computed(() => {
-  for (const track of tracksStore.tracks) {
-    const word = transcriptionStore.getWordAtTime(track.id, currentTime.value);
-    if (word) return word;
-  }
-  return null;
+// Density check: when words are too small to read, skip rendering them
+const wordsTooSmallToRead = computed(() => {
+  if (visibleWords.value.length === 0) return false;
+  const range = selection.value.end - selection.value.start;
+  if (range <= 0 || containerWidth.value <= 0) return false;
+  const avgWordDuration = range / visibleWords.value.length;
+  const avgWordPx = (avgWordDuration / range) * containerWidth.value;
+  return avgWordPx < 40;
+});
+
+// rAF-throttled active word to avoid per-frame recomputation
+const activeWord = ref<Word | null>(null);
+let activeWordRafId: number | null = null;
+
+watch(currentTime, () => {
+  if (activeWordRafId !== null) return;
+  activeWordRafId = requestAnimationFrame(() => {
+    activeWordRafId = null;
+    let found: Word | null = null;
+    for (const track of tracksStore.tracks) {
+      const word = transcriptionStore.getWordAtTime(track.id, currentTime.value);
+      if (word) { found = word; break; }
+    }
+    activeWord.value = found;
+  });
 });
 
 // Get the per-track enableFalloff (for selected track)
@@ -197,6 +216,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (activeWordRafId !== null) {
+    cancelAnimationFrame(activeWordRafId);
+  }
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseup', handleMouseUp);
 });
@@ -210,34 +232,47 @@ onUnmounted(() => {
       class="relative bg-track-bg overflow-hidden"
       :style="{ height: `${WORD_HEIGHT}px` }"
     >
-      <div
-        v-for="word in visibleWords"
-        :key="`${word.trackId}-${word.id}`"
-        class="absolute top-0 flex items-center group"
-        :class="{
-          'cursor-grab': dragMode === 'none',
-          'cursor-grabbing': isWordBeingDragged(word),
-          'z-10': isWordBeingDragged(word),
-        }"
-        :style="{
-          left: `${getWordPosition(word).left}px`,
-          width: `${getWordPosition(word).width}px`,
-          height: '100%',
-        }"
-        @mousedown="handleWordDragStart($event, word)"
-      >
-        <TranscriptionWord
-          :word="word"
-          :is-active="activeWord?.id === word.id"
-          :is-highlighted="isWordHighlighted(word)"
-          :is-dragging="isWordBeingDragged(word)"
-          @click="handleWordClick"
-          @update-text="(wordId: string, text: string) => handleWordTextUpdate(word.trackId, wordId, text)"
-        />
+      <!-- Normal word rendering (zoomed in enough to read) -->
+      <template v-if="!wordsTooSmallToRead">
+        <div
+          v-for="word in visibleWords"
+          :key="`${word.trackId}-${word.id}`"
+          class="absolute top-0 flex items-center group"
+          :class="{
+            'cursor-grab': dragMode === 'none',
+            'cursor-grabbing': isWordBeingDragged(word),
+            'z-10': isWordBeingDragged(word),
+          }"
+          :style="{
+            left: `${getWordPosition(word).left}px`,
+            width: `${getWordPosition(word).width}px`,
+            height: '100%',
+          }"
+          @mousedown="handleWordDragStart($event, word)"
+        >
+          <TranscriptionWord
+            :word="word"
+            :is-active="activeWord?.id === word.id"
+            :is-highlighted="isWordHighlighted(word)"
+            :is-dragging="isWordBeingDragged(word)"
+            @click="handleWordClick"
+            @update-text="(wordId: string, text: string) => handleWordTextUpdate(word.trackId, wordId, text)"
+          />
+        </div>
+      </template>
+
+      <!-- Magnified active word mode (zoomed out too far to read individual words) -->
+      <div v-if="wordsTooSmallToRead && activeWord" class="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <span class="text-sm font-mono text-cyan-300 bg-gray-900/80 px-3 py-1 rounded">
+          {{ activeWord.text }}
+        </span>
+      </div>
+      <div v-else-if="wordsTooSmallToRead && hasAnyTranscription" class="absolute inset-0 flex items-center justify-center">
+        <span class="text-[10px] text-gray-600 italic">Zoom in to see words</span>
       </div>
 
       <div
-        v-if="!visibleWords.length && hasAnyTranscription"
+        v-if="!wordsTooSmallToRead && !visibleWords.length && hasAnyTranscription"
         class="absolute inset-0 flex items-center justify-center text-xs text-gray-500"
       >
         No words in this region
