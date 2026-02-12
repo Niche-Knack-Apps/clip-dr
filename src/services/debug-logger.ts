@@ -301,10 +301,56 @@ export class DebugLogger {
     return stats;
   }
 
+  // ========== Performance Monitor ==========
+
+  private _perfRafId: number | null = null;
+  private _perfLastTime = 0;
+  private _perfRunning = false;
+
+  /**
+   * Start monitoring frame times. Logs a warning when a frame exceeds the
+   * given threshold (default 32ms, i.e. below ~30 fps).
+   */
+  startPerfMonitor(thresholdMs = 32): void {
+    if (this._perfRunning) return;
+    this._perfRunning = true;
+    this._perfLastTime = performance.now();
+
+    const tick = () => {
+      if (!this._perfRunning) return;
+      const now = performance.now();
+      const frameTime = now - this._perfLastTime;
+      if (frameTime > thresholdMs) {
+        this.log('warn', `[Perf] Slow frame: ${frameTime.toFixed(1)}ms (>${thresholdMs}ms)`, {
+          source: 'perf-monitor',
+          frameTimeMs: frameTime,
+        });
+      }
+      this._perfLastTime = now;
+      this._perfRafId = requestAnimationFrame(tick);
+    };
+
+    this._perfRafId = requestAnimationFrame(tick);
+    this._log('info', '[DebugLogger] Performance monitor started');
+  }
+
+  /**
+   * Stop the frame-time performance monitor.
+   */
+  stopPerfMonitor(): void {
+    this._perfRunning = false;
+    if (this._perfRafId !== null) {
+      cancelAnimationFrame(this._perfRafId);
+      this._perfRafId = null;
+    }
+    this._log('info', '[DebugLogger] Performance monitor stopped');
+  }
+
   /**
    * Restore original console methods and cleanup
    */
   destroy(): void {
+    this.stopPerfMonitor();
     (Object.keys(this._originalConsole) as ConsoleLevel[]).forEach((level) => {
       console[level] = this._originalConsole[level];
     });
