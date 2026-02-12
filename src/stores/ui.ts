@@ -28,7 +28,7 @@ export const useUIStore = defineStore('ui', () => {
   const snapEnabled = ref(true);
 
   // Track timeline zoom (pixels per second)
-  const trackZoom = ref(100); // Default 100px per second
+  const trackZoom = ref(2);   // Default fully zoomed out
   const TRACK_ZOOM_MIN = 2;    // Minimum zoom (zoomed way out)
   const TRACK_ZOOM_MAX = 2000; // Maximum zoom (zoomed way in)
 
