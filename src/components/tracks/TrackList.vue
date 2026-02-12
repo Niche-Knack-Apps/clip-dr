@@ -7,6 +7,7 @@ import { useUIStore } from '@/stores/ui';
 import { useTracksStore } from '@/stores/tracks';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useExportStore } from '@/stores/export';
+import { useSettingsStore } from '@/stores/settings';
 import { useSelectionStore } from '@/stores/selection';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
@@ -16,6 +17,7 @@ const uiStore = useUIStore();
 const tracksStore = useTracksStore();
 const transcriptionStore = useTranscriptionStore();
 const exportStore = useExportStore();
+const settingsStore = useSettingsStore();
 const selectionStore = useSelectionStore();
 
 const {
@@ -159,10 +161,13 @@ async function handleExport(trackId: string) {
 
   try {
     exporting.value = true;
-    // Export this specific track only (uses WAV by default)
-    const result = await exportStore.exportTrack(track, 'wav');
+    // Use the last-used export format from settings (defaults to 'mp3' if not set)
+    const format = settingsStore.settings.lastExportFormat || 'mp3';
+    // Sync MP3 bitrate from settings to export store
+    exportStore.setMp3Bitrate(settingsStore.settings.defaultMp3Bitrate || 192);
+    const result = await exportStore.exportTrack(track, format);
     if (result) {
-      console.log('[TrackList] Exported track:', track.name, 'to:', result);
+      console.log('[TrackList] Exported track:', track.name, 'as', format, 'to:', result);
     }
   } catch (e) {
     console.error('[TrackList] Export failed:', e);
