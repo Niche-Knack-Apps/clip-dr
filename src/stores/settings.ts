@@ -2,8 +2,8 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appLocalDataDir } from '@tauri-apps/api/path';
-import type { Settings, ASRModel, RecordingSource, Mp3Bitrate, ExportFormat } from '@/shared/types';
-import { DEFAULT_SETTINGS } from '@/shared/constants';
+import type { Settings, ASRModel, RecordingSource, Mp3Bitrate, ExportFormat, ExportProfile } from '@/shared/types';
+import { DEFAULT_SETTINGS, DEFAULT_EXPORT_PROFILES } from '@/shared/constants';
 
 const STORAGE_KEY = 'clip-doctor-settings';
 
@@ -17,9 +17,23 @@ export const useSettingsStore = defineStore('settings', () => {
         const parsed = JSON.parse(stored);
         settings.value = { ...DEFAULT_SETTINGS, ...parsed };
       }
+      // Merge built-in export profiles with any custom ones from storage
+      mergeExportProfiles();
     } catch (e) {
       console.error('Failed to load settings:', e);
     }
+  }
+
+  function mergeExportProfiles(): void {
+    const existing = settings.value.exportProfiles || [];
+    const existingIds = new Set(existing.map(p => p.id));
+    // Add any built-in profiles not already present
+    for (const builtin of DEFAULT_EXPORT_PROFILES) {
+      if (!existingIds.has(builtin.id)) {
+        existing.push({ ...builtin });
+      }
+    }
+    settings.value.exportProfiles = existing;
   }
 
   function saveSettings(): void {
@@ -150,6 +164,57 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function getExportProfiles(): ExportProfile[] {
+    return settings.value.exportProfiles || DEFAULT_EXPORT_PROFILES;
+  }
+
+  function getFavoriteProfile(): ExportProfile | undefined {
+    const profiles = getExportProfiles();
+    return profiles.find(p => p.isFavorite) || profiles[0];
+  }
+
+  function addExportProfile(profile: ExportProfile): void {
+    const profiles = [...(settings.value.exportProfiles || [])];
+    profiles.push(profile);
+    settings.value.exportProfiles = profiles;
+    saveSettings();
+  }
+
+  function updateExportProfile(id: string, updates: Partial<ExportProfile>): void {
+    const profiles = [...(settings.value.exportProfiles || [])];
+    const idx = profiles.findIndex(p => p.id === id);
+    if (idx >= 0) {
+      profiles[idx] = { ...profiles[idx], ...updates };
+      settings.value.exportProfiles = profiles;
+      saveSettings();
+    }
+  }
+
+  function deleteExportProfile(id: string): void {
+    const profiles = (settings.value.exportProfiles || []).filter(p => p.id !== id);
+    settings.value.exportProfiles = profiles;
+    saveSettings();
+  }
+
+  function setFavoriteProfile(id: string): void {
+    const profiles = [...(settings.value.exportProfiles || [])];
+    for (const p of profiles) {
+      p.isFavorite = p.id === id;
+    }
+    settings.value.exportProfiles = profiles;
+    saveSettings();
+  }
+
+  function setLastExportProfileId(id: string): void {
+    settings.value.lastExportProfileId = id;
+    saveSettings();
+  }
+
+  function setLastExportPath(path: string): void {
+    settings.value.lastExportPath = path;
+    saveSettings();
+  }
+
   function setProjectFolder(path: string): void {
     settings.value.projectFolder = path;
     saveSettings();
@@ -225,5 +290,14 @@ export const useSettingsStore = defineStore('settings', () => {
     browseProjectFolder,
     resetProjectFolder,
     getProjectFolder,
+    // Export profiles
+    getExportProfiles,
+    getFavoriteProfile,
+    addExportProfile,
+    updateExportProfile,
+    deleteExportProfile,
+    setFavoriteProfile,
+    setLastExportProfileId,
+    setLastExportPath,
   };
 });

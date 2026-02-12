@@ -41,6 +41,8 @@ export interface KeyboardActions {
   onRedo?: () => void;
   // Recording timemark
   onAddTimemark?: () => void;
+  // Quick Re-Export (Ctrl+Shift+E)
+  onQuickExport?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -130,6 +132,13 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
           } else {
             console.log('[Keyboard] Ctrl+Z (undo)');
             actions.onUndo?.();
+          }
+          return;
+        case 'e':
+          if (event.shiftKey) {
+            event.preventDefault();
+            console.log('[Keyboard] Ctrl+Shift+E (quick re-export)');
+            actions.onQuickExport?.();
           }
           return;
       }
