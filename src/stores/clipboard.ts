@@ -404,6 +404,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
       pasteTime
     );
 
+    // Position playhead at the beginning of the new clip
+    playbackStore.seek(pasteTime);
     console.log(`[Clipboard] Created clip "${trackName}" (${(outPoint - inPoint).toFixed(2)}s) at ${pasteTime.toFixed(2)}s`);
     selectionStore.clearInOutPoints();
     return newTrack;
