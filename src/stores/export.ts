@@ -57,7 +57,7 @@ export const useExportStore = defineStore('export', () => {
   const loading = ref(false);
   const error = ref<string | null>(null);
   const progress = ref(0);
-  const mp3Bitrate = ref<Mp3Bitrate>(192);
+  const mp3Bitrate = ref<Mp3Bitrate>(settingsStore.settings.defaultMp3Bitrate || 192);
 
   // Get active (non-muted) tracks
   const activeTracks = computed(() => {

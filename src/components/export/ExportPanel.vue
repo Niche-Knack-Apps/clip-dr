@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import { useExportStore, type Mp3Bitrate } from '@/stores/export';
+import { useSettingsStore } from '@/stores/settings';
 import type { ExportFormat } from '@/shared/types';
 
 const emit = defineEmits<{
@@ -9,8 +10,11 @@ const emit = defineEmits<{
 }>();
 
 const exportStore = useExportStore();
+const settingsStore = useSettingsStore();
 
-const selectedFormat = ref<ExportFormat>('wav');
+// Initialize from persisted settings, defaulting to mp3 @ 192kbps
+const selectedFormat = ref<ExportFormat>(settingsStore.settings.lastExportFormat || 'mp3');
+const selectedBitrate = ref<Mp3Bitrate>(settingsStore.settings.defaultMp3Bitrate || 192);
 const lastExportedPath = ref<string | null>(null);
 
 const showBitrateOptions = computed(() => selectedFormat.value === 'mp3');
@@ -31,7 +35,15 @@ const bitrates: { value: Mp3Bitrate; label: string }[] = [
 
 async function handleExport() {
   lastExportedPath.value = null;
-  // Export all active tracks mixed together (toolbar export)
+
+  // Persist format and bitrate preferences before exporting
+  settingsStore.setLastExportFormat(selectedFormat.value);
+  settingsStore.setDefaultMp3Bitrate(selectedBitrate.value);
+
+  // Sync bitrate to export store so the backend uses the right value
+  exportStore.setMp3Bitrate(selectedBitrate.value);
+
+  // Export all active tracks mixed together
   const path = await exportStore.exportMixedTracks(selectedFormat.value);
   if (path) {
     lastExportedPath.value = path;
@@ -94,11 +106,11 @@ async function handleExport() {
           :key="bitrate.value"
           :class="[
             'flex-1 px-2 py-1.5 text-xs rounded border transition-colors',
-            exportStore.mp3Bitrate === bitrate.value
+            selectedBitrate === bitrate.value
               ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
               : 'border-gray-600 bg-gray-700 text-gray-300 hover:border-gray-500'
           ]"
-          @click="exportStore.setMp3Bitrate(bitrate.value)"
+          @click="selectedBitrate = bitrate.value"
         >
           {{ bitrate.label }}
         </button>

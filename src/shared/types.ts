@@ -167,6 +167,7 @@ export interface Settings {
   modelsPath: string;
   lastImportFolder: string;
   lastExportFolder: string;
+  lastExportFormat: ExportFormat;
   // Project folder (recordings, exports, etc.) - empty = use app data dir
   projectFolder: string;
   // Playback controls
