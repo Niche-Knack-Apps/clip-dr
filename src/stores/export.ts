@@ -74,33 +74,36 @@ export const useExportStore = defineStore('export', () => {
     return tracksStore.hasAudio && activeTracks.value.length > 0;
   });
 
-  async function exportActiveTracks(format: ExportFormat = 'wav'): Promise<string | null> {
-    console.log(`[Export] Starting active tracks export, format: ${format}, tracks: ${activeTracks.value.length}`);
+  async function exportActiveTracks(): Promise<string | null> {
+    console.log(`[Export] Starting active tracks export, tracks: ${activeTracks.value.length}`);
     if (!canExport.value) {
       console.warn('[Export] Cannot export - no audio or no active tracks');
       error.value = 'Nothing to export';
       return null;
     }
 
-    // Get file extension
-    const extensions: Record<ExportFormat, string> = {
-      wav: 'wav',
-      mp3: 'mp3',
-      flac: 'flac',
-      ogg: 'ogg',
-    };
-
-    const ext = extensions[format];
+    const lastFormat = settingsStore.settings.lastExportFormat || 'mp3';
     const trackName = activeTracks.value[0]?.name || 'audio';
-    const defaultName = `${trackName.replace(/[^a-zA-Z0-9]/g, '_')}_export.${ext}`;
+    const defaultName = `${trackName.replace(/[^a-zA-Z0-9]/g, '_')}_export.${lastFormat}`;
     const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+
+    // Build filters with last-used format first
+    const allFilters = [
+      { name: 'MP3 Audio', extensions: ['mp3'] },
+      { name: 'WAV Audio', extensions: ['wav'] },
+      { name: 'FLAC Audio', extensions: ['flac'] },
+      { name: 'OGG Audio', extensions: ['ogg'] },
+    ];
+    const lastIdx = allFilters.findIndex(f => f.extensions[0] === lastFormat);
+    if (lastIdx > 0) {
+      const [item] = allFilters.splice(lastIdx, 1);
+      allFilters.unshift(item);
+    }
 
     try {
       const outputPath = await save({
         defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
-        filters: [
-          { name: format.toUpperCase(), extensions: [ext] },
-        ],
+        filters: allFilters,
       });
 
       if (!outputPath) {
@@ -108,8 +111,13 @@ export const useExportStore = defineStore('export', () => {
         return null; // User cancelled
       }
 
-      console.log(`[Export] Save path selected: ${outputPath}`);
+      // Detect format from the file extension chosen in the native dialog
+      const detectedExt = outputPath.split('.').pop()?.toLowerCase() || 'mp3';
+      const format: ExportFormat = (['wav', 'mp3', 'flac', 'ogg'].includes(detectedExt) ? detectedExt : 'mp3') as ExportFormat;
+
+      console.log(`[Export] Save path selected: ${outputPath}, format: ${format}`);
       settingsStore.setLastExportFolder(outputPath);
+      settingsStore.setLastExportFormat(format);
       loading.value = true;
       error.value = null;
       progress.value = 0;
@@ -193,31 +201,35 @@ export const useExportStore = defineStore('export', () => {
   /**
    * Export a single track using its current buffer state (after edits/cuts).
    */
-  async function exportTrack(track: Track, format: ExportFormat = 'wav'): Promise<string | null> {
-    console.log(`[Export] Starting single track export: "${track.name}", format: ${format}, duration: ${track.duration.toFixed(2)}s`);
+  async function exportTrack(track: Track): Promise<string | null> {
+    console.log(`[Export] Starting single track export: "${track.name}", duration: ${track.duration.toFixed(2)}s`);
     if (!tracksStore.hasAudio) {
       console.warn('[Export] No audio loaded');
       error.value = 'No audio loaded';
       return null;
     }
 
-    const extensions: Record<ExportFormat, string> = {
-      wav: 'wav',
-      mp3: 'mp3',
-      flac: 'flac',
-      ogg: 'ogg',
-    };
-
-    const ext = extensions[format];
-    const defaultName = `${track.name.replace(/[^a-zA-Z0-9]/g, '_')}.${ext}`;
+    const lastFormat = settingsStore.settings.lastExportFormat || 'mp3';
+    const defaultName = `${track.name.replace(/[^a-zA-Z0-9]/g, '_')}.${lastFormat}`;
     const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+
+    // Build filters with last-used format first
+    const allFilters = [
+      { name: 'MP3 Audio', extensions: ['mp3'] },
+      { name: 'WAV Audio', extensions: ['wav'] },
+      { name: 'FLAC Audio', extensions: ['flac'] },
+      { name: 'OGG Audio', extensions: ['ogg'] },
+    ];
+    const lastIdx = allFilters.findIndex(f => f.extensions[0] === lastFormat);
+    if (lastIdx > 0) {
+      const [item] = allFilters.splice(lastIdx, 1);
+      allFilters.unshift(item);
+    }
 
     try {
       const outputPath = await save({
         defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
-        filters: [
-          { name: format.toUpperCase(), extensions: [ext] },
-        ],
+        filters: allFilters,
       });
 
       if (!outputPath) {
@@ -225,8 +237,13 @@ export const useExportStore = defineStore('export', () => {
         return null;
       }
 
-      console.log(`[Export] Track export save path: ${outputPath}`);
+      // Detect format from the file extension chosen in the native dialog
+      const detectedExt = outputPath.split('.').pop()?.toLowerCase() || 'mp3';
+      const format: ExportFormat = (['wav', 'mp3', 'flac', 'ogg'].includes(detectedExt) ? detectedExt : 'mp3') as ExportFormat;
+
+      console.log(`[Export] Track export save path: ${outputPath}, format: ${format}`);
       settingsStore.setLastExportFolder(outputPath);
+      settingsStore.setLastExportFormat(format);
       loading.value = true;
       error.value = null;
 
@@ -533,34 +550,46 @@ export const useExportStore = defineStore('export', () => {
    * Export all active tracks mixed together (toolbar export).
    * This mixes all non-muted tracks into a single file.
    */
-  async function exportMixedTracks(format: ExportFormat = 'wav'): Promise<string | null> {
+  async function exportMixedTracks(): Promise<string | null> {
     if (!canExport.value) {
       error.value = 'Nothing to export';
       return null;
     }
 
-    const extensions: Record<ExportFormat, string> = {
-      wav: 'wav',
-      mp3: 'mp3',
-      flac: 'flac',
-      ogg: 'ogg',
-    };
-
-    const ext = extensions[format];
-    const defaultName = `mixed_export.${ext}`;
+    const lastFormat = settingsStore.settings.lastExportFormat || 'mp3';
+    const defaultName = `mixed_export.${lastFormat}`;
     const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+
+    // Build filters with last-used format first
+    const allFilters = [
+      { name: 'MP3 Audio', extensions: ['mp3'] },
+      { name: 'WAV Audio', extensions: ['wav'] },
+      { name: 'FLAC Audio', extensions: ['flac'] },
+      { name: 'OGG Audio', extensions: ['ogg'] },
+    ];
+    // Move last-used format to top so it's the default selection
+    const lastIdx = allFilters.findIndex(f => f.extensions[0] === lastFormat);
+    if (lastIdx > 0) {
+      const [item] = allFilters.splice(lastIdx, 1);
+      allFilters.unshift(item);
+    }
 
     try {
       const outputPath = await save({
         defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
-        filters: [{ name: format.toUpperCase(), extensions: [ext] }],
+        filters: allFilters,
       });
 
       if (!outputPath) {
         return null;
       }
 
+      // Detect format from the file extension chosen in the native dialog
+      const ext = outputPath.split('.').pop()?.toLowerCase() || 'mp3';
+      const format: ExportFormat = (['wav', 'mp3', 'flac', 'ogg'].includes(ext) ? ext : 'mp3') as ExportFormat;
+
       settingsStore.setLastExportFolder(outputPath);
+      settingsStore.setLastExportFormat(format);
       loading.value = true;
       error.value = null;
       progress.value = 10;
@@ -581,31 +610,14 @@ export const useExportStore = defineStore('export', () => {
       const tempDirPath = await tempDir();
       const ensurePath = (fileName: string) => `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${fileName}`;
 
-      if (format === 'wav') {
-        // Encode to WAV and write directly
-        const wavData = encodeWav(mixedBuffer);
-        progress.value = 70;
+      // Encode to temp WAV, then convert via Rust backend
+      const wavData = encodeWav(mixedBuffer);
+      const tempFileName = `mixed_temp_${Date.now()}.wav`;
+      await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
+      const tempPath = ensurePath(tempFileName);
+      progress.value = 70;
 
-        // Write to temp file first, then use Rust to move/convert
-        const tempFileName = `mixed_temp_${Date.now()}.wav`;
-        await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-        const tempPath = ensurePath(tempFileName);
-
-        // Use Rust to copy to final location (handles permissions)
-        await invoke('export_audio_region', {
-          sourcePath: tempPath,
-          outputPath,
-          startTime: 0,
-          endTime: mixedBuffer.duration,
-        });
-      } else if (format === 'mp3') {
-        // For MP3, write temp WAV then convert
-        const wavData = encodeWav(mixedBuffer);
-        const tempFileName = `mixed_temp_${Date.now()}.wav`;
-        await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-        const tempPath = ensurePath(tempFileName);
-
-        progress.value = 70;
+      if (format === 'mp3') {
         await invoke('export_audio_mp3', {
           sourcePath: tempPath,
           outputPath,
@@ -614,12 +626,6 @@ export const useExportStore = defineStore('export', () => {
           bitrate: mp3Bitrate.value,
         });
       } else {
-        // For other formats, write temp WAV and use Rust to convert
-        const wavData = encodeWav(mixedBuffer);
-        const tempFileName = `mixed_temp_${Date.now()}.wav`;
-        await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-        const tempPath = ensurePath(tempFileName);
-
         await invoke('export_audio_region', {
           sourcePath: tempPath,
           outputPath,

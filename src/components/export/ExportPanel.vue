@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import { useExportStore, type Mp3Bitrate } from '@/stores/export';
 import { useSettingsStore } from '@/stores/settings';
-import type { ExportFormat } from '@/shared/types';
 
 const emit = defineEmits<{
   close: [];
@@ -12,19 +11,8 @@ const emit = defineEmits<{
 const exportStore = useExportStore();
 const settingsStore = useSettingsStore();
 
-// Initialize from persisted settings, defaulting to mp3 @ 192kbps
-const selectedFormat = ref<ExportFormat>(settingsStore.settings.lastExportFormat || 'mp3');
 const selectedBitrate = ref<Mp3Bitrate>(settingsStore.settings.defaultMp3Bitrate || 192);
 const lastExportedPath = ref<string | null>(null);
-
-const showBitrateOptions = computed(() => selectedFormat.value === 'mp3');
-
-const formats: { value: ExportFormat; label: string; description: string }[] = [
-  { value: 'wav', label: 'WAV', description: 'Uncompressed, highest quality' },
-  { value: 'flac', label: 'FLAC', description: 'Lossless compression' },
-  { value: 'mp3', label: 'MP3', description: 'Compressed, widely compatible' },
-  { value: 'ogg', label: 'OGG', description: 'Compressed, open format' },
-];
 
 const bitrates: { value: Mp3Bitrate; label: string }[] = [
   { value: 128, label: '128 kbps' },
@@ -36,18 +24,14 @@ const bitrates: { value: Mp3Bitrate; label: string }[] = [
 async function handleExport() {
   lastExportedPath.value = null;
 
-  // Persist format and bitrate preferences before exporting
-  settingsStore.setLastExportFormat(selectedFormat.value);
+  // Persist bitrate preference and sync to export store
   settingsStore.setDefaultMp3Bitrate(selectedBitrate.value);
-
-  // Sync bitrate to export store so the backend uses the right value
   exportStore.setMp3Bitrate(selectedBitrate.value);
 
-  // Export all active tracks mixed together
-  const path = await exportStore.exportMixedTracks(selectedFormat.value);
+  // Opens native save dialog with all format options
+  const path = await exportStore.exportMixedTracks();
   if (path) {
     lastExportedPath.value = path;
-    // Close panel after short delay to show success
     setTimeout(() => {
       emit('close');
     }, 1500);
@@ -76,30 +60,9 @@ async function handleExport() {
       </div>
     </div>
 
-    <!-- Format selection -->
+    <!-- MP3 quality (applies when user picks .mp3 in save dialog) -->
     <div class="mb-4">
-      <label class="block text-xs text-gray-400 mb-2">Format</label>
-      <div class="grid grid-cols-2 gap-2">
-        <button
-          v-for="format in formats"
-          :key="format.value"
-          :class="[
-            'px-3 py-2 text-left rounded border transition-colors',
-            selectedFormat === format.value
-              ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
-              : 'border-gray-600 bg-gray-700 text-gray-300 hover:border-gray-500'
-          ]"
-          @click="selectedFormat = format.value"
-        >
-          <div class="text-sm font-medium">{{ format.label }}</div>
-          <div class="text-[10px] text-gray-500">{{ format.description }}</div>
-        </button>
-      </div>
-    </div>
-
-    <!-- MP3 Bitrate selection -->
-    <div v-if="showBitrateOptions" class="mb-4">
-      <label class="block text-xs text-gray-400 mb-2">Bitrate</label>
+      <label class="block text-xs text-gray-400 mb-2">MP3 Quality</label>
       <div class="flex gap-2">
         <button
           v-for="bitrate in bitrates"
@@ -127,7 +90,7 @@ async function handleExport() {
       Exported to: {{ lastExportedPath }}
     </div>
 
-    <!-- Export button -->
+    <!-- Export button - opens native save dialog with format picker -->
     <Button
       variant="primary"
       class="w-full"
@@ -138,7 +101,9 @@ async function handleExport() {
       <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
       </svg>
-      Export
+      Save As...
     </Button>
+
+    <p class="text-[10px] text-gray-500 mt-2 text-center">Choose format (MP3, WAV, FLAC, OGG) in the save dialog</p>
   </div>
 </template>

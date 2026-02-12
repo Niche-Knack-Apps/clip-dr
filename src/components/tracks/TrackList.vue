@@ -161,13 +161,12 @@ async function handleExport(trackId: string) {
 
   try {
     exporting.value = true;
-    // Use the last-used export format from settings (defaults to 'mp3' if not set)
-    const format = settingsStore.settings.lastExportFormat || 'mp3';
     // Sync MP3 bitrate from settings to export store
     exportStore.setMp3Bitrate(settingsStore.settings.defaultMp3Bitrate || 192);
-    const result = await exportStore.exportTrack(track, format);
+    // Native save dialog handles format selection
+    const result = await exportStore.exportTrack(track);
     if (result) {
-      console.log('[TrackList] Exported track:', track.name, 'as', format, 'to:', result);
+      console.log('[TrackList] Exported track:', track.name, 'to:', result);
     }
   } catch (e) {
     console.error('[TrackList] Export failed:', e);
