@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appLocalDataDir } from '@tauri-apps/api/path';
-import type { Settings, ASRModel, RecordingSource, Mp3Bitrate } from '@/shared/types';
+import type { Settings, ASRModel, RecordingSource, Mp3Bitrate, ExportFormat } from '@/shared/types';
 import { DEFAULT_SETTINGS } from '@/shared/constants';
 
 const STORAGE_KEY = 'clip-doctor-settings';
@@ -109,6 +109,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setLastExportFormat(format: ExportFormat): void {
+    settings.value.lastExportFormat = format;
+    saveSettings();
+  }
+
   function resetSettings(): void {
     settings.value = { ...DEFAULT_SETTINGS };
     saveSettings();
@@ -206,6 +211,7 @@ export const useSettingsStore = defineStore('settings', () => {
     resetModelsPath,
     setLastImportFolder,
     setLastExportFolder,
+    setLastExportFormat,
     resetSettings,
     // New settings
     setHoldToPlay,
