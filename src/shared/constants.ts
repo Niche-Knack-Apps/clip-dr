@@ -35,6 +35,7 @@ export const DEFAULT_SETTINGS = {
   clipboardUsesInOutPoints: true,  // true = I/O markers, false = selected track bounds
   // Recording defaults
   defaultRecordingSource: 'microphone' as const,
+  lastRecordingSource: 'system' as const,
   // Export defaults
   defaultMp3Bitrate: 192 as const,
 };

@@ -135,6 +135,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setLastRecordingSource(source: RecordingSource): void {
+    settings.value.lastRecordingSource = source;
+    saveSettings();
+  }
+
   function setDefaultMp3Bitrate(bitrate: Mp3Bitrate): void {
     settings.value.defaultMp3Bitrate = bitrate;
     saveSettings();
@@ -207,6 +212,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setReverseWithAudio,
     setClipboardUsesInOutPoints,
     setDefaultRecordingSource,
+    setLastRecordingSource,
     setDefaultMp3Bitrate,
     // Project folder
     setProjectFolder,

@@ -176,6 +176,7 @@ export interface Settings {
   clipboardUsesInOutPoints: boolean;
   // Recording defaults
   defaultRecordingSource: RecordingSource;
+  lastRecordingSource: RecordingSource;
   // Export defaults
   defaultMp3Bitrate: Mp3Bitrate;
 }

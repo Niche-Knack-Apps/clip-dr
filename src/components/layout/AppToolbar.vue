@@ -77,6 +77,32 @@ const showRecordingPanel = ref(false);
 const transportRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
 
+// Double-click detection for Record button
+let lastRecordClickTime = 0;
+const DOUBLE_CLICK_THRESHOLD = 400; // ms
+
+function handleRecordClick() {
+  // If already recording, toggle the panel visibility (to access stop/lock/marks)
+  if (recordingStore.isRecording) {
+    showRecordingPanel.value = !showRecordingPanel.value;
+    return;
+  }
+
+  const now = Date.now();
+  const timeSinceLastClick = now - lastRecordClickTime;
+  lastRecordClickTime = now;
+
+  if (timeSinceLastClick < DOUBLE_CLICK_THRESHOLD && !showRecordingPanel.value) {
+    // Double-click: quick-start with last-used source
+    // Panel may not be open yet, but we don't need it for quick-start
+    showRecordingPanel.value = true;
+    recordingStore.quickStartLastUsed();
+  } else {
+    // Single click: toggle panel open/closed
+    showRecordingPanel.value = !showRecordingPanel.value;
+  }
+}
+
 // Compute recording panel max-width when it opens so it doesn't overflow viewport
 watch(showRecordingPanel, (show) => {
   if (show) {
@@ -196,8 +222,8 @@ defineExpose({ focusSearch });
           size="sm"
           icon
           :class="{ 'text-red-500': recordingStore.isRecording }"
-          title="Record"
-          @click="showRecordingPanel = !showRecordingPanel"
+          title="Record (double-click to quick-start)"
+          @click="handleRecordClick"
         >
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="6" :class="recordingStore.isRecording ? 'animate-pulse' : ''" />
