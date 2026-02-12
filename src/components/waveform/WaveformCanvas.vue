@@ -80,15 +80,29 @@ onMounted(() => {
   }
 });
 
+// rAF-throttled render to coalesce rapid startTime/endTime changes during playback
+let renderRafId: number | null = null;
+
+function scheduleRender() {
+  if (renderRafId !== null) return;
+  renderRafId = requestAnimationFrame(() => {
+    renderRafId = null;
+    render();
+  });
+}
+
 onUnmounted(() => {
   resizeObserver?.disconnect();
   if (resizeRafId !== null) {
     cancelAnimationFrame(resizeRafId);
   }
+  if (renderRafId !== null) {
+    cancelAnimationFrame(renderRafId);
+  }
 });
 
 // Watch for props changes and waveform data changes (when tracks are modified)
-watch([() => props.startTime, () => props.endTime, () => props.color, waveformVersion, duration], render, { immediate: true });
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformVersion, duration], scheduleRender, { immediate: true });
 </script>
 
 <template>
