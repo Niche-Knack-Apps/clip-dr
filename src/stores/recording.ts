@@ -207,6 +207,48 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  async function quickStart(quickSource: 'microphone' | 'system'): Promise<void> {
+    if (isRecording.value || isPreparing.value) return;
+
+    error.value = null;
+
+    // Set the source and configure device
+    await setSource(quickSource);
+
+    // For system audio, check if probe succeeded
+    if (quickSource === 'system' && systemAudioInfo.value && !systemAudioInfo.value.available) {
+      // error is already set by setSource -> probeSystemAudio
+      return;
+    }
+
+    // For microphone, ensure we have a device selected
+    if (quickSource === 'microphone' && !selectedDeviceId.value) {
+      const mic = microphoneDevices.value.find(d => d.is_default) || microphoneDevices.value[0];
+      if (mic) {
+        selectedDeviceId.value = mic.id;
+      } else {
+        error.value = 'No microphone device found';
+        return;
+      }
+    }
+
+    // Save the choice to settings
+    settingsStore.setLastRecordingSource(quickSource);
+
+    // Stop monitoring if active (startRecording also does this, but be explicit)
+    if (isMonitoring.value) {
+      await stopMonitoring();
+    }
+
+    // Immediately start recording
+    await startRecording();
+  }
+
+  async function quickStartLastUsed(): Promise<void> {
+    const lastSource = settingsStore.settings.lastRecordingSource;
+    await quickStart(lastSource);
+  }
+
   async function startRecording(): Promise<void> {
     if (isRecording.value) return;
 
@@ -553,6 +595,8 @@ export const useRecordingStore = defineStore('recording', () => {
     removeTimemark,
     clearTimemarks,
     setTriggerPhrases,
+    quickStart,
+    quickStartLastUsed,
     startRecording,
     stopRecording,
     cancelRecording,

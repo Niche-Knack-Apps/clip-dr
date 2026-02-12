@@ -3,8 +3,10 @@ import { ref, watch, onUnmounted } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import LevelMeter from './LevelMeter.vue';
 import LiveWaveform from '@/components/waveform/LiveWaveform.vue';
-import { useRecordingStore, type RecordingSource } from '@/stores/recording';
+import { useRecordingStore } from '@/stores/recording';
+import { useSettingsStore } from '@/stores/settings';
 import { formatTime } from '@/shared/utils';
+import type { RecordingSource } from '@/shared/types';
 
 const HOLD_TO_STOP_DURATION = 1500; // ms
 
@@ -13,6 +15,7 @@ const emit = defineEmits<{
 }>();
 
 const recordingStore = useRecordingStore();
+const settingsStore = useSettingsStore();
 
 // Timemark UI state
 const triggerPhrasesInput = ref('');
@@ -40,32 +43,20 @@ let holdTimer: number | null = null;
 let holdStartTime = 0;
 let holdAnimFrame = 0;
 
-const sources: { value: RecordingSource; label: string; icon: string }[] = [
-  { value: 'microphone', label: 'Microphone', icon: 'M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z' },
-  { value: 'system', label: 'System Audio', icon: 'M9.348 14.651a3.75 3.75 0 010-5.303m5.304 0a3.75 3.75 0 010 5.303m-7.425 2.122a6.75 6.75 0 010-9.546m9.546 0a6.75 6.75 0 010 9.546M5.106 18.894c-3.808-3.808-3.808-9.98 0-13.789m13.788 0c3.808 3.808 3.808 9.981 0 13.79M12 12h.008v.007H12V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z' },
-];
+// Source selection handler - click a source card to immediately start recording
+async function handleSourceSelect(src: RecordingSource) {
+  await recordingStore.quickStart(src);
+}
 
-// Auto-start monitoring when device or source changes
+// Auto-start monitoring when panel opens (use last source)
 watch(
-  () => ({ deviceId: recordingStore.selectedDeviceId, source: recordingStore.source }),
-  async (newVal, _oldVal) => {
-    if (recordingStore.isRecording) return;
-
-    // Stop previous monitoring if running
-    if (recordingStore.isMonitoring) {
-      await recordingStore.stopMonitoring();
+  () => recordingStore.isRecording,
+  async (recording) => {
+    if (!recording && !recordingStore.isMonitoring) {
+      // When we stop recording, don't auto-restart monitoring
+      // (user will pick a source again)
     }
-
-    // Start monitoring for the new source/device
-    const isSystemPwRecord = newVal.source === 'system' &&
-      recordingStore.systemAudioInfo?.available &&
-      !recordingStore.systemAudioInfo?.cpal_monitor_device;
-
-    if (newVal.deviceId || isSystemPwRecord) {
-      await recordingStore.startMonitoring();
-    }
-  },
-  { immediate: true }
+  }
 );
 
 // Stop monitoring when panel closes
@@ -119,163 +110,111 @@ function cancelHold() {
   holdProgress.value = 0;
 }
 
-async function handleRecord() {
-  if (recordingStore.isRecording) {
-    if (recordingStore.isLocked) {
-      // Hold-to-stop is handled by startHold/cancelHold
-      return;
-    }
-    await recordingStore.stopRecording();
-    emit('close');
-  } else {
-    // Stop monitoring before recording
-    if (recordingStore.isMonitoring) {
-      await recordingStore.stopMonitoring();
-    }
-    await recordingStore.startRecording();
+async function handleStop() {
+  if (recordingStore.isLocked) {
+    // Hold-to-stop is handled by startHold/cancelHold
+    return;
   }
+  await recordingStore.stopRecording();
+  emit('close');
 }
 
 async function handleCancel() {
   if (recordingStore.isLocked) return;
   await recordingStore.cancelRecording();
-  // Restart monitoring after cancel
-  await recordingStore.startMonitoring();
-}
-
-async function handleDeviceChange(deviceId: string) {
-  if (recordingStore.isMonitoring) {
-    await recordingStore.stopMonitoring();
-  }
-  recordingStore.selectDevice(deviceId);
-  await recordingStore.startMonitoring();
 }
 
 </script>
 
 <template>
   <div class="p-4 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[320px] max-h-[calc(100vh-6rem)] overflow-y-auto">
-    <h3 class="text-sm font-medium text-gray-200 mb-4">Record Audio</h3>
 
-    <!-- Trigger phrases config (before recording starts) -->
-    <div v-if="!recordingStore.isRecording" class="mb-4">
-      <button
-        class="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-300 transition-colors"
-        @click="showTriggerPhrases = !showTriggerPhrases"
-      >
-        <svg
-          class="w-3 h-3 transition-transform"
-          :class="showTriggerPhrases ? 'rotate-90' : ''"
-          fill="currentColor" viewBox="0 0 20 20"
-        >
-          <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
-        </svg>
-        Auto-mark trigger phrases
-      </button>
-      <div v-if="showTriggerPhrases" class="mt-2">
-        <input
-          v-model="triggerPhrasesInput"
-          type="text"
-          placeholder="e.g. chapter, section, note"
-          class="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-cyan-500"
-          @input="handleTriggerPhrasesChange"
-        />
-        <p class="mt-1 text-[10px] text-gray-500">
-          Comma-separated words/phrases. Auto-marks added after transcription completes.
-        </p>
-      </div>
-    </div>
+    <!-- ========== STATE 1: Source Selection (not recording) ========== -->
+    <template v-if="!recordingStore.isRecording && !recordingStore.isPreparing">
+      <h3 class="text-sm font-medium text-gray-200 mb-3">Record Audio</h3>
 
-    <!-- Source selection -->
-    <div v-if="!recordingStore.isRecording" class="mb-4">
-      <label class="block text-xs text-gray-400 mb-2">Source</label>
-      <div class="flex gap-2">
+      <!-- Two large source cards -->
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <!-- Microphone card -->
         <button
-          v-for="src in sources"
-          :key="src.value"
-          :disabled="recordingStore.systemAudioProbing"
+          class="group flex flex-col items-center gap-2 px-4 py-5 rounded-lg border-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
           :class="[
-            'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded border transition-colors',
-            recordingStore.source === src.value
-              ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
-              : 'border-gray-600 bg-gray-700 text-gray-300 hover:border-gray-500',
-            recordingStore.systemAudioProbing ? 'opacity-50 cursor-wait' : ''
+            settingsStore.settings.lastRecordingSource === 'microphone'
+              ? 'border-cyan-500/50 bg-cyan-500/5'
+              : 'border-gray-600 bg-gray-700/50',
+            'hover:border-cyan-400 hover:bg-cyan-500/10'
           ]"
-          @click="recordingStore.setSource(src.value)"
+          @click="handleSourceSelect('microphone')"
         >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="src.icon" />
+          <!-- Microphone SVG icon -->
+          <svg class="w-10 h-10 text-gray-300 group-hover:text-cyan-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
           </svg>
-          <span class="text-xs">{{ src.label }}</span>
+          <span class="text-xs font-medium text-gray-200 group-hover:text-cyan-300 transition-colors">Microphone</span>
+          <!-- Last-used indicator -->
+          <span
+            v-if="settingsStore.settings.lastRecordingSource === 'microphone'"
+            class="text-[9px] text-cyan-500/70"
+          >last used</span>
         </button>
-      </div>
-      <!-- System audio method indicator -->
-      <div v-if="recordingStore.source === 'system' && recordingStore.systemAudioInfo" class="mt-2 text-[10px]">
-        <span v-if="recordingStore.systemAudioProbing" class="text-gray-500">
-          Probing system audio...
-        </span>
-        <span v-else-if="recordingStore.systemAudioInfo.available" class="text-green-500">
-          System audio: {{ recordingStore.systemAudioInfo.method }}
-        </span>
-        <span v-else class="text-red-400">
-          {{ recordingStore.systemAudioInfo.test_result || 'System audio not available' }}
-        </span>
-      </div>
-    </div>
 
-    <!-- Device selection (show for microphone or CPAL-based system audio) -->
-    <div v-if="!recordingStore.isRecording && (recordingStore.source === 'microphone' || recordingStore.systemAudioInfo?.cpal_monitor_device)" class="mb-4">
-      <label class="block text-xs text-gray-400 mb-2">Device</label>
-      <select
-        :value="recordingStore.selectedDeviceId"
-        class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-200 focus:outline-none focus:border-cyan-500"
-        @change="handleDeviceChange(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="device in recordingStore.devices" :key="device.id" :value="device.id">
-          {{ device.name }}{{ device.is_default ? ' (Default)' : '' }}{{ device.is_loopback ? ' (System)' : '' }}
-        </option>
-      </select>
-      <div class="flex justify-between items-center mt-2">
+        <!-- System Sound card -->
         <button
-          class="text-xs text-gray-500 hover:text-gray-300"
-          @click="recordingStore.refreshDevices()"
+          class="group flex flex-col items-center gap-2 px-4 py-5 rounded-lg border-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+          :class="[
+            settingsStore.settings.lastRecordingSource === 'system'
+              ? 'border-cyan-500/50 bg-cyan-500/5'
+              : 'border-gray-600 bg-gray-700/50',
+            'hover:border-cyan-400 hover:bg-cyan-500/10'
+          ]"
+          @click="handleSourceSelect('system')"
         >
-          Refresh
-        </button>
-        <span v-if="recordingStore.isMonitoring" class="text-xs text-green-500">
-          Monitoring active
-        </span>
-      </div>
-    </div>
-
-    <!-- System audio via PipeWire (no device selection needed) -->
-    <div v-if="!recordingStore.isRecording && recordingStore.source === 'system' && !recordingStore.systemAudioInfo?.cpal_monitor_device && recordingStore.systemAudioInfo?.available" class="mb-4">
-      <label class="block text-xs text-gray-400 mb-2">Audio Source</label>
-      <div class="px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-300">
-        <div class="flex items-center gap-2">
-          <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          <!-- Speaker/monitor SVG icon -->
+          <svg class="w-10 h-10 text-gray-300 group-hover:text-cyan-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
           </svg>
-          <span>Default Audio Output (PipeWire)</span>
-        </div>
+          <span class="text-xs font-medium text-gray-200 group-hover:text-cyan-300 transition-colors">System Sound</span>
+          <!-- Last-used indicator -->
+          <span
+            v-if="settingsStore.settings.lastRecordingSource === 'system'"
+            class="text-[9px] text-cyan-500/70"
+          >last used</span>
+        </button>
       </div>
-      <p class="mt-1 text-[10px] text-gray-500">
-        Captures all system audio playing through your speakers/headphones.
+
+      <!-- Hint text -->
+      <p class="text-[10px] text-gray-500 text-center mb-1">
+        Click a source to start recording immediately
       </p>
-    </div>
+      <p class="text-[10px] text-gray-500 text-center">
+        Double-click record button to use
+        <span class="text-gray-400">{{ settingsStore.settings.lastRecordingSource === 'microphone' ? 'Microphone' : 'System Sound' }}</span>
+      </p>
 
-    <!-- Pre-recording level meter (show when NOT recording but monitoring) -->
-    <div v-if="!recordingStore.isRecording && recordingStore.isMonitoring" class="mb-4">
-      <label class="block text-xs text-gray-400 mb-2">Input Level</label>
-      <LevelMeter :level="recordingStore.currentLevel" />
-    </div>
+      <!-- Error display -->
+      <div v-if="recordingStore.error" class="mt-3 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">
+        {{ recordingStore.error }}
+      </div>
+    </template>
 
-    <!-- Recording status -->
-    <div v-if="recordingStore.isRecording" class="mb-4">
+    <!-- ========== Preparing state (brief, while probe/init happens) ========== -->
+    <template v-else-if="recordingStore.isPreparing && !recordingStore.isRecording">
+      <div class="flex flex-col items-center gap-3 py-6">
+        <div class="w-6 h-6 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+        <span class="text-xs text-gray-400">Preparing to record...</span>
+      </div>
+    </template>
+
+    <!-- ========== STATE 2: Recording Active ========== -->
+    <template v-else-if="recordingStore.isRecording">
+      <!-- Recording header with time and lock -->
       <div class="flex items-center gap-3 mb-3">
         <div class="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
         <span class="text-sm text-gray-200 font-mono">
           {{ formatTime(recordingStore.recordingDuration) }}
+        </span>
+        <span class="text-[10px] text-gray-500">
+          {{ recordingStore.source === 'microphone' ? 'Mic' : 'System' }}
         </span>
 
         <!-- Lock toggle button -->
@@ -356,74 +295,101 @@ async function handleDeviceChange(deviceId: string) {
       </div>
 
       <!-- Level meter -->
-      <LevelMeter :level="recordingStore.currentLevel" />
-    </div>
+      <div class="mb-3">
+        <LevelMeter :level="recordingStore.currentLevel" />
+      </div>
 
-    <!-- Error display -->
-    <div v-if="recordingStore.error" class="mb-4 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">
-      {{ recordingStore.error }}
-    </div>
+      <!-- Collapsible trigger phrases (available during recording) -->
+      <div class="mb-3">
+        <button
+          class="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-300 transition-colors"
+          @click="showTriggerPhrases = !showTriggerPhrases"
+        >
+          <svg
+            class="w-3 h-3 transition-transform"
+            :class="showTriggerPhrases ? 'rotate-90' : ''"
+            fill="currentColor" viewBox="0 0 20 20"
+          >
+            <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
+          </svg>
+          Trigger Phrases
+        </button>
+        <div v-if="showTriggerPhrases" class="mt-2">
+          <input
+            v-model="triggerPhrasesInput"
+            type="text"
+            placeholder="e.g. chapter, section, note"
+            class="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-cyan-500"
+            @input="handleTriggerPhrasesChange"
+          />
+          <p class="mt-1 text-[10px] text-gray-500">
+            Comma-separated words/phrases. Auto-marks added after transcription completes.
+          </p>
+        </div>
+      </div>
 
-    <!-- Action buttons -->
-    <div class="flex gap-2">
-      <!-- Cancel button -->
-      <Button
-        v-if="recordingStore.isRecording"
-        variant="secondary"
-        size="sm"
-        class="flex-1 relative"
-        :disabled="recordingStore.isLocked"
-        @click="handleCancel"
-      >
-        <!-- Lock overlay on cancel when locked -->
-        <svg v-if="recordingStore.isLocked" class="w-3 h-3 mr-1 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-        </svg>
-        Cancel
-      </Button>
+      <!-- Error display -->
+      <div v-if="recordingStore.error" class="mb-3 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">
+        {{ recordingStore.error }}
+      </div>
 
-      <!-- Stop/Record button -->
-      <Button
-        v-if="!recordingStore.isRecording || !recordingStore.isLocked"
-        variant="primary"
-        size="sm"
-        class="flex-1"
-        :loading="recordingStore.isPreparing"
-        @click="handleRecord"
-      >
-        <svg v-if="!recordingStore.isRecording" class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 24 24">
-          <circle cx="12" cy="12" r="6" />
-        </svg>
-        <svg v-else class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 24 24">
-          <rect x="6" y="6" width="12" height="12" rx="2" />
-        </svg>
-        {{ recordingStore.isRecording ? 'Stop' : 'Record' }}
-      </Button>
+      <!-- Action buttons -->
+      <div class="flex gap-2">
+        <!-- Cancel button -->
+        <Button
+          variant="secondary"
+          size="sm"
+          class="flex-1 relative"
+          :disabled="recordingStore.isLocked"
+          @click="handleCancel"
+        >
+          <!-- Lock overlay on cancel when locked -->
+          <svg v-if="recordingStore.isLocked" class="w-3 h-3 mr-1 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+          Cancel
+        </Button>
 
-      <!-- Hold-to-stop button (replaces Stop when locked) -->
-      <button
-        v-if="recordingStore.isRecording && recordingStore.isLocked"
-        class="flex-1 relative inline-flex items-center justify-center font-medium text-xs px-2 py-1 rounded overflow-hidden transition-colors bg-gray-700 text-gray-100 hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-gray-500 select-none"
-        @mousedown="startHold"
-        @mouseup="cancelHold"
-        @mouseleave="cancelHold"
-        @touchstart.prevent="startHold"
-        @touchend.prevent="cancelHold"
-        @touchcancel.prevent="cancelHold"
-      >
-        <!-- Hold progress fill -->
-        <div
-          class="absolute inset-0 bg-amber-500/30 transition-none"
-          :style="{ width: `${holdProgress * 100}%` }"
-        />
-        <span class="relative flex items-center">
+        <!-- Stop button (normal) -->
+        <Button
+          v-if="!recordingStore.isLocked"
+          variant="primary"
+          size="sm"
+          class="flex-1"
+          @click="handleStop"
+        >
           <svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 24 24">
             <rect x="6" y="6" width="12" height="12" rx="2" />
           </svg>
-          {{ holdProgress > 0 ? 'Hold...' : 'Hold to Stop' }}
-        </span>
-      </button>
-    </div>
+          Stop
+        </Button>
+
+        <!-- Hold-to-stop button (replaces Stop when locked) -->
+        <button
+          v-if="recordingStore.isLocked"
+          class="flex-1 relative inline-flex items-center justify-center font-medium text-xs px-2 py-1 rounded overflow-hidden transition-colors bg-gray-700 text-gray-100 hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-gray-500 select-none"
+          @mousedown="startHold"
+          @mouseup="cancelHold"
+          @mouseleave="cancelHold"
+          @touchstart.prevent="startHold"
+          @touchend.prevent="cancelHold"
+          @touchcancel.prevent="cancelHold"
+        >
+          <!-- Hold progress fill -->
+          <div
+            class="absolute inset-0 bg-amber-500/30 transition-none"
+            :style="{ width: `${holdProgress * 100}%` }"
+          />
+          <span class="relative flex items-center">
+            <svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 24 24">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+            {{ holdProgress > 0 ? 'Hold...' : 'Hold to Stop' }}
+          </span>
+        </button>
+      </div>
+    </template>
+
   </div>
 </template>
 
