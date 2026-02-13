@@ -122,7 +122,7 @@ const selectionOverlayWidth = computed(() => {
   return ((selectionStore.selection.end - selectionStore.selection.start) / duration) * timelineAreaWidth;
 });
 
-// Auto zoom all the way out when tracks are added via import or record
+// Auto zoom to fit when tracks are added via import or record
 // Only triggers for tracks with sourcePath (import/record), not clip creation or paste
 watch(
   () => tracksStore.tracks.length,
@@ -132,7 +132,12 @@ watch(
       const newest = tracksStore.tracks[tracksStore.tracks.length - 1];
       if (newest?.sourcePath) {
         await nextTick();
-        uiStore.setTrackZoom(uiStore.TRACK_ZOOM_MIN);
+        const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+        if (containerW > 0) {
+          uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
+        } else {
+          uiStore.setTrackZoom(uiStore.TRACK_ZOOM_MIN);
+        }
       }
     }
   }
