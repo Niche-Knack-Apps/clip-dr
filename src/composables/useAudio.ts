@@ -26,9 +26,8 @@ export function useAudio() {
 
   async function loadFile(path: string): Promise<void> {
     // Use the new importFile method which creates a track
+    // importFile sets the selection to full timeline internally
     await audioStore.importFile(path);
-    selectionStore.resetSelection();
-    // Transcription is now triggered per-track by EditorView's selectedTrackId watcher
   }
 
   function unloadFile(): void {
