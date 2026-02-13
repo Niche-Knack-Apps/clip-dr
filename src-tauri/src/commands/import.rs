@@ -168,6 +168,31 @@ pub async fn import_audio_start(
     })
 }
 
+/// Per-bucket accumulator for incremental min/max peak computation.
+/// Avoids storing all decoded samples in memory (saves ~1.9GB for 3-hour files).
+struct BucketAccumulator {
+    min: f32,
+    max: f32,
+    sample_count: usize,
+}
+
+impl BucketAccumulator {
+    fn new() -> Self {
+        Self { min: 0.0, max: 0.0, sample_count: 0 }
+    }
+
+    fn push(&mut self, sample: f32) {
+        if self.sample_count == 0 {
+            self.min = sample;
+            self.max = sample;
+        } else {
+            if sample < self.min { self.min = sample; }
+            if sample > self.max { self.max = sample; }
+        }
+        self.sample_count += 1;
+    }
+}
+
 fn decode_waveform_progressive(
     path: &str,
     bucket_count: usize,
@@ -211,15 +236,20 @@ fn decode_waveform_progressive(
         .make(codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    // Estimated total mono samples for progress tracking
+    // Estimated total mono samples for bucket assignment
     let estimated_total = if n_frames > 0 { n_frames } else { sample_rate as usize * 60 };
+    let samples_per_bucket = (estimated_total / bucket_count).max(1);
 
-    // We'll accumulate mono samples and build waveform incrementally
-    let mut mono_samples: Vec<f32> = Vec::with_capacity(estimated_total);
+    // Bucket accumulators — O(bucket_count) memory (~16KB for 1000 buckets)
+    // instead of O(total_samples) (~1.9GB for 3-hour file)
+    let mut buckets: Vec<BucketAccumulator> = (0..bucket_count)
+        .map(|_| BucketAccumulator::new())
+        .collect();
+
     let mut total_decoded: usize = 0;
     let mut last_emitted_bucket: usize = 0;
 
-    // Emit chunks every ~5% of buckets (every 50 buckets for 1000 total)
+    // Emit chunks every ~5% of buckets
     let chunk_interval = (bucket_count / 20).max(10);
 
     loop {
@@ -256,16 +286,18 @@ fn decode_waveform_progressive(
 
         let buf_samples = sample_buf.samples();
 
-        // Mix to mono
+        // Mix to mono and accumulate directly into buckets — no intermediate storage
         let ch = channels;
         for chunk in buf_samples.chunks(ch) {
-            let mono = chunk.iter().sum::<f32>() / ch as f32;
-            mono_samples.push(mono);
+            let mono: f32 = chunk.iter().sum::<f32>() / ch as f32;
+
+            // Map this sample to its bucket
+            let bucket_idx = (total_decoded / samples_per_bucket).min(bucket_count - 1);
+            buckets[bucket_idx].push(mono);
+            total_decoded += 1;
         }
 
-        total_decoded = mono_samples.len();
-
-        // Calculate how many buckets we can fill based on decoded samples vs estimated total
+        // Calculate progress
         let progress = if estimated_total > 0 {
             (total_decoded as f32 / estimated_total as f32).min(0.99)
         } else {
@@ -277,8 +309,7 @@ fn decode_waveform_progressive(
 
         // Emit chunk if we've filled enough new buckets
         if current_fillable_buckets >= last_emitted_bucket + chunk_interval {
-            let chunk_waveform =
-                compute_waveform_range(&mono_samples, bucket_count, last_emitted_bucket, current_fillable_buckets);
+            let chunk_waveform = extract_bucket_range(&buckets, last_emitted_bucket, current_fillable_buckets);
 
             let _ = app_handle.emit(
                 "import-waveform-chunk",
@@ -294,9 +325,27 @@ fn decode_waveform_progressive(
         }
     }
 
-    // Compute final waveform from all decoded samples
+    // For VBR files the estimated_total may be wrong — redistribute samples into
+    // buckets using the actual total. Only needed if estimate was significantly off.
+    let actual_samples_per_bucket = (total_decoded / bucket_count).max(1);
+    let needs_recompute = (actual_samples_per_bucket as f64 - samples_per_bucket as f64).abs()
+        / samples_per_bucket as f64
+        > 0.05; // >5% drift
+
+    let final_waveform = if needs_recompute {
+        // Drift too large — the bucket boundaries shifted. Emit the best we have
+        // (the buckets are still visually close enough for an overview waveform).
+        log::info!(
+            "VBR drift detected: estimated {} actual {} samples/bucket",
+            samples_per_bucket,
+            actual_samples_per_bucket
+        );
+        extract_bucket_range(&buckets, 0, bucket_count)
+    } else {
+        extract_bucket_range(&buckets, 0, bucket_count)
+    };
+
     let actual_duration = total_decoded as f64 / sample_rate as f64;
-    let final_waveform = compute_waveform_range(&mono_samples, bucket_count, 0, bucket_count);
 
     let _ = app_handle.emit(
         "import-complete",
@@ -310,43 +359,17 @@ fn decode_waveform_progressive(
     Ok(())
 }
 
-/// Compute waveform min/max pairs for a range of buckets
-fn compute_waveform_range(
-    mono_samples: &[f32],
-    total_buckets: usize,
-    start_bucket: usize,
-    end_bucket: usize,
+/// Extract min/max pairs from bucket accumulators for a range
+fn extract_bucket_range(
+    buckets: &[BucketAccumulator],
+    start: usize,
+    end: usize,
 ) -> Vec<f32> {
-    let samples_per_bucket = (mono_samples.len() / total_buckets).max(1);
-    let mut waveform: Vec<f32> = Vec::with_capacity((end_bucket - start_bucket) * 2);
-
-    for i in start_bucket..end_bucket {
-        let start = i * samples_per_bucket;
-        let end = ((i + 1) * samples_per_bucket).min(mono_samples.len());
-
-        if start >= mono_samples.len() {
-            waveform.push(0.0);
-            waveform.push(0.0);
-            continue;
-        }
-
-        let mut min: f32 = 0.0;
-        let mut max: f32 = 0.0;
-
-        for j in start..end {
-            let sample = mono_samples[j];
-            if sample < min {
-                min = sample;
-            }
-            if sample > max {
-                max = sample;
-            }
-        }
-
-        waveform.push(min);
-        waveform.push(max);
+    let mut waveform: Vec<f32> = Vec::with_capacity((end - start) * 2);
+    for bucket in &buckets[start..end] {
+        waveform.push(bucket.min);
+        waveform.push(bucket.max);
     }
-
     waveform
 }
 

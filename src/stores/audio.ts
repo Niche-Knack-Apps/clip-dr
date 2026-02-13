@@ -88,8 +88,8 @@ export const useAudioStore = defineStore('audio', () => {
         tracksStore.updateImportWaveform(trackId, event.payload);
       });
 
-      // Waveform completion listener — runs independently, does NOT block playback
-      listen<ImportCompleteEvent>('import-complete', (event) => {
+      // Register both completion and error listeners simultaneously (no race condition)
+      const unlistenComplete = await listen<ImportCompleteEvent>('import-complete', (event) => {
         if (event.payload.sessionId !== sessionId) return;
         const track = tracksStore.tracks.find(t => t.id === trackId);
         if (track) {
@@ -97,14 +97,16 @@ export const useAudioStore = defineStore('audio', () => {
           console.log(`[Audio] Waveform complete in ${((performance.now() - startTime) / 1000).toFixed(1)}s`);
         }
         unlistenChunk();
-      }).then(unlisten => {
-        // Also listen for errors to clean up
-        listen<{ sessionId: string; error: string }>('import-error', (event) => {
-          if (event.payload.sessionId !== sessionId) return;
-          console.error('[Audio] Waveform decode error:', event.payload.error);
-          unlisten();
-          unlistenChunk();
-        });
+        unlistenComplete();
+        unlistenError();
+      });
+
+      const unlistenError = await listen<{ sessionId: string; error: string }>('import-error', (event) => {
+        if (event.payload.sessionId !== sessionId) return;
+        console.error('[Audio] Waveform decode error:', event.payload.error);
+        unlistenChunk();
+        unlistenComplete();
+        unlistenError();
       });
 
       // Phase 3: Browser decodes audio via asset protocol (concurrent with Phase 2)
