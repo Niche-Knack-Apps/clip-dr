@@ -49,6 +49,9 @@ const draggingClipId = ref<string | null>(null);
 let clipDragRafId: number | null = null;
 let pendingClipDragEvent: MouseEvent | null = null;
 
+// rAF-based throttle for import waveform redraws
+let waveformRafId: number | null = null;
+
 // Minimum pixels to move before drag starts (to allow click-to-select)
 const DRAG_THRESHOLD = 5;
 
@@ -269,11 +272,20 @@ function drawImportWaveform() {
   }
 }
 
+// Debounce waveform redraws — multiple chunk arrivals in one frame only trigger one draw
+function scheduleWaveformRedraw() {
+  if (waveformRafId !== null) return; // already scheduled
+  waveformRafId = requestAnimationFrame(() => {
+    waveformRafId = null;
+    drawImportWaveform();
+  });
+}
+
 watch(
   () => [props.track.audioData.waveformData, containerWidth.value, isImporting.value],
   () => {
     if (isImporting.value) {
-      nextTick(drawImportWaveform);
+      scheduleWaveformRedraw();
     }
   },
   { deep: false }
@@ -295,6 +307,9 @@ onUnmounted(() => {
   }
   if (clipDragRafId !== null) {
     cancelAnimationFrame(clipDragRafId);
+  }
+  if (waveformRafId !== null) {
+    cancelAnimationFrame(waveformRafId);
   }
 });
 </script>
