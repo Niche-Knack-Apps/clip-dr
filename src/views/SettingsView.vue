@@ -9,7 +9,7 @@ import AboutPanel from '@/components/settings/AboutPanel.vue';
 import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
-import type { ExportFormat, ExportProfile, Mp3Bitrate } from '@/shared/types';
+import type { ExportFormat, ExportProfile } from '@/shared/types';
 
 const APP_VERSION = '0.7.1';
 
@@ -36,7 +36,7 @@ const defaultModelsPath = computed(() => {
 const showNewProfileForm = ref(false);
 const newProfileName = ref('');
 const newProfileFormat = ref<ExportFormat>('mp3');
-const newProfileBitrate = ref<Mp3Bitrate>(192);
+const newProfileBitrate = ref(192);
 
 function handleAddProfile() {
   if (!newProfileName.value.trim()) return;
@@ -335,13 +335,22 @@ onMounted(async () => {
                   <span class="text-gray-300">{{ fmt.toUpperCase() }}</span>
                 </label>
               </div>
-              <div v-if="newProfileFormat === 'mp3'" class="flex gap-1">
+              <div v-if="newProfileFormat === 'mp3'" class="flex items-center gap-2">
+                <input
+                  v-model.number="newProfileBitrate"
+                  type="number"
+                  min="32"
+                  max="320"
+                  step="1"
+                  class="w-20 px-2 py-0.5 text-xs bg-gray-800 border border-gray-600 rounded text-gray-200 focus:border-cyan-500 focus:outline-none"
+                />
+                <span class="text-[10px] text-gray-500">kbps</span>
                 <button
-                  v-for="br in ([128, 192, 256, 320] as const)"
+                  v-for="br in [96, 128, 192, 256, 320]"
                   :key="br"
                   type="button"
                   :class="[
-                    'px-2 py-0.5 text-[10px] rounded transition-colors',
+                    'px-1.5 py-0.5 text-[10px] rounded transition-colors',
                     newProfileBitrate === br
                       ? 'bg-cyan-600 text-white'
                       : 'bg-gray-700 text-gray-400 hover:bg-gray-600'

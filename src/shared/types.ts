@@ -154,7 +154,7 @@ export interface SearchResult {
 export type ASRModel = 'whisper-tiny' | 'whisper-base' | 'vosk';
 
 export type RecordingSource = 'microphone' | 'system';
-export type Mp3Bitrate = 128 | 192 | 256 | 320;
+export type Mp3Bitrate = number;
 
 export interface Settings {
   loopByDefault: boolean;
