@@ -69,14 +69,6 @@ const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH
 // Import state
 const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
 
-/// Progress: waveform decode is the meaningful indicator for local files.
-// Browser fetch is instant (asset protocol), decodeAudioData has no progress callback.
-// Waveform progress fills 0→95%, last 5% reserved for "finalizing" state.
-const combinedProgress = computed(() => {
-  if (!isImporting.value) return 1;
-  if (props.track.importStatus === 'decoding') return 0.95;
-  return Math.min((props.track.importProgress || 0) * 0.95, 0.95);
-});
 const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
 // Get clips for this track (supports multi-clip tracks)
@@ -475,23 +467,12 @@ onUnmounted(() => {
         :height="TRACK_HEIGHT"
       />
 
-      <!-- Import progress bar — visible bar moving toward loaded -->
-      <div v-if="isImporting" class="absolute inset-0 z-10 pointer-events-none">
-        <!-- Dim overlay to push waveform back so progress bar stands out -->
-        <div class="absolute inset-0 bg-gray-900/70" />
-        <!-- Progress bar at bottom -->
-        <div class="absolute bottom-0 left-0 right-0 h-2 bg-gray-700/80 overflow-hidden">
-          <div
-            class="h-full bg-emerald-400 transition-all duration-300 ease-out"
-            :style="{ width: `${combinedProgress * 100}%` }"
-          />
-          <!-- Shimmer pulse at leading edge -->
-          <div
-            class="absolute top-0 h-full w-16 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"
-            :style="{ left: `${Math.max(0, combinedProgress * 100 - 8)}%` }"
-          />
-        </div>
-      </div>
+      <!-- Import progress — thin line creeping toward playable -->
+      <div
+        v-if="isImporting"
+        class="absolute bottom-0 left-0 h-0.5 bg-emerald-400 transition-[width] duration-200 ease-out pointer-events-none z-10"
+        :style="{ width: `${(track.importDecodeProgress || 0) * 100}%` }"
+      />
 
       <!-- Render each clip in the track (only when not importing) -->
       <ClipRegion
