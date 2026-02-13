@@ -43,6 +43,10 @@ export const DEFAULT_SETTINGS = {
   exportProfiles: [] as ExportProfile[],  // merged with DEFAULT_EXPORT_PROFILES at load time
   lastExportProfileId: 'mp3-192',
   lastExportPath: '',
+  // Recording channel mode
+  recordingChannelMode: 'stereo' as const,
+  // Bottom bar shortcut hints
+  shortcutHints: ['help', 'jkl', 'cut', 'delete'],
 };
 
 export const KEYBOARD_SHORTCUTS = {
@@ -59,8 +63,10 @@ export const KEYBOARD_SHORTCUTS = {
   // New navigation shortcuts
   JUMP_LAYER_START: 's',
   JUMP_LAYER_END: 'd',
-  SPEED_UP: '.',
-  SPEED_DOWN: ',',
+  SPEED_UP: 'ArrowUp',
+  SPEED_DOWN: 'ArrowDown',
+  NEXT_MARKER: '>',      // Shift+.
+  PREV_MARKER: '<',      // Shift+,
   MARK_TIME: 'm',
   // Loop mode shortcuts
   LOOP_FULL: 'q',
@@ -69,6 +75,24 @@ export const KEYBOARD_SHORTCUTS = {
   LOOP_ACTIVE: 'r',
   LOOP_CLIP: 't',
 } as const;
+
+export const ALL_SHORTCUT_HINTS = [
+  { id: 'help', keys: '?', label: 'All Shortcuts' },
+  { id: 'jkl', keys: 'J/K/L', label: 'Shuttle' },
+  { id: 'play', keys: 'Space', label: 'Play/Pause' },
+  { id: 'forward', keys: 'L/\u2192', label: 'Forward' },
+  { id: 'reverse', keys: 'J/\u2190', label: 'Reverse' },
+  { id: 'speed', keys: '\u2191/\u2193', label: 'Speed' },
+  { id: 'markers', keys: '</>', label: 'Markers' },
+  { id: 'inout', keys: 'I/O', label: 'In/Out' },
+  { id: 'clip', keys: 'C', label: 'Clip' },
+  { id: 'cut', keys: 'X', label: 'Cut' },
+  { id: 'delete', keys: 'Del', label: 'Delete' },
+  { id: 'paste', keys: 'V', label: 'Paste' },
+  { id: 'tab', keys: 'Tab', label: 'Next Track' },
+  { id: 'zoom', keys: '+/-', label: 'Zoom' },
+  { id: 'undo', keys: 'Ctrl+Z', label: 'Undo' },
+] as const;
 
 export const SUPPORTED_FORMATS = [
   '.mp3',

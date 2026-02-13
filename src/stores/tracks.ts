@@ -1383,96 +1383,112 @@ export const useTracksStore = defineStore('tracks', () => {
     return track;
   }
 
-  // Update waveform data progressively during import
+  // Update waveform data progressively during import (hot path — avoid full-array reactivity)
   function updateImportWaveform(trackId: string, chunk: WaveformChunkEvent): void {
-    const track = tracks.value.find(t => t.id === trackId);
-    if (!track || !track.importSessionId) return;
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.importSessionId) return;
 
-    // Patch waveform at startBucket (each bucket is 2 values: min, max)
-    const waveform = [...track.audioData.waveformData];
+    // Patch waveform in-place at startBucket (each bucket = 2 values: min, max)
+    const waveform = track.audioData.waveformData;
     const offset = chunk.startBucket * 2;
     for (let i = 0; i < chunk.waveform.length && offset + i < waveform.length; i++) {
       waveform[offset + i] = chunk.waveform[i];
     }
-
-    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
-    if (trackIndex !== -1) {
-      tracks.value[trackIndex] = {
-        ...track,
-        audioData: { ...track.audioData, waveformData: waveform },
-        importProgress: chunk.progress,
-      };
-      tracks.value = [...tracks.value];
-    }
+    track.importProgress = chunk.progress;
+    // Single shallow trigger — replace just this slot
+    tracks.value[idx] = { ...track };
   }
 
   // Finalize waveform after Rust decode completes (corrects VBR duration estimates)
   function finalizeImportWaveform(trackId: string, finalWaveform: number[], actualDuration: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
-    if (!track) return;
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
 
     console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, statusKept=${track.importStatus === 'ready'}`);
-    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
-    if (trackIndex !== -1) {
-      tracks.value[trackIndex] = {
-        ...track,
-        audioData: { ...track.audioData, waveformData: finalWaveform },
-        duration: actualDuration,
-        // If buffer already set (status 'ready'), keep it — don't regress to 'decoding'
-        importStatus: track.importStatus === 'ready' ? 'ready' : 'decoding' as ImportStatus,
-        importProgress: 1,
-        importSessionId: undefined, // waveform session done
-      };
-      tracks.value = [...tracks.value];
-    }
-  }
-
-  // Update decode/fetch progress for the browser-side audio preparation
-  function updateImportDecodeProgress(trackId: string, progress: number): void {
-    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
-    if (trackIndex === -1) return;
-    const track = tracks.value[trackIndex];
-    if (!track.importStatus || track.importStatus === 'ready') return;
-
-    tracks.value[trackIndex] = {
+    tracks.value[idx] = {
       ...track,
-      importDecodeProgress: progress,
+      audioData: { ...track.audioData, waveformData: finalWaveform },
+      duration: actualDuration,
+      // If buffer already set (status 'ready'), keep it — don't regress to 'decoding'
+      importStatus: track.importStatus === 'ready' ? 'ready' : 'decoding' as ImportStatus,
+      importProgress: 1,
+      importSessionId: undefined, // waveform session done
     };
     tracks.value = [...tracks.value];
   }
 
+  // Update decode/fetch progress (hot path ~60Hz — mutate in-place, no array copy)
+  function updateImportDecodeProgress(trackId: string, progress: number): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.importStatus || track.importStatus === 'ready') return;
+    track.importDecodeProgress = progress;
+  }
+
   // Set the AudioBuffer after browser decode completes
   function setImportBuffer(trackId: string, buffer: AudioBuffer): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+
+    console.log(`[Tracks] setImportBuffer: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${buffer.duration.toFixed(2)}, oldStatus=${track.importStatus}, newStatus=ready`);
+    tracks.value[idx] = {
+      ...track,
+      audioData: {
+        ...track.audioData,
+        buffer,
+        sampleRate: buffer.sampleRate,
+        channels: buffer.numberOfChannels,
+      },
+      duration: buffer.duration,
+      importStatus: 'ready' as ImportStatus,
+      importProgress: undefined,
+      importDecodeProgress: undefined,
+    };
+    tracks.value = [...tracks.value];
+  }
+
+  /** Add a timemark to any track (not just during recording) */
+  function addTimemark(trackId: string, time: number, label: string, source: 'manual' | 'auto' = 'manual'): void {
     const track = tracks.value.find(t => t.id === trackId);
     if (!track) return;
 
-    console.log(`[Tracks] setImportBuffer: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${buffer.duration.toFixed(2)}, oldStatus=${track.importStatus}, newStatus=ready`);
-    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
-    if (trackIndex !== -1) {
-      tracks.value[trackIndex] = {
-        ...track,
-        audioData: {
-          ...track.audioData,
-          buffer,
-          sampleRate: buffer.sampleRate,
-          channels: buffer.numberOfChannels,
-        },
-        duration: buffer.duration,
-        importStatus: 'ready' as ImportStatus,
-        importProgress: undefined,
-        importDecodeProgress: undefined,
-        // Keep importSessionId — waveform chunks may still be arriving
-        // It gets cleared when finalizeImportWaveform fires
-      };
-      tracks.value = [...tracks.value];
+    const historyStore = useHistoryStore();
+    historyStore.pushState('Add marker');
+
+    if (!track.timemarks) track.timemarks = [];
+    track.timemarks.push({
+      id: generateId(),
+      time,
+      label,
+      source,
+      color: source === 'manual' ? '#00d4ff' : '#fbbf24',
+    });
+  }
+
+  /** Update a timemark's time (for drag) — no history push (caller handles it at drag start) */
+  function updateTimemarkTime(trackId: string, timemarkId: string, newTime: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track || !track.timemarks) return;
+
+    const mark = track.timemarks.find(m => m.id === timemarkId);
+    if (mark) {
+      mark.time = Math.max(0, newTime);
     }
   }
 
   function removeTrackTimemark(trackId: string, timemarkId: string): void {
     const track = tracks.value.find(t => t.id === trackId);
-    if (track?.timemarks) {
-      track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
-    }
+    if (!track?.timemarks) return;
+
+    const historyStore = useHistoryStore();
+    historyStore.pushState('Remove marker');
+
+    track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
   }
 
   return {
@@ -1519,6 +1535,8 @@ export const useTracksStore = defineStore('tracks', () => {
     addEmptyTrack,
     resetMinTimelineDuration,
     activeDrag,
+    addTimemark,
+    updateTimemarkTime,
     removeTrackTimemark,
     createImportingTrack,
     updateImportWaveform,

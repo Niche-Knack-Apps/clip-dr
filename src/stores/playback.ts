@@ -714,6 +714,50 @@ export const usePlaybackStore = defineStore('playback', () => {
     playDirection.value = 1;
   }
 
+  async function jumpToNextMarker(currentTimeVal?: number): Promise<void> {
+    const time = currentTimeVal ?? currentTime.value;
+    const allTracks = tracksStore.tracks;
+
+    let nextTime: number | null = null;
+    for (const track of allTracks) {
+      if (!track.timemarks) continue;
+      for (const mark of track.timemarks) {
+        const markTime = mark.time + track.trackStart;
+        if (markTime > time + 0.01) {
+          if (nextTime === null || markTime < nextTime) {
+            nextTime = markTime;
+          }
+        }
+      }
+    }
+
+    if (nextTime !== null) {
+      await seek(nextTime);
+    }
+  }
+
+  async function jumpToPreviousMarker(currentTimeVal?: number): Promise<void> {
+    const time = currentTimeVal ?? currentTime.value;
+    const allTracks = tracksStore.tracks;
+
+    let prevTime: number | null = null;
+    for (const track of allTracks) {
+      if (!track.timemarks) continue;
+      for (const mark of track.timemarks) {
+        const markTime = mark.time + track.trackStart;
+        if (markTime < time - 0.01) {
+          if (prevTime === null || markTime > prevTime) {
+            prevTime = markTime;
+          }
+        }
+      }
+    }
+
+    if (prevTime !== null) {
+      await seek(prevTime);
+    }
+  }
+
   // Debug function
   function testAudioOutput(): void {
     const freshCtx = new AudioContext();
@@ -800,5 +844,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     stopHoldReverse,
     jklPlayAtSpeed,
     jklStop,
+    jumpToNextMarker,
+    jumpToPreviousMarker,
   };
 });

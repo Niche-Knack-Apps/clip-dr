@@ -40,6 +40,7 @@ lazy_static::lazy_static! {
     static ref RECORDING_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     // For streaming system audio - accumulate samples from stdout
     static ref SYSTEM_AUDIO_SAMPLES: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    static ref SYSTEM_WAV_WRITER: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>> = Arc::new(Mutex::new(None));
 }
 
 struct RecordingState {
@@ -48,6 +49,38 @@ struct RecordingState {
     channels: u16,
     output_path: PathBuf,
     use_system_buffer: bool,
+    target_mono: bool,
+    // Incremental WAV writer for crash safety
+    wav_writer: Option<WavWriter<BufWriter<File>>>,
+}
+
+/// Mix interleaved stereo samples to mono by averaging channels
+fn stereo_to_mono(samples: &[f32]) -> Vec<f32> {
+    samples.chunks(2)
+        .map(|pair| if pair.len() == 2 { (pair[0] + pair[1]) * 0.5 } else { pair[0] })
+        .collect()
+}
+
+/// Write samples to a new WAV file (used for mono rewrite after stereo recording)
+fn write_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u16) -> Result<(), String> {
+    let spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let file = File::create(path)
+        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+    let buf = BufWriter::new(file);
+    let mut writer = WavWriter::new(buf, spec)
+        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+    for &sample in samples {
+        writer.write_sample(sample)
+            .map_err(|e| format!("Failed to write sample: {}", e))?;
+    }
+    writer.finalize()
+        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -142,7 +175,7 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
 }
 
 #[tauri::command]
-pub async fn start_recording(device_id: Option<String>, output_dir: String) -> Result<String, String> {
+pub async fn start_recording(device_id: Option<String>, output_dir: String, channel_mode: Option<String>) -> Result<String, String> {
     // Auto-reset any stuck state from previous failed recordings
     if RECORDING_ACTIVE.load(Ordering::SeqCst) {
         log::warn!("Recording state was stuck, auto-resetting...");
@@ -251,6 +284,21 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
     let filename = format!("recording_{}.wav", timestamp);
     let output_path = output_dir_path.join(&filename);
 
+    let target_mono = channel_mode.as_deref() == Some("mono");
+
+    // Create WAV writer for incremental crash-safe recording
+    let spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let file = File::create(&output_path)
+        .map_err(|e| format!("Failed to create output file: {}", e))?;
+    let buf_writer = BufWriter::new(file);
+    let wav_writer = WavWriter::new(buf_writer, spec)
+        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+
     // Initialize recording state
     {
         let mut state = RECORDING_STATE.lock().unwrap();
@@ -260,6 +308,8 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String) -> R
             channels,
             output_path: output_path.clone(),
             use_system_buffer: false,
+            target_mono,
+            wav_writer: Some(wav_writer),
         });
     }
 
@@ -407,10 +457,17 @@ where
                     let level_int = (max_level * 1000.0) as u32;
                     CURRENT_LEVEL.store(level_int, Ordering::SeqCst);
 
-                    // Append to recording buffer
+                    // Append to recording buffer AND write to disk incrementally
                     if let Ok(mut state) = RECORDING_STATE.lock() {
                         if let Some(ref mut s) = *state {
                             s.samples.extend(samples.iter().copied());
+
+                            // Write samples to WAV file incrementally for crash safety
+                            if let Some(ref mut writer) = s.wav_writer {
+                                for &sample in &samples {
+                                    let _ = writer.write_sample(sample);
+                                }
+                            }
                         }
                     }
 
@@ -460,29 +517,23 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         duration
     );
 
-    // Write WAV file
-    let spec = WavSpec {
-        channels: state.channels,
-        sample_rate: state.sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
+    // Finalize the WAV writer (or rewrite as mono if needed)
+    let final_channels = if state.target_mono && state.channels == 2 {
+        // Drop the stereo writer and rewrite as mono
+        if let Some(writer) = state.wav_writer {
+            drop(writer);
+        }
+        let mono = stereo_to_mono(&state.samples);
+        write_wav_file(&state.output_path, &mono, state.sample_rate, 1)?;
+        1u16
+    } else {
+        // Finalize the existing incremental writer
+        if let Some(writer) = state.wav_writer {
+            writer.finalize()
+                .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+        }
+        state.channels
     };
-
-    let file = File::create(&state.output_path)
-        .map_err(|e| format!("Failed to create output file: {}", e))?;
-    let writer = BufWriter::new(file);
-    let mut wav_writer = WavWriter::new(writer, spec)
-        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
-
-    for sample in &state.samples {
-        wav_writer
-            .write_sample(*sample)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
-    }
-
-    wav_writer
-        .finalize()
-        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
 
     log::info!("Saved recording to: {:?}", state.output_path);
 
@@ -490,7 +541,7 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         path: state.output_path.to_string_lossy().to_string(),
         duration,
         sample_rate: state.sample_rate,
-        channels: state.channels,
+        channels: final_channels,
     })
 }
 
@@ -513,9 +564,14 @@ pub async fn cancel_recording() -> Result<(), String> {
 
     RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 
-    // Clear the recording state without saving
-    let mut state = RECORDING_STATE.lock().unwrap();
-    *state = None;
+    // Clear the recording state and clean up incomplete file
+    if let Ok(mut state_guard) = RECORDING_STATE.lock() {
+        if let Some(s) = state_guard.take() {
+            let output_path = s.output_path.clone();
+            drop(s); // Drop entire state including wav_writer
+            let _ = std::fs::remove_file(&output_path);
+        }
+    }
 
     log::info!("Recording cancelled");
     Ok(())
@@ -792,10 +848,19 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                     .fold(0.0f32, f32::max);
                 CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
 
-                // When recording is active, accumulate samples
+                // When recording is active, accumulate samples and write to disk
                 if RECORDING_ACTIVE.load(Ordering::SeqCst) {
                     if let Ok(mut accumulated) = SYSTEM_AUDIO_SAMPLES.lock() {
                         accumulated.extend(&samples);
+                    }
+
+                    // Write samples to WAV file incrementally for crash safety
+                    if let Ok(mut writer_guard) = SYSTEM_WAV_WRITER.lock() {
+                        if let Some(ref mut writer) = *writer_guard {
+                            for &sample in &samples {
+                                let _ = writer.write_sample(sample);
+                            }
+                        }
                     }
 
                     DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -1008,7 +1073,7 @@ pub fn check_input_muted() -> Result<bool, String> {
 /// Reuses the monitoring capture process — does NOT spawn a new process.
 /// The monitor reader thread accumulates samples when RECORDING_ACTIVE is set.
 #[tauri::command]
-pub async fn start_system_audio_recording(output_dir: String) -> Result<String, String> {
+pub async fn start_system_audio_recording(output_dir: String, channel_mode: Option<String>) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         // Auto-reset any stuck state from previous failed recordings
@@ -1045,6 +1110,26 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
             samples.clear();
         }
 
+        let target_mono = channel_mode.as_deref() == Some("mono");
+
+        // Create WAV writer for incremental crash-safe recording
+        let sys_spec = WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let sys_file = File::create(&output_path)
+            .map_err(|e| format!("Failed to create output file: {}", e))?;
+        let sys_buf = BufWriter::new(sys_file);
+        let sys_wav_writer = WavWriter::new(sys_buf, sys_spec)
+            .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+
+        {
+            let mut wg = SYSTEM_WAV_WRITER.lock().unwrap();
+            *wg = Some(sys_wav_writer);
+        }
+
         // Store recording state
         {
             let mut state = RECORDING_STATE.lock().unwrap();
@@ -1054,6 +1139,8 @@ pub async fn start_system_audio_recording(output_dir: String) -> Result<String, 
                 channels: 2,
                 output_path: output_path.clone(),
                 use_system_buffer: true,
+                target_mono,
+                wav_writer: None,
             });
         }
 
@@ -1176,11 +1263,34 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
         log::info!("Writing {} samples to WAV file: {:?}", samples.len(), state.output_path);
 
         if samples.is_empty() {
+            // Clean up the writer even if no samples
+            if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
+                drop(wg.take());
+            }
             return Err("No audio recorded".to_string());
         }
 
-        // Write samples to WAV file
-        let duration = write_system_audio_wav(&state.output_path, &samples, state.sample_rate, state.channels)?;
+        // Finalize the WAV writer (or rewrite as mono if needed)
+        let (final_channels, duration) = if state.target_mono && state.channels == 2 {
+            // Drop the stereo writer and rewrite as mono
+            if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
+                drop(wg.take());
+            }
+            let mono = stereo_to_mono(&samples);
+            let duration = mono.len() as f64 / state.sample_rate as f64;
+            write_wav_file(&state.output_path, &mono, state.sample_rate, 1)?;
+            (1u16, duration)
+        } else {
+            // Finalize the existing incremental writer
+            if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
+                if let Some(writer) = wg.take() {
+                    writer.finalize()
+                        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+                }
+            }
+            let duration = samples.len() as f64 / state.channels as f64 / state.sample_rate as f64;
+            (state.channels, duration)
+        };
 
         log::info!("System audio recording complete: {:?}, {:.2}s, {} callbacks",
             state.output_path, duration, DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst));
@@ -1191,7 +1301,7 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
             path: state.output_path.to_string_lossy().to_string(),
             duration,
             sample_rate: state.sample_rate,
-            channels: state.channels,
+            channels: final_channels,
         })
     }
 
@@ -1199,44 +1309,6 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
     {
         Err("System audio recording only supported on Linux".to_string())
     }
-}
-
-/// Write accumulated samples to a WAV file
-#[cfg(target_os = "linux")]
-fn write_system_audio_wav(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u16) -> Result<f64, String> {
-    let spec = WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-
-    let file = File::create(path)
-        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
-    let writer = BufWriter::new(file);
-    let mut wav_writer = WavWriter::new(writer, spec)
-        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
-
-    for sample in samples {
-        wav_writer.write_sample(*sample)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
-    }
-
-    wav_writer.finalize()
-        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-
-    // Calculate duration
-    let duration = samples.len() as f64 / channels as f64 / sample_rate as f64;
-    Ok(duration)
-}
-
-#[cfg(target_os = "linux")]
-fn get_wav_duration(path: &PathBuf) -> Option<f64> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = hound::WavReader::new(file).ok()?;
-    let spec = reader.spec();
-    let samples = reader.len() as f64;
-    Some(samples / spec.channels as f64 / spec.sample_rate as f64)
 }
 
 /// Unmute the default audio input (Linux only)

@@ -276,12 +276,14 @@ export const useRecordingStore = defineStore('recording', () => {
       if (isSystemAudio) {
         recordingPath.value = await invoke<string>('start_system_audio_recording', {
           outputDir,
+          channelMode: settingsStore.settings.recordingChannelMode,
         });
         console.log('[Recording] Started system audio recording, output:', recordingPath.value);
       } else {
         recordingPath.value = await invoke<string>('start_recording', {
           deviceId: selectedDeviceId.value,
           outputDir,
+          channelMode: settingsStore.settings.recordingChannelMode,
         });
         console.log('[Recording] Started, output:', recordingPath.value);
       }

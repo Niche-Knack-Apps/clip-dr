@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Slider from '@/components/ui/Slider.vue';
 import SearchBar from '@/components/search/SearchBar.vue';
 import CleaningPanel from '@/components/cleaning/CleaningPanel.vue';
-import ExportPanel from '@/components/export/ExportPanel.vue';
 import RecordingPanel from '@/components/recording/RecordingPanel.vue';
 import { useAudio } from '@/composables/useAudio';
 import { usePlayback } from '@/composables/usePlayback';
@@ -25,6 +25,7 @@ import { useRecordingStore } from '@/stores/recording';
 import { formatTime } from '@/shared/utils';
 import { SUPPORTED_FORMATS, TOOLBAR_ROW_HEIGHT, TOOLBAR_HEIGHT, LOOP_MODES } from '@/shared/constants';
 import type { LoopMode } from '@/shared/constants';
+import type { ExportProfile } from '@/shared/types';
 
 const emit = defineEmits<{
   openSettings: [];
@@ -68,39 +69,32 @@ const cleaningStore = useCleaningStore();
 const settingsStore = useSettingsStore();
 const exportStore = useExportStore();
 const transcriptionStore = useTranscriptionStore();
+const tracksStore = useTracksStore();
 const recordingStore = useRecordingStore();
 const searchBarRef = ref<InstanceType<typeof SearchBar> | null>(null);
 const showVadSettings = ref(false);
 const showCleaningPanel = ref(false);
-const showExportPanel = ref(false);
 const showRecordingPanel = ref(false);
 const transportRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
+const searchFocused = ref(false);
 
-// Double-click detection for Record button
-let lastRecordClickTime = 0;
-const DOUBLE_CLICK_THRESHOLD = 400; // ms
-
-function handleRecordClick() {
-  // If already recording, toggle the panel visibility (to access stop/lock/marks)
+function handleMicClick() {
   if (recordingStore.isRecording) {
     showRecordingPanel.value = !showRecordingPanel.value;
     return;
   }
+  showRecordingPanel.value = true;
+  recordingStore.quickStart('microphone');
+}
 
-  const now = Date.now();
-  const timeSinceLastClick = now - lastRecordClickTime;
-  lastRecordClickTime = now;
-
-  if (timeSinceLastClick < DOUBLE_CLICK_THRESHOLD && !showRecordingPanel.value) {
-    // Double-click: quick-start with last-used source
-    // Panel may not be open yet, but we don't need it for quick-start
-    showRecordingPanel.value = true;
-    recordingStore.quickStartLastUsed();
-  } else {
-    // Single click: toggle panel open/closed
+function handleSystemClick() {
+  if (recordingStore.isRecording) {
     showRecordingPanel.value = !showRecordingPanel.value;
+    return;
   }
+  showRecordingPanel.value = true;
+  recordingStore.quickStart('system');
 }
 
 // Compute recording panel max-width when it opens so it doesn't overflow viewport
@@ -122,7 +116,6 @@ watch(showRecordingPanel, (show) => {
 transcriptionStore.checkModel();
 
 function handleReTranscribe() {
-  const tracksStore = useTracksStore();
   const sel = tracksStore.selectedTrackId;
   if (sel && sel !== 'ALL') {
     transcriptionStore.removeTranscription(sel);
@@ -176,6 +169,37 @@ async function handleImport() {
   }
 }
 
+function profileLabel(profile: ExportProfile): string {
+  if (profile.format === 'mp3' && profile.mp3Bitrate) {
+    return `MP3 ${profile.mp3Bitrate}`;
+  }
+  return profile.format.toUpperCase();
+}
+
+async function handleDownloadTranscriptJSON() {
+  const trackId = tracksStore.selectedTrackId;
+  if (!trackId || trackId === 'ALL') return;
+  const json = transcriptionStore.exportAsJSON(trackId);
+  if (!json) return;
+  const path = await save({
+    defaultPath: `transcription_${tracksStore.selectedTrack?.name || 'track'}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (path) await writeTextFile(path, json);
+}
+
+async function handleDownloadTranscriptTXT() {
+  const trackId = tracksStore.selectedTrackId;
+  if (!trackId || trackId === 'ALL') return;
+  const txt = transcriptionStore.exportAsText(trackId);
+  if (!txt) return;
+  const path = await save({
+    defaultPath: `transcription_${tracksStore.selectedTrack?.name || 'track'}.txt`,
+    filters: [{ name: 'Text', extensions: ['txt'] }],
+  });
+  if (path) await writeTextFile(path, txt);
+}
+
 function focusSearch() {
   searchBarRef.value?.focus();
 }
@@ -216,17 +240,31 @@ defineExpose({ focusSearch });
 
       <!-- Unified Transport Controls -->
       <div ref="transportRef" class="flex items-center gap-1 bg-gray-800 rounded-lg px-1 py-0.5 relative">
-        <!-- Record button -->
+        <!-- Mic record button -->
         <Button
           variant="ghost"
           size="sm"
           icon
-          :class="{ 'text-red-500': recordingStore.isRecording }"
-          title="Record (double-click to quick-start)"
-          @click="handleRecordClick"
+          :class="{ 'text-red-500': recordingStore.isRecording && recordingStore.source === 'microphone' }"
+          title="Record from microphone"
+          @click="handleMicClick"
         >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="6" :class="recordingStore.isRecording ? 'animate-pulse' : ''" />
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="recordingStore.isRecording && recordingStore.source === 'microphone' ? 'animate-pulse' : ''">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+          </svg>
+        </Button>
+
+        <!-- System record button -->
+        <Button
+          variant="ghost"
+          size="sm"
+          icon
+          :class="{ 'text-red-500': recordingStore.isRecording && recordingStore.source === 'system' }"
+          title="Record system audio"
+          @click="handleSystemClick"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="recordingStore.isRecording && recordingStore.source === 'system' ? 'animate-pulse' : ''">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
           </svg>
         </Button>
 
@@ -333,8 +371,17 @@ defineExpose({ focusSearch });
       <div class="flex-1" />
 
       <!-- Search -->
-      <div class="max-w-[180px]">
-        <SearchBar ref="searchBarRef" />
+      <div
+        :class="[
+          'transition-all duration-200',
+          searchFocused ? 'max-w-[400px]' : 'max-w-[180px]'
+        ]"
+      >
+        <SearchBar
+          ref="searchBarRef"
+          @focus="searchFocused = true"
+          @blur="searchFocused = false"
+        />
       </div>
 
       <!-- Volume -->
@@ -676,32 +723,53 @@ defineExpose({ focusSearch });
             {{ q.label }}
           </button>
         </div>
+
+        <!-- Transcript download buttons -->
+        <Button
+          variant="ghost"
+          size="sm"
+          icon
+          :disabled="!transcriptionStore.hasTranscription"
+          title="Download transcription as JSON"
+          @click="handleDownloadTranscriptJSON"
+        >
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3c-2 0-3 1-3 3v12c0 2 1 3 3 3m8-18c2 0 3 1 3 3v12c0 2-1 3-3 3" />
+          </svg>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          icon
+          :disabled="!transcriptionStore.hasTranscription"
+          title="Download transcription as TXT"
+          @click="handleDownloadTranscriptTXT"
+        >
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-6 2.5h4" />
+          </svg>
+        </Button>
       </div>
 
       <div class="w-px h-5 bg-gray-700" />
 
-      <!-- Export -->
-      <div class="flex items-center gap-1 relative">
+      <!-- Export Profiles -->
+      <div class="flex items-center gap-1 border-l border-gray-700 pl-2">
         <Button
-          variant="secondary"
+          v-for="profile in settingsStore.getExportProfiles()"
+          :key="profile.id"
+          variant="ghost"
           size="sm"
           :disabled="!hasFile || !exportStore.canExport"
           :loading="exportStore.loading"
-          @click="showExportPanel = !showExportPanel"
+          :title="profile.name"
+          @click="exportStore.exportWithProfile(profile)"
         >
-          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          Export
+          <span class="text-[10px]">
+            <span v-if="profile.isFavorite" class="text-yellow-400 mr-0.5">&#9733;</span>{{ profileLabel(profile) }}
+          </span>
         </Button>
-
-        <!-- Export Panel Popover -->
-        <div
-          v-if="showExportPanel"
-          class="absolute top-full right-0 mt-2 z-50"
-        >
-          <ExportPanel @close="showExportPanel = false" />
-        </div>
       </div>
 
       <!-- Spacer -->

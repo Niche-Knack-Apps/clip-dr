@@ -185,7 +185,7 @@ export interface SearchResult {
 export type ASRModel = 'whisper-tiny' | 'whisper-base' | 'vosk';
 
 export type RecordingSource = 'microphone' | 'system';
-export type Mp3Bitrate = 128 | 192 | 256 | 320;
+export type Mp3Bitrate = number;
 
 export interface Settings {
   loopByDefault: boolean;
@@ -215,6 +215,10 @@ export interface Settings {
   exportProfiles: ExportProfile[];
   lastExportProfileId: string;
   lastExportPath: string;
+  // Recording channel mode
+  recordingChannelMode: 'mono' | 'stereo';
+  // Bottom bar shortcut hints
+  shortcutHints: string[];
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';
