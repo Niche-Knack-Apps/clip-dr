@@ -101,7 +101,7 @@ const timelineWidth = computed(() => {
   const duration = tracksStore.timelineDuration;
   // Add 10% extra duration for padding when zoomed out
   const paddedDuration = duration * 1.1;
-  return Math.max(600, paddedDuration * trackZoom.value) + panelWidth.value;
+  return paddedDuration * trackZoom.value + panelWidth.value;
 });
 
 // Selection window overlay position on track list
@@ -133,6 +133,7 @@ watch(
       if (newest?.sourcePath) {
         await nextTick();
         const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+        console.log(`[Zoom] tracks.length watcher: ${oldLen} → ${newLen}, sourcePath=${newest?.sourcePath}, scrollW=${scrollContainerRef.value?.clientWidth}, panelW=${panelWidth.value}, containerW=${containerW}, timelineDuration=${tracksStore.timelineDuration.toFixed(2)}`);
         if (containerW > 0) {
           uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
         } else {
@@ -142,6 +143,26 @@ watch(
     }
   }
 );
+
+// Re-fit zoom when an import completes (actual duration may differ from metadata estimate)
+const readyTrackCount = computed(() =>
+  tracksStore.tracks.filter(t => t.importStatus === 'ready').length
+);
+
+watch(readyTrackCount, async (now, before) => {
+  if (now > (before ?? 0)) {
+    await nextTick();
+    const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+    console.log(`[Zoom] readyTrackCount watcher: ${before} → ${now}, scrollW=${scrollContainerRef.value?.clientWidth}, panelW=${panelWidth.value}, containerW=${containerW}, timelineDuration=${tracksStore.timelineDuration.toFixed(2)}`);
+    if (containerW > 0) {
+      uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
+    }
+  }
+});
+
+watch(timelineWidth, (newW, oldW) => {
+  console.log(`[Zoom] timelineWidth changed: ${oldW?.toFixed(1)} → ${newW.toFixed(1)}, trackZoom=${trackZoom.value.toFixed(6)}, duration=${tracksStore.timelineDuration.toFixed(2)}, scrollContainerW=${scrollContainerRef.value?.clientWidth}`);
+});
 
 // Handle scroll wheel: Ctrl+wheel zooms, plain wheel scrolls natively
 function handleWheel(event: WheelEvent) {

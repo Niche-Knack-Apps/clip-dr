@@ -69,6 +69,14 @@ const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH
 // Import state
 const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
 
+// Density check: skip import waveform when zoomed out too far
+const effectiveZoom = computed(() => {
+  const dur = tracksStore.timelineDuration;
+  if (dur <= 0 || containerWidth.value <= 0) return 0;
+  return containerWidth.value / dur;
+});
+const showImportWaveform = computed(() => effectiveZoom.value >= 2);
+
 const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
 // Get clips for this track (supports multi-clip tracks)
@@ -458,13 +466,19 @@ onUnmounted(() => {
       ref="containerRef"
       class="flex-1 relative"
     >
-      <!-- Static waveform for importing tracks (progressive fill-in) -->
+      <!-- Static waveform for importing tracks (progressive fill-in) — only when zoomed in enough -->
       <canvas
-        v-if="isImporting && track.audioData.waveformData.length > 0"
+        v-if="isImporting && showImportWaveform && track.audioData.waveformData.length > 0"
         ref="importWaveformRef"
         class="absolute inset-0 w-full h-full"
         :width="containerWidth"
         :height="TRACK_HEIGHT"
+      />
+      <!-- Colored box placeholder when import waveform is too dense to render -->
+      <div
+        v-else-if="isImporting && !showImportWaveform"
+        class="absolute inset-0 rounded"
+        :style="{ backgroundColor: track.color + '30' }"
       />
 
       <!-- Import progress — thin line creeping toward playable -->

@@ -76,6 +76,13 @@ const waveformColor = computed(() => {
   return `${props.track.color}80`; // 80 = 50% opacity
 });
 
+// Density check: skip waveform rendering when zoomed out too far
+const pxPerSecond = computed(() => {
+  if (clipDuration.value <= 0) return Infinity;
+  return width.value / clipDuration.value;
+});
+const showWaveform = computed(() => pxPerSecond.value >= 2);
+
 // Cache for high-res waveform extraction (avoid recomputing every frame)
 let hiResCache: { key: string; data: number[] } | null = null;
 
@@ -112,6 +119,13 @@ function extractHiResPeaks(buffer: AudioBuffer, targetBuckets: number): number[]
 function drawWaveform() {
   const canvas = canvasRef.value;
   if (!canvas) return;
+
+  // When zoomed out too far, clear canvas and let the colored background show through
+  if (!showWaveform.value) {
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
 
   const overviewData = waveformData.value;
   if (!overviewData || overviewData.length < 2) return;
@@ -181,8 +195,8 @@ function drawWaveform() {
   ctx.fill();
 }
 
-// Redraw when waveform data, width, or muted state changes
-watch([waveformData, width, waveformColor], () => {
+// Redraw when waveform data, width, muted state, or density threshold changes
+watch([waveformData, width, waveformColor, showWaveform], () => {
   nextTick(drawWaveform);
 });
 

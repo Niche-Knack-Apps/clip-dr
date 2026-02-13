@@ -84,7 +84,7 @@ export const useAudioStore = defineStore('audio', () => {
       const trackId = newTrack.id;
       console.log(`[Audio] [${ms()}] Track created: ${trackId.slice(0, 8)} at ${trackStart.toFixed(1)}s`);
 
-      selectionStore.resetSelection();
+      selectionStore.setSelection(0, tracksStore.timelineDuration);
       tracksStore.selectTrack(trackId);
       lastImportedPath.value = path;
 
@@ -229,7 +229,12 @@ export const useAudioStore = defineStore('audio', () => {
       if (audioBuffer) {
         // Set buffer immediately — track becomes playable NOW
         tracksStore.setImportBuffer(trackId, audioBuffer);
-        console.log(`[Audio] [${ms()}] Buffer set — playback enabled`);
+        // Position playhead at start of imported track
+        const { usePlaybackStore } = await import('./playback');
+        usePlaybackStore().seek(trackStart);
+        // Update selection to cover full timeline with actual buffer duration
+        selectionStore.setSelection(0, tracksStore.timelineDuration);
+        console.log(`[Audio] [${ms()}] Buffer set — playback enabled, playhead at ${trackStart.toFixed(1)}s`);
       } else {
         // Fallback: browser couldn't decode (e.g. WMA) — use legacy monolithic load
         console.warn(`[Audio] [${ms()}] Falling back to legacy load_audio_complete...`);

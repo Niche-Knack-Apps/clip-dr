@@ -1411,6 +1411,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find(t => t.id === trackId);
     if (!track) return;
 
+    console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, statusKept=${track.importStatus === 'ready'}`);
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex !== -1) {
       tracks.value[trackIndex] = {
@@ -1424,7 +1425,6 @@ export const useTracksStore = defineStore('tracks', () => {
       };
       tracks.value = [...tracks.value];
     }
-    console.log('[Tracks] Finalized import waveform for:', track.name, 'actual duration:', actualDuration);
   }
 
   // Update decode/fetch progress for the browser-side audio preparation
@@ -1446,6 +1446,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find(t => t.id === trackId);
     if (!track) return;
 
+    console.log(`[Tracks] setImportBuffer: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${buffer.duration.toFixed(2)}, oldStatus=${track.importStatus}, newStatus=ready`);
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex !== -1) {
       tracks.value[trackIndex] = {
@@ -1465,7 +1466,6 @@ export const useTracksStore = defineStore('tracks', () => {
       };
       tracks.value = [...tracks.value];
     }
-    console.log('[Tracks] Import buffer set for:', track.name, 'duration:', buffer.duration);
   }
 
   function removeTrackTimemark(trackId: string, timemarkId: string): void {
