@@ -40,6 +40,9 @@ export interface KeyboardActions {
   // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z)
   onUndo?: () => void;
   onRedo?: () => void;
+  // Marker navigation
+  onNextMarker?: () => void;
+  onPreviousMarker?: () => void;
   // Recording timemark
   onAddTimemark?: () => void;
   // Quick Re-Export (Ctrl+Shift+E)
@@ -59,21 +62,20 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
   function calculateJklSpeed(): { speed: number; reverse: boolean } | null {
     const hasL = heldKeys.has('l') || heldKeys.has('L') || heldKeys.has('ArrowRight');
     const hasJ = heldKeys.has('j') || heldKeys.has('J') || heldKeys.has('ArrowLeft');
-    const hasK = heldKeys.has('k') || heldKeys.has('K') || heldKeys.has('ArrowUp');
+    const hasK = heldKeys.has('k') || heldKeys.has('K');
     const hasShift = heldKeys.has('Shift');
-    const hasDown = heldKeys.has('ArrowDown');
 
     if (hasL && !hasJ) {
       // Forward playback
       if (hasK) return { speed: 2, reverse: false };
-      if (hasShift || hasDown) return { speed: 0.5, reverse: false };
+      if (hasShift) return { speed: 0.5, reverse: false };
       return { speed: 1, reverse: false };
     }
 
     if (hasJ && !hasL) {
       // Reverse playback
       if (hasK) return { speed: 2, reverse: true };
-      if (hasShift || hasDown) return { speed: 0.5, reverse: true };
+      if (hasShift) return { speed: 0.5, reverse: true };
       return { speed: 1, reverse: true };
     }
 
@@ -163,7 +165,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
       heldKeys.add(key);
 
       // Check if this is a JKL-related key
-      const jklKeys = ['j', 'J', 'k', 'K', 'l', 'L', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Shift'];
+      const jklKeys = ['j', 'J', 'k', 'K', 'l', 'L', 'ArrowLeft', 'ArrowRight', 'Shift'];
       if (jklKeys.includes(key)) {
         event.preventDefault();
         updateJklPlayback();
@@ -274,16 +276,24 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
         }
         break;
 
-      case KEYBOARD_SHORTCUTS.SPEED_UP:
-      case '>':
+      case KEYBOARD_SHORTCUTS.SPEED_UP: // ArrowUp
         event.preventDefault();
         actions.onSpeedUp?.();
         break;
 
-      case KEYBOARD_SHORTCUTS.SPEED_DOWN:
-      case '<':
+      case KEYBOARD_SHORTCUTS.SPEED_DOWN: // ArrowDown
         event.preventDefault();
         actions.onSpeedDown?.();
+        break;
+
+      case KEYBOARD_SHORTCUTS.NEXT_MARKER: // >
+        event.preventDefault();
+        actions.onNextMarker?.();
+        break;
+
+      case KEYBOARD_SHORTCUTS.PREV_MARKER: // <
+        event.preventDefault();
+        actions.onPreviousMarker?.();
         break;
 
       // Direct shortcuts (no Ctrl modifier)
@@ -374,7 +384,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
       heldKeys.delete(key);
 
       // Check if this is a JKL-related key
-      const jklKeys = ['j', 'J', 'k', 'K', 'l', 'L', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Shift'];
+      const jklKeys = ['j', 'J', 'k', 'K', 'l', 'L', 'ArrowLeft', 'ArrowRight', 'Shift'];
       if (jklKeys.includes(key)) {
         event.preventDefault();
         updateJklPlayback();

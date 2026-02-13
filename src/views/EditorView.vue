@@ -203,6 +203,8 @@ useKeyboardShortcuts({
   // Zoom shortcuts (+/-)
   onZoomIn: () => uiStore.zoomTrackIn(),
   onZoomOut: () => uiStore.zoomTrackOut(),
+  onNextMarker: () => playbackStore.jumpToNextMarker(),
+  onPreviousMarker: () => playbackStore.jumpToPreviousMarker(),
   onAddTimemark: () => recordingStore.addTimemark(),
   // Track selection cycling (Tab/Shift+Tab)
   onSelectNextTrack: () => {
@@ -299,8 +301,10 @@ useKeyboardShortcuts({
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Space</kbd> Play/Pause</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">L</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">→</kbd> Forward</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">J</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">←</kbd> Reverse</span>
-      <span>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">K</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">↑</kbd>=2x</span>
-      <span>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Shift</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">↓</kbd>=0.5x</span>
+      <span>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">K</kbd>=2x</span>
+      <span>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Shift</kbd>=0.5x</span>
+      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">↑</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">↓</kbd> Speed</span>
+      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">&lt;</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">&gt;</kbd> Markers</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">I</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">O</kbd> In/Out</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">C</kbd> Clip</span>
       <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">X</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">V</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Del</kbd> Cut/Paste/Delete</span>

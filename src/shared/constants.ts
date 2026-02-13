@@ -61,8 +61,10 @@ export const KEYBOARD_SHORTCUTS = {
   // New navigation shortcuts
   JUMP_LAYER_START: 's',
   JUMP_LAYER_END: 'd',
-  SPEED_UP: '.',
-  SPEED_DOWN: ',',
+  SPEED_UP: 'ArrowUp',
+  SPEED_DOWN: 'ArrowDown',
+  NEXT_MARKER: '>',      // Shift+.
+  PREV_MARKER: '<',      // Shift+,
   MARK_TIME: 'm',
   // Loop mode shortcuts
   LOOP_FULL: 'q',
