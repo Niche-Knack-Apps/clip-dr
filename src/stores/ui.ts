@@ -93,10 +93,13 @@ export const useUIStore = defineStore('ui', () => {
     useTracksStore().resetMinTimelineDuration();
   }
 
-  // Zoom to fit all content with padding
+  // Zoom to fit all content — matches timelineWidth's 1.1x padding exactly
   function zoomTrackToFit(timelineDuration: number, containerWidth: number): void {
     if (timelineDuration <= 0 || containerWidth <= 0) return;
-    const targetZoom = (containerWidth * 0.9) / timelineDuration;
+    // timelineWidth = duration * 1.1 * zoom + panelWidth
+    // To fill exactly: duration * 1.1 * zoom = containerWidth (already excludes panelWidth)
+    const paddedDuration = timelineDuration * 1.1;
+    const targetZoom = containerWidth / paddedDuration;
     console.log(`[Zoom] zoomTrackToFit: timelineDuration=${timelineDuration.toFixed(2)}, containerWidth=${containerWidth}, targetZoom=${targetZoom.toFixed(6)}, result=${Math.min(TRACK_ZOOM_MAX, targetZoom).toFixed(6)}`);
     // Bypass TRACK_ZOOM_MIN — auto-fit must always fit, regardless of file length
     trackZoom.value = Math.min(TRACK_ZOOM_MAX, targetZoom);

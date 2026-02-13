@@ -385,12 +385,15 @@ onMounted(() => {
   // Auto-fit zoom on first mount when tracks already exist
   // (tracks.length watcher misses the first import because TrackList
   // wasn't mounted when the track was created)
+  // Use nextTick + rAF to ensure CSS layout is fully settled before measuring
   if (tracksStore.tracks.length > 0 && scrollContainerRef.value) {
     nextTick(() => {
-      const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
-      if (containerW > 0) {
-        uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
-      }
+      requestAnimationFrame(() => {
+        const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+        if (containerW > 0) {
+          uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
+        }
+      });
     });
   }
 });
