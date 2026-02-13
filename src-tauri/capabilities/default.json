@@ -19,6 +19,7 @@
     "fs:allow-home-write-recursive",
     "fs:allow-appdata-write",
     "fs:allow-appdata-write-recursive",
-    "fs:write-files"
+    "fs:write-files",
+    "core:event:default"
   ]
 }

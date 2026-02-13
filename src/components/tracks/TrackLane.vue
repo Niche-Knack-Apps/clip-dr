@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import ClipRegion from './ClipRegion.vue';
 import Playhead from '@/components/waveform/Playhead.vue';
 import Slider from '@/components/ui/Slider.vue';
@@ -49,6 +49,9 @@ const draggingClipId = ref<string | null>(null);
 let clipDragRafId: number | null = null;
 let pendingClipDragEvent: MouseEvent | null = null;
 
+// rAF-based throttle for import waveform redraws
+let waveformRafId: number | null = null;
+
 // Minimum pixels to move before drag starts (to allow click-to-select)
 const DRAG_THRESHOLD = 5;
 
@@ -62,6 +65,19 @@ const duration = computed(() => tracksStore.timelineDuration);
 const currentTime = computed(() => playbackStore.currentTime);
 const panelWidth = computed(() => uiStore.trackPanelWidth);
 const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH + 40);
+
+// Import state
+const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
+
+// Density check: skip import waveform when zoomed out too far
+const effectiveZoom = computed(() => {
+  const dur = tracksStore.timelineDuration;
+  if (dur <= 0 || containerWidth.value <= 0) return 0;
+  return containerWidth.value / dur;
+});
+const showImportWaveform = computed(() => effectiveZoom.value >= 2);
+
+const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
 // Get clips for this track (supports multi-clip tracks)
 const trackClips = computed(() => tracksStore.getTrackClips(props.track.id));
@@ -224,6 +240,57 @@ function handleVolumeChange(value: number) {
   emit('setVolume', props.track.id, value);
 }
 
+// Draw static waveform for importing tracks (progressive fill-in)
+function drawImportWaveform() {
+  const canvas = importWaveformRef.value;
+  if (!canvas) return;
+  const waveform = props.track.audioData.waveformData;
+  if (!waveform || waveform.length === 0) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  const centerY = h / 2;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = props.track.color + '80'; // 50% opacity
+
+  const buckets = waveform.length / 2;
+  const pxPerBucket = w / buckets;
+
+  for (let i = 0; i < buckets; i++) {
+    const min = waveform[i * 2];
+    const max = waveform[i * 2 + 1];
+    if (min === 0 && max === 0) continue;
+
+    const x = i * pxPerBucket;
+    const minY = centerY - max * centerY;
+    const maxY = centerY - min * centerY;
+    ctx.fillRect(x, minY, Math.max(1, pxPerBucket), maxY - minY);
+  }
+}
+
+// Debounce waveform redraws — multiple chunk arrivals in one frame only trigger one draw
+function scheduleWaveformRedraw() {
+  if (waveformRafId !== null) return; // already scheduled
+  waveformRafId = requestAnimationFrame(() => {
+    waveformRafId = null;
+    drawImportWaveform();
+  });
+}
+
+watch(
+  () => [props.track.audioData.waveformData, containerWidth.value, isImporting.value],
+  () => {
+    if (isImporting.value) {
+      scheduleWaveformRedraw();
+    }
+  },
+  { deep: false }
+);
+
 onMounted(() => {
   updateWidth();
 
@@ -240,6 +307,9 @@ onUnmounted(() => {
   }
   if (clipDragRafId !== null) {
     cancelAnimationFrame(clipDragRafId);
+  }
+  if (waveformRafId !== null) {
+    cancelAnimationFrame(waveformRafId);
   }
 });
 </script>
@@ -313,12 +383,15 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
-              track.muted
-                ? 'bg-red-600 text-white'
-                : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
+              isImporting
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : track.muted
+                  ? 'bg-red-600 text-white'
+                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
             title="Mute"
-            @click.stop="emit('toggleMute', track.id)"
+            :disabled="isImporting"
+            @click.stop="!isImporting && emit('toggleMute', track.id)"
           >
             M
           </button>
@@ -327,21 +400,30 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
-              track.solo
-                ? 'bg-yellow-500 text-gray-900'
-                : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
+              isImporting
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : track.solo
+                  ? 'bg-yellow-500 text-gray-900'
+                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
             title="Solo"
-            @click.stop="emit('toggleSolo', track.id)"
+            :disabled="isImporting"
+            @click.stop="!isImporting && emit('toggleSolo', track.id)"
           >
             S
           </button>
 
           <button
             type="button"
-            class="w-5 h-5 text-[10px] font-bold rounded bg-gray-700 text-gray-400 hover:bg-green-600 hover:text-white transition-colors"
+            :class="[
+              'w-5 h-5 text-[10px] font-bold rounded transition-colors',
+              isImporting
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : 'bg-gray-700 text-gray-400 hover:bg-green-600 hover:text-white',
+            ]"
             title="Export"
-            @click.stop="emit('export', track.id)"
+            :disabled="isImporting"
+            @click.stop="!isImporting && emit('export', track.id)"
           >
             E
           </button>
@@ -384,7 +466,29 @@ onUnmounted(() => {
       ref="containerRef"
       class="flex-1 relative"
     >
-      <!-- Render each clip in the track -->
+      <!-- Static waveform for importing tracks (progressive fill-in) — only when zoomed in enough -->
+      <canvas
+        v-if="isImporting && showImportWaveform && track.audioData.waveformData.length > 0"
+        ref="importWaveformRef"
+        class="absolute inset-0 w-full h-full"
+        :width="containerWidth"
+        :height="TRACK_HEIGHT"
+      />
+      <!-- Colored box placeholder when import waveform is too dense to render -->
+      <div
+        v-else-if="isImporting && !showImportWaveform"
+        class="absolute inset-0 rounded"
+        :style="{ backgroundColor: track.color + '30' }"
+      />
+
+      <!-- Import progress — thin line creeping toward playable -->
+      <div
+        v-if="isImporting"
+        class="absolute bottom-0 left-0 h-0.5 bg-emerald-400 transition-[width] duration-200 ease-out pointer-events-none z-10"
+        :style="{ width: `${(track.importDecodeProgress || 0) * 100}%` }"
+      />
+
+      <!-- Render each clip in the track (only when not importing) -->
       <ClipRegion
         v-for="clip in trackClips"
         :key="clip.id"

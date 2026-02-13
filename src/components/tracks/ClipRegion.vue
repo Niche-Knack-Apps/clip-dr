@@ -58,10 +58,16 @@ const borderColor = computed(() => {
 // Waveform canvas
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 
-// Waveform data: from clip or track's main audioData
+// Waveform data: from clip or track's main audioData (overview resolution)
 const waveformData = computed(() => {
   if (props.clip?.waveformData) return props.clip.waveformData;
   return props.track.audioData.waveformData;
+});
+
+// AudioBuffer for on-demand high-res extraction when zoomed in
+const audioBuffer = computed(() => {
+  if (props.clip?.buffer) return props.clip.buffer;
+  return props.track.audioData.buffer;
 });
 
 // Waveform color: darker version of track color (~50% opacity)
@@ -70,12 +76,59 @@ const waveformColor = computed(() => {
   return `${props.track.color}80`; // 80 = 50% opacity
 });
 
+// Density check: skip waveform rendering when zoomed out too far
+const pxPerSecond = computed(() => {
+  if (clipDuration.value <= 0) return Infinity;
+  return width.value / clipDuration.value;
+});
+const showWaveform = computed(() => pxPerSecond.value >= 2);
+
+// Cache for high-res waveform extraction (avoid recomputing every frame)
+let hiResCache: { key: string; data: number[] } | null = null;
+
+/**
+ * Extract high-resolution peaks directly from the AudioBuffer for the current pixel width.
+ * Only called when zoomed in beyond the stored bucket resolution.
+ */
+function extractHiResPeaks(buffer: AudioBuffer, targetBuckets: number): number[] {
+  const cacheKey = `${buffer.length}_${targetBuckets}`;
+  if (hiResCache?.key === cacheKey) return hiResCache.data;
+
+  const channelData = buffer.getChannelData(0);
+  const samplesPerBucket = Math.ceil(channelData.length / targetBuckets);
+  const waveform: number[] = new Array(targetBuckets * 2);
+
+  for (let i = 0; i < targetBuckets; i++) {
+    const start = i * samplesPerBucket;
+    const end = Math.min(start + samplesPerBucket, channelData.length);
+    let min = 0;
+    let max = 0;
+    for (let j = start; j < end; j++) {
+      const s = channelData[j];
+      if (s < min) min = s;
+      if (s > max) max = s;
+    }
+    waveform[i * 2] = min;
+    waveform[i * 2 + 1] = max;
+  }
+
+  hiResCache = { key: cacheKey, data: waveform };
+  return waveform;
+}
+
 function drawWaveform() {
   const canvas = canvasRef.value;
   if (!canvas) return;
 
-  const data = waveformData.value;
-  if (!data || data.length < 2) return;
+  // When zoomed out too far, clear canvas and let the colored background show through
+  if (!showWaveform.value) {
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+
+  const overviewData = waveformData.value;
+  if (!overviewData || overviewData.length < 2) return;
 
   const pixelWidth = Math.max(2, width.value);
   const pixelHeight = canvas.clientHeight;
@@ -90,24 +143,34 @@ function drawWaveform() {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, pixelWidth, pixelHeight);
 
-  // Data is flattened min/max pairs: [min0, max0, min1, max1, ...]
-  const bucketCount = data.length / 2;
-  const centerY = pixelHeight / 2;
+  const overviewBuckets = overviewData.length / 2;
+  const barsNeeded = Math.floor(pixelWidth);
 
+  // Decide whether to use overview data or extract hi-res from AudioBuffer
+  // If we need more bars than buckets and buffer is available, extract on-demand
+  let data = overviewData;
+  let bucketCount = overviewBuckets;
+
+  if (barsNeeded > overviewBuckets * 1.5 && audioBuffer.value) {
+    // Zoomed in: extract higher-resolution peaks from the actual audio samples
+    const targetBuckets = Math.min(barsNeeded, 8000); // cap to avoid huge arrays
+    data = extractHiResPeaks(audioBuffer.value, targetBuckets);
+    bucketCount = targetBuckets;
+  }
+
+  const centerY = pixelHeight / 2;
   ctx.fillStyle = waveformColor.value;
   ctx.beginPath();
 
   // Downsample or upsample to fit pixel width
-  const barsToRender = Math.min(Math.floor(pixelWidth), bucketCount);
+  const barsToRender = Math.min(barsNeeded, bucketCount);
   const barWidth = pixelWidth / barsToRender;
   const bucketStep = bucketCount / barsToRender;
 
   for (let i = 0; i < barsToRender; i++) {
-    // Map bar index to bucket range
     const bucketStart = Math.floor(i * bucketStep);
     const bucketEnd = Math.min(Math.floor((i + 1) * bucketStep), bucketCount);
 
-    // Find min/max across the bucket range
     let min = 0;
     let max = 0;
     for (let b = bucketStart; b < bucketEnd; b++) {
@@ -116,7 +179,6 @@ function drawWaveform() {
       if (bMin < min) min = bMin;
       if (bMax > max) max = bMax;
     }
-    // If bucketEnd === bucketStart, use single bucket
     if (bucketEnd === bucketStart) {
       min = data[bucketStart * 2] ?? 0;
       max = data[bucketStart * 2 + 1] ?? 0;
@@ -133,8 +195,8 @@ function drawWaveform() {
   ctx.fill();
 }
 
-// Redraw when waveform data, width, or muted state changes
-watch([waveformData, width, waveformColor], () => {
+// Redraw when waveform data, width, muted state, or density threshold changes
+watch([waveformData, width, waveformColor, showWaveform], () => {
   nextTick(drawWaveform);
 });
 

@@ -4,7 +4,7 @@ mod commands;
 mod audio_clean;
 mod services;
 
-use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording};
+use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, import};
 use std::panic;
 
 fn main() {
@@ -26,6 +26,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .manage(import::ImportState::new())
         .setup(|app| {
             let app_handle = app.handle().clone();
             services::path_service::init(&app_handle)?;
@@ -71,6 +72,8 @@ fn main() {
             recording::stop_system_audio_monitoring,
             recording::probe_system_audio,
             transcribe::get_bundled_model_info,
+            import::import_audio_start,
+            import::import_audio_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

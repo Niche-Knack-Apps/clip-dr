@@ -101,7 +101,7 @@ const timelineWidth = computed(() => {
   const duration = tracksStore.timelineDuration;
   // Add 10% extra duration for padding when zoomed out
   const paddedDuration = duration * 1.1;
-  return Math.max(600, paddedDuration * trackZoom.value) + panelWidth.value;
+  return paddedDuration * trackZoom.value + panelWidth.value;
 });
 
 // Selection window overlay position on track list
@@ -122,7 +122,7 @@ const selectionOverlayWidth = computed(() => {
   return ((selectionStore.selection.end - selectionStore.selection.start) / duration) * timelineAreaWidth;
 });
 
-// Auto zoom all the way out when tracks are added via import or record
+// Auto zoom to fit when tracks are added via import or record
 // Only triggers for tracks with sourcePath (import/record), not clip creation or paste
 watch(
   () => tracksStore.tracks.length,
@@ -132,11 +132,21 @@ watch(
       const newest = tracksStore.tracks[tracksStore.tracks.length - 1];
       if (newest?.sourcePath) {
         await nextTick();
-        uiStore.setTrackZoom(uiStore.TRACK_ZOOM_MIN);
+        const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+        console.log(`[Zoom] tracks.length watcher: ${oldLen} → ${newLen}, sourcePath=${newest?.sourcePath}, scrollW=${scrollContainerRef.value?.clientWidth}, panelW=${panelWidth.value}, containerW=${containerW}, timelineDuration=${tracksStore.timelineDuration.toFixed(2)}`);
+        if (containerW > 0) {
+          uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
+        } else {
+          uiStore.setTrackZoom(uiStore.TRACK_ZOOM_MIN);
+        }
       }
     }
   }
 );
+
+watch(timelineWidth, (newW, oldW) => {
+  console.log(`[Zoom] timelineWidth changed: ${oldW?.toFixed(1)} → ${newW.toFixed(1)}, trackZoom=${trackZoom.value.toFixed(6)}, duration=${tracksStore.timelineDuration.toFixed(2)}, scrollContainerW=${scrollContainerRef.value?.clientWidth}`);
+});
 
 // Handle scroll wheel: Ctrl+wheel zooms, plain wheel scrolls natively
 function handleWheel(event: WheelEvent) {
@@ -370,6 +380,21 @@ onMounted(() => {
       }
     });
     contentResizeObserver.observe(contentRef.value);
+  }
+
+  // Auto-fit zoom on first mount when tracks already exist
+  // (tracks.length watcher misses the first import because TrackList
+  // wasn't mounted when the track was created)
+  // Use nextTick + rAF to ensure CSS layout is fully settled before measuring
+  if (tracksStore.tracks.length > 0 && scrollContainerRef.value) {
+    nextTick(() => {
+      requestAnimationFrame(() => {
+        const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+        if (containerW > 0) {
+          uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
+        }
+      });
+    });
   }
 });
 

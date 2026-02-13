@@ -174,7 +174,7 @@ onMounted(async () => {
         </button>
       </div>
 
-      <div class="p-4 space-y-6 overflow-y-auto flex-1">
+      <div class="px-6 py-4 space-y-6 overflow-y-auto flex-1">
         <!-- Playback -->
         <div>
           <h3 class="text-sm font-medium text-gray-300 mb-3">Playback</h3>

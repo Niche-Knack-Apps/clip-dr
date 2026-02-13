@@ -54,6 +54,35 @@ struct RecordingState {
     wav_writer: Option<WavWriter<BufWriter<File>>>,
 }
 
+/// Mix interleaved stereo samples to mono by averaging channels
+fn stereo_to_mono(samples: &[f32]) -> Vec<f32> {
+    samples.chunks(2)
+        .map(|pair| if pair.len() == 2 { (pair[0] + pair[1]) * 0.5 } else { pair[0] })
+        .collect()
+}
+
+/// Write samples to a new WAV file (used for mono rewrite after stereo recording)
+fn write_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u16) -> Result<(), String> {
+    let spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let file = File::create(path)
+        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+    let buf = BufWriter::new(file);
+    let mut writer = WavWriter::new(buf, spec)
+        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+    for &sample in samples {
+        writer.write_sample(sample)
+            .map_err(|e| format!("Failed to write sample: {}", e))?;
+    }
+    writer.finalize()
+        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
     let host = cpal::default_host();
@@ -494,30 +523,8 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         if let Some(writer) = state.wav_writer {
             drop(writer);
         }
-
-        // Mix stereo to mono by averaging channels
-        let mono: Vec<f32> = state.samples.chunks(2)
-            .map(|pair| if pair.len() == 2 { (pair[0] + pair[1]) * 0.5 } else { pair[0] })
-            .collect();
-
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: state.sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let file = File::create(&state.output_path)
-            .map_err(|e| format!("Failed to create output file: {}", e))?;
-        let buf = BufWriter::new(file);
-        let mut writer = WavWriter::new(buf, spec)
-            .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
-        for sample in &mono {
-            writer.write_sample(*sample)
-                .map_err(|e| format!("Failed to write sample: {}", e))?;
-        }
-        writer.finalize()
-            .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-
+        let mono = stereo_to_mono(&state.samples);
+        write_wav_file(&state.output_path, &mono, state.sample_rate, 1)?;
         1u16
     } else {
         // Finalize the existing incremental writer
@@ -1269,13 +1276,9 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
             if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
                 drop(wg.take());
             }
-
-            // Mix stereo to mono by averaging channels
-            let mono: Vec<f32> = samples.chunks(2)
-                .map(|pair| if pair.len() == 2 { (pair[0] + pair[1]) * 0.5 } else { pair[0] })
-                .collect();
-
-            let duration = write_system_audio_wav(&state.output_path, &mono, state.sample_rate, 1)?;
+            let mono = stereo_to_mono(&samples);
+            let duration = mono.len() as f64 / state.sample_rate as f64;
+            write_wav_file(&state.output_path, &mono, state.sample_rate, 1)?;
             (1u16, duration)
         } else {
             // Finalize the existing incremental writer
@@ -1306,44 +1309,6 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
     {
         Err("System audio recording only supported on Linux".to_string())
     }
-}
-
-/// Write accumulated samples to a WAV file
-#[cfg(target_os = "linux")]
-fn write_system_audio_wav(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u16) -> Result<f64, String> {
-    let spec = WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-
-    let file = File::create(path)
-        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
-    let writer = BufWriter::new(file);
-    let mut wav_writer = WavWriter::new(writer, spec)
-        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
-
-    for sample in samples {
-        wav_writer.write_sample(*sample)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
-    }
-
-    wav_writer.finalize()
-        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-
-    // Calculate duration
-    let duration = samples.len() as f64 / channels as f64 / sample_rate as f64;
-    Ok(duration)
-}
-
-#[cfg(target_os = "linux")]
-fn get_wav_duration(path: &PathBuf) -> Option<f64> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = hound::WavReader::new(file).ok()?;
-    let spec = reader.spec();
-    let samples = reader.len() as f64;
-    Some(samples / spec.channels as f64 / spec.sample_rate as f64)
 }
 
 /// Unmute the default audio input (Linux only)

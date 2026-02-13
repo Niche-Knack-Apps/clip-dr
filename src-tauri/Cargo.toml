@@ -1,6 +1,6 @@
 [package]
 name = "clip-dr"
-version = "0.8.0"
+version = "0.9.0"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = ["devtools", "protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
@@ -32,6 +32,9 @@ realfft = "3.4"
 
 # MP3 encoding
 mp3lame-encoder = "0.1"
+
+# Peak cache + WAV mmap
+memmap2 = "0.9"
 
 # Audio I/O for recording
 cpal = "0.15"

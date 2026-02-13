@@ -581,6 +581,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // ─── Background job queue ───
 
   function queueTranscription(trackId: string, priority: 'high' | 'normal' = 'normal'): void {
+    // Don't transcribe tracks that are still importing
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (track?.importStatus && track.importStatus !== 'ready') {
+      console.log(`[Transcription] Track ${trackId} still importing, skipping queue`);
+      return;
+    }
+
     // Skip if already queued or running for this track
     const existing = jobQueue.value.find(j => j.trackId === trackId && (j.status === 'queued' || j.status === 'running'));
     if (existing) {
@@ -663,6 +670,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function loadOrQueueTranscription(trackId: string): Promise<void> {
     logMapState(`loadOrQueueTranscription(${trackId.slice(0, 8)})`);
 
+    // Don't transcribe tracks that are still importing (no audio buffer yet)
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (track?.importStatus && track.importStatus !== 'ready') {
+      console.log(`[Transcription] Track ${trackId.slice(0, 8)} still importing, deferring transcription`);
+      return;
+    }
+
     // Already have it in memory?
     if (transcriptions.value.has(trackId)) {
       console.log(`[Transcription] Already in memory for track ${trackId.slice(0, 8)}, skipping`);
@@ -690,7 +704,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function saveTranscription(trackId: string): Promise<void> {
     const audioPath = getTrackPath(trackId);
     const t = transcriptions.value.get(trackId);
-    if (!audioPath || !t) return;
+    if (!audioPath || !t) {
+      console.warn(`[Transcription] Cannot save: audioPath=${audioPath}, hasData=${!!t}`);
+      return;
+    }
 
     const metadata: TranscriptionMetadata = {
       audioPath,
@@ -718,7 +735,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function loadTranscriptionFromDisk(trackId: string): Promise<boolean> {
     const audioPath = getTrackPath(trackId);
-    if (!audioPath) return false;
+    if (!audioPath) {
+      console.log(`[Transcription] No audio path for track ${trackId.slice(0, 8)}, cannot load sidecar`);
+      return false;
+    }
+    console.log(`[Transcription] Checking sidecar for: ${audioPath}`);
 
     try {
       const metadata = await invoke<TranscriptionMetadata | null>('load_transcription_metadata', {
@@ -748,9 +769,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return true;
       }
 
+      console.log(`[Transcription] Sidecar exists but empty/invalid for: ${audioPath}`);
       return false;
     } catch (e) {
-      console.log(`[Transcription] No existing transcription for track ${trackId}:`, e);
+      console.log(`[Transcription] No sidecar found for ${audioPath}:`, e);
       return false;
     }
   }
