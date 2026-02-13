@@ -930,6 +930,32 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     await saveTranscription(trackId);
   }
 
+  // ─── Export helpers ───
+
+  function exportAsJSON(trackId: string): string | null {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return null;
+    const track = tracksStore.tracks.find(tr => tr.id === trackId);
+    return JSON.stringify({
+      trackName: track?.name || 'Unknown',
+      words: t.words.map(w => ({ text: w.text, start: w.start, end: w.end })),
+      fullText: t.fullText,
+    }, null, 2);
+  }
+
+  function exportAsText(trackId: string): string | null {
+    const t = transcriptions.value.get(trackId);
+    if (!t) return null;
+
+    function fmt(seconds: number): string {
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      return `${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`;
+    }
+
+    return t.words.map(w => `[${fmt(w.start)} - ${fmt(w.end)}] ${w.text}`).join('\n');
+  }
+
   // ─── Exposed return ───
   return {
     transcriptions,
@@ -972,6 +998,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     transcriptionQuality,
     transcriptionOptions,
     setTranscriptionQuality,
+    // Export helpers
+    exportAsJSON,
+    exportAsText,
     // Misc
     loading,
     progress,

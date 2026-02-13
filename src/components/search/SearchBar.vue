@@ -2,7 +2,23 @@
 import { ref, watch } from 'vue';
 import { useSearch } from '@/composables/useSearch';
 
+const emit = defineEmits<{
+  focus: [];
+  blur: [];
+}>();
+
 const searchInput = ref<HTMLInputElement | null>(null);
+const isFocused = ref(false);
+
+function handleFocus() {
+  isFocused.value = true;
+  emit('focus');
+}
+
+function handleBlur() {
+  isFocused.value = false;
+  emit('blur');
+}
 
 const {
   query: _query,
@@ -55,6 +71,8 @@ defineExpose({ focus });
         placeholder="Search transcription..."
         class="w-full h-8 pl-8 pr-3 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500"
         @keydown="handleKeyDown"
+        @focus="handleFocus"
+        @blur="handleBlur"
       />
 
       <svg
