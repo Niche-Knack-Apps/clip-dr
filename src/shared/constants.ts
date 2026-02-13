@@ -45,6 +45,8 @@ export const DEFAULT_SETTINGS = {
   lastExportPath: '',
   // Recording channel mode
   recordingChannelMode: 'stereo' as const,
+  // Bottom bar shortcut hints
+  shortcutHints: ['help', 'jkl', 'cut', 'delete'],
 };
 
 export const KEYBOARD_SHORTCUTS = {
@@ -73,6 +75,24 @@ export const KEYBOARD_SHORTCUTS = {
   LOOP_ACTIVE: 'r',
   LOOP_CLIP: 't',
 } as const;
+
+export const ALL_SHORTCUT_HINTS = [
+  { id: 'help', keys: '?', label: 'All Shortcuts' },
+  { id: 'jkl', keys: 'J/K/L', label: 'Shuttle' },
+  { id: 'play', keys: 'Space', label: 'Play/Pause' },
+  { id: 'forward', keys: 'L/\u2192', label: 'Forward' },
+  { id: 'reverse', keys: 'J/\u2190', label: 'Reverse' },
+  { id: 'speed', keys: '\u2191/\u2193', label: 'Speed' },
+  { id: 'markers', keys: '</>', label: 'Markers' },
+  { id: 'inout', keys: 'I/O', label: 'In/Out' },
+  { id: 'clip', keys: 'C', label: 'Clip' },
+  { id: 'cut', keys: 'X', label: 'Cut' },
+  { id: 'delete', keys: 'Del', label: 'Delete' },
+  { id: 'paste', keys: 'V', label: 'Paste' },
+  { id: 'tab', keys: 'Tab', label: 'Next Track' },
+  { id: 'zoom', keys: '+/-', label: 'Zoom' },
+  { id: 'undo', keys: 'Ctrl+Z', label: 'Undo' },
+] as const;
 
 export const SUPPORTED_FORMATS = [
   '.mp3',

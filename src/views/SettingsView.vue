@@ -10,6 +10,7 @@ import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile } from '@/shared/types';
+import { ALL_SHORTCUT_HINTS, DEFAULT_SETTINGS } from '@/shared/constants';
 
 const APP_VERSION = '0.7.1';
 
@@ -56,6 +57,19 @@ function handleAddProfile() {
 
 function handleDeleteProfile(id: string) {
   settingsStore.deleteExportProfile(id);
+}
+
+function toggleHint(id: string) {
+  const current = settingsStore.settings.shortcutHints;
+  if (current.includes(id)) {
+    settingsStore.setShortcutHints(current.filter(h => h !== id));
+  } else {
+    settingsStore.setShortcutHints([...current, id]);
+  }
+}
+
+function resetHints() {
+  settingsStore.setShortcutHints([...DEFAULT_SETTINGS.shortcutHints]);
 }
 
 const displayPath = computed(() => {
@@ -527,6 +541,39 @@ onMounted(async () => {
                   {{ file }}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Bar Shortcuts -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Bottom Bar Shortcuts</h3>
+          <div class="space-y-2">
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="hint in ALL_SHORTCUT_HINTS"
+                :key="hint.id"
+                type="button"
+                class="px-2 py-1 text-xs rounded transition-colors"
+                :class="settingsStore.settings.shortcutHints.includes(hint.id)
+                  ? 'bg-cyan-600 text-white'
+                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600'"
+                @click="toggleHint(hint.id)"
+              >
+                {{ hint.keys }} {{ hint.label }}
+              </button>
+            </div>
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] text-gray-500">
+                Toggle which shortcuts appear in the bottom bar. Press <kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">?</kbd> to see all.
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                @click="resetHints"
+              >
+                Reset
+              </Button>
             </div>
           </div>
         </div>

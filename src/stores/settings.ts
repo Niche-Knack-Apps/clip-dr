@@ -215,6 +215,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setShortcutHints(hints: string[]): void {
+    settings.value.shortcutHints = hints;
+    saveSettings();
+  }
+
   function setLastExportPath(path: string): void {
     settings.value.lastExportPath = path;
     saveSettings();
@@ -306,5 +311,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setLastExportPath,
     // Recording channel mode
     setRecordingChannelMode,
+    // Bottom bar shortcut hints
+    setShortcutHints,
   };
 });

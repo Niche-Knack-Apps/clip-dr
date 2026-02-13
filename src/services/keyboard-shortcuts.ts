@@ -49,6 +49,8 @@ export interface KeyboardActions {
   onQuickExport?: () => void;
   // Loop mode shortcuts (Q/W/E/R/T)
   onSetLoopMode?: (mode: LoopMode) => void;
+  // Help modal
+  onShowHelp?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -171,6 +173,13 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
         updateJklPlayback();
         return;
       }
+    }
+
+    // ? for help modal (Shift+/ on most keyboards)
+    if (event.key === '?') {
+      event.preventDefault();
+      actions.onShowHelp?.();
+      return;
     }
 
     // Tab / Shift+Tab for track selection cycling

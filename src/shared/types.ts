@@ -186,6 +186,8 @@ export interface Settings {
   lastExportPath: string;
   // Recording channel mode
   recordingChannelMode: 'mono' | 'stereo';
+  // Bottom bar shortcut hints
+  shortcutHints: string[];
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';

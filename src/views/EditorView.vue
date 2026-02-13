@@ -17,6 +17,7 @@ import { useExportStore } from '@/stores/export';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useClipping } from '@/composables/useClipping';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
+import { ALL_SHORTCUT_HINTS } from '@/shared/constants';
 
 const { effectiveDuration } = useEffectiveAudio();
 const { createClip } = useClipping();
@@ -161,6 +162,15 @@ onUnmounted(() => {
   document.removeEventListener('mouseup', stopZoomedResize);
 });
 
+// Keyboard shortcuts modal
+const showShortcutsModal = ref(false);
+
+// Dynamic bottom bar hints
+const activeHints = computed(() => {
+  const enabled = settingsStore.settings.shortcutHints;
+  return ALL_SHORTCUT_HINTS.filter(h => enabled.includes(h.id));
+});
+
 useKeyboardShortcuts({
   onPlayPause: () => playbackStore.togglePlay(),
   onSetIn: () => selectionStore.setInPoint(playbackStore.currentTime),
@@ -233,6 +243,8 @@ useKeyboardShortcuts({
   },
   // Quick Re-Export (Ctrl+Shift+E)
   onQuickExport: () => exportStore.quickReExport(),
+  // Help modal
+  onShowHelp: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   // Loop mode shortcuts (Q/W/E/R/T) — also enables looping if disabled
   onSetLoopMode: (mode) => {
     if (!playbackStore.loopEnabled) {
@@ -296,23 +308,117 @@ useKeyboardShortcuts({
       </div>
     </template>
 
-    <!-- Keyboard shortcuts help -->
+    <!-- Keyboard shortcuts help (dynamic) -->
     <div class="shrink-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-gray-400">
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Space</kbd> Play/Pause</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">L</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">→</kbd> Forward</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">J</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">←</kbd> Reverse</span>
-      <span>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">K</kbd>=2x</span>
-      <span>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Shift</kbd>=0.5x</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">↑</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">↓</kbd> Speed</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">&lt;</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">&gt;</kbd> Markers</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">I</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">O</kbd> In/Out</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">C</kbd> Clip</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">X</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">V</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Del</kbd> Cut/Paste/Delete</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Tab</kbd> Next Track</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">+</kbd>/<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">-</kbd> Zoom</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Ctrl</kbd>+<kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Z</kbd> Undo</span>
-      <span><kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">Ctrl</kbd>+Scroll Zoom Tracks</span>
+      <span
+        v-for="hint in activeHints"
+        :key="hint.id"
+        :class="{ 'cursor-pointer hover:text-gray-200': hint.id === 'help' }"
+        @click="hint.id === 'help' ? (showShortcutsModal = true) : undefined"
+      >
+        <kbd class="px-1 py-0.5 bg-gray-700 text-gray-300 rounded">{{ hint.keys }}</kbd> {{ hint.label }}
+      </span>
       <span v-if="playbackStore.playbackSpeed !== 1" class="text-cyan-400">{{ playbackStore.playbackSpeed > 0 ? '' : '-' }}{{ Math.abs(playbackStore.playbackSpeed) }}x</span>
     </div>
+
+    <!-- Keyboard shortcuts modal -->
+    <Teleport to="body">
+      <div
+        v-if="showShortcutsModal"
+        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+        @click.self="showShortcutsModal = false"
+        @keydown.escape="showShortcutsModal = false"
+      >
+        <div class="bg-gray-900 rounded-lg shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+            <h2 class="text-lg font-medium">Keyboard Shortcuts</h2>
+            <button
+              type="button"
+              class="p-1 text-gray-400 hover:text-gray-200 transition-colors"
+              @click="showShortcutsModal = false"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <div class="p-4 space-y-4 overflow-y-auto flex-1 text-sm">
+            <!-- Playback -->
+            <div>
+              <h3 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-2">Playback</h3>
+              <div class="space-y-1">
+                <div class="flex justify-between"><span class="text-gray-400">Play / Pause</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Space</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Forward</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">L</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&rarr;</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Reverse</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">J</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&larr;</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">2x speed (hold with J/L)</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">K</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">0.5x speed (hold with J/L)</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Shift</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Speed up</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&uarr;</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Speed down</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&darr;</kbd></div>
+              </div>
+            </div>
+
+            <!-- Navigation -->
+            <div>
+              <h3 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-2">Navigation</h3>
+              <div class="space-y-1">
+                <div class="flex justify-between"><span class="text-gray-400">Jump to start / end</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Home</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">End</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Jump to In / Out point</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">[</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">]</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Jump to track start / end</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">S</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">D</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Previous / next marker</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&lt;</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&gt;</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Next / previous track</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Tab</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Shift+Tab</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Nudge (10ms per digit)</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">1</kbd>&ndash;<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">9</kbd></span></div>
+              </div>
+            </div>
+
+            <!-- Loop Modes -->
+            <div>
+              <h3 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-2">Loop Modes</h3>
+              <div class="space-y-1">
+                <div class="flex justify-between"><span class="text-gray-400">Full</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Q</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Zoom</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">W</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">In/Out</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">E</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Active tracks</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">R</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Clip</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">T</kbd></div>
+              </div>
+            </div>
+
+            <!-- Editing -->
+            <div>
+              <h3 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-2">Editing</h3>
+              <div class="space-y-1">
+                <div class="flex justify-between"><span class="text-gray-400">Set In / Out point</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">I</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">O</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Create clip</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">C</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Cut</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">X</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Paste</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">V</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Delete</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Del</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Cut / Copy / Paste (system)</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">X</kbd>/<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">C</kbd>/<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">V</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Undo / Redo</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Z</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Shift</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Z</kbd></span></div>
+              </div>
+            </div>
+
+            <!-- Zoom -->
+            <div>
+              <h3 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-2">Zoom</h3>
+              <div class="space-y-1">
+                <div class="flex justify-between"><span class="text-gray-400">Zoom in / out</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">+</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">-</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Zoom tracks</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+Scroll</span></div>
+              </div>
+            </div>
+
+            <!-- Other -->
+            <div>
+              <h3 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-2">Other</h3>
+              <div class="space-y-1">
+                <div class="flex justify-between"><span class="text-gray-400">Search</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">F</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Quick Re-Export</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Shift</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">E</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Mark time (while recording)</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">M</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Show this modal</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">?</kbd></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
