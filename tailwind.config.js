@@ -21,15 +21,6 @@ export default {
       fontFamily: {
         mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
       },
-      animation: {
-        shimmer: 'shimmer 1.5s ease-in-out infinite',
-      },
-      keyframes: {
-        shimmer: {
-          '0%, 100%': { opacity: '0' },
-          '50%': { opacity: '1' },
-        },
-      },
     },
   },
   plugins: [require('@tailwindcss/forms')],
