@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Track, TrackAudioData, TrackClip, ViewMode } from '@/shared/types';
+import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
@@ -1345,6 +1345,111 @@ export const useTracksStore = defineStore('tracks', () => {
     selectTrack(track.id);
   }
 
+  // Create a track that's in the process of importing (no audio buffer yet)
+  function createImportingTrack(
+    name: string,
+    metadata: { duration: number; sampleRate: number; channels: number },
+    trackStart: number,
+    sessionId: string,
+    sourcePath?: string
+  ): Track {
+    useHistoryStore().pushState('Import track');
+
+    const audioData: TrackAudioData = {
+      buffer: null,
+      waveformData: new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0),
+      sampleRate: metadata.sampleRate,
+      channels: metadata.channels,
+    };
+
+    const track: Track = {
+      id: generateId(),
+      name,
+      audioData,
+      trackStart,
+      duration: metadata.duration,
+      color: getNextColor(),
+      muted: false,
+      solo: false,
+      volume: 1,
+      sourcePath,
+      importStatus: 'importing',
+      importProgress: 0,
+      importSessionId: sessionId,
+    };
+
+    tracks.value = [...tracks.value, track];
+    console.log('[Tracks] Created importing track:', track.name, 'session:', sessionId);
+    return track;
+  }
+
+  // Update waveform data progressively during import
+  function updateImportWaveform(trackId: string, chunk: WaveformChunkEvent): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track || track.importStatus !== 'importing') return;
+
+    // Patch waveform at startBucket (each bucket is 2 values: min, max)
+    const waveform = [...track.audioData.waveformData];
+    const offset = chunk.startBucket * 2;
+    for (let i = 0; i < chunk.waveform.length && offset + i < waveform.length; i++) {
+      waveform[offset + i] = chunk.waveform[i];
+    }
+
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex !== -1) {
+      tracks.value[trackIndex] = {
+        ...track,
+        audioData: { ...track.audioData, waveformData: waveform },
+        importProgress: chunk.progress,
+      };
+      tracks.value = [...tracks.value];
+    }
+  }
+
+  // Finalize waveform after Rust decode completes (corrects VBR duration estimates)
+  function finalizeImportWaveform(trackId: string, finalWaveform: number[], actualDuration: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track) return;
+
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex !== -1) {
+      tracks.value[trackIndex] = {
+        ...track,
+        audioData: { ...track.audioData, waveformData: finalWaveform },
+        duration: actualDuration,
+        importStatus: 'decoding' as ImportStatus,
+        importProgress: 1,
+      };
+      tracks.value = [...tracks.value];
+    }
+    console.log('[Tracks] Finalized import waveform for:', track.name, 'actual duration:', actualDuration);
+  }
+
+  // Set the AudioBuffer after browser decode completes
+  function setImportBuffer(trackId: string, buffer: AudioBuffer): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track) return;
+
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex !== -1) {
+      tracks.value[trackIndex] = {
+        ...track,
+        audioData: {
+          ...track.audioData,
+          buffer,
+          sampleRate: buffer.sampleRate,
+          channels: buffer.numberOfChannels,
+        },
+        duration: buffer.duration,
+        importStatus: 'ready' as ImportStatus,
+        importProgress: undefined,
+        importSessionId: undefined,
+      };
+      tracks.value = [...tracks.value];
+    }
+    console.log('[Tracks] Import buffer set for:', track.name, 'duration:', buffer.duration);
+  }
+
   function removeTrackTimemark(trackId: string, timemarkId: string): void {
     const track = tracks.value.find(t => t.id === trackId);
     if (track?.timemarks) {
@@ -1397,5 +1502,9 @@ export const useTracksStore = defineStore('tracks', () => {
     resetMinTimelineDuration,
     activeDrag,
     removeTrackTimemark,
+    createImportingTrack,
+    updateImportWaveform,
+    finalizeImportWaveform,
+    setImportBuffer,
   };
 });

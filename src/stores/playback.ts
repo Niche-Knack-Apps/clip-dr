@@ -58,18 +58,21 @@ export const usePlaybackStore = defineStore('playback', () => {
     return tracksStore.timelineDuration;
   }
 
-  // Get all active tracks (respects mute/solo)
+  // Get all active tracks (respects mute/solo, excludes importing tracks)
   function getActiveTracks(): Track[] {
     const tracks = tracksStore.tracks;
 
+    // Filter out tracks that are still importing (no audio buffer yet)
+    const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready');
+
     // Check if any track is soloed
-    const soloedTracks = tracks.filter(t => t.solo && !t.muted);
+    const soloedTracks = playable.filter(t => t.solo && !t.muted);
     if (soloedTracks.length > 0) {
       return soloedTracks;
     }
 
     // No solo - get all unmuted tracks
-    return tracks.filter(t => !t.muted);
+    return playable.filter(t => !t.muted);
   }
 
   // Get clips that are active at a specific time (handles both multi-clip and single-buffer tracks)

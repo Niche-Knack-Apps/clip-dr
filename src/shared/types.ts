@@ -98,6 +98,26 @@ export const TRACK_COLORS = [
   '#fcbad3', // pink
 ] as const;
 
+export type ImportStatus = 'importing' | 'decoding' | 'ready' | 'error';
+
+export interface ImportStartResult {
+  sessionId: string;
+  metadata: AudioMetadata;
+}
+
+export interface WaveformChunkEvent {
+  sessionId: string;
+  startBucket: number;
+  waveform: number[];
+  progress: number;
+}
+
+export interface ImportCompleteEvent {
+  sessionId: string;
+  waveform: number[];
+  actualDuration: number;
+}
+
 export interface Track {
   id: string;
   name: string;
@@ -120,6 +140,12 @@ export interface Track {
   clips?: TrackClip[];
   /** Timemarks/reference points placed during recording */
   timemarks?: TimeMark[];
+  /** Import status — undefined for existing/recording tracks */
+  importStatus?: ImportStatus;
+  /** Import progress 0-1 */
+  importProgress?: number;
+  /** Active import session ID */
+  importSessionId?: string;
 }
 
 /** @deprecated Clips are now part of tracks */

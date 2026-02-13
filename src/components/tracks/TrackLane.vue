@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import ClipRegion from './ClipRegion.vue';
 import Playhead from '@/components/waveform/Playhead.vue';
 import Slider from '@/components/ui/Slider.vue';
@@ -62,6 +62,19 @@ const duration = computed(() => tracksStore.timelineDuration);
 const currentTime = computed(() => playbackStore.currentTime);
 const panelWidth = computed(() => uiStore.trackPanelWidth);
 const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH + 40);
+
+// Import state
+const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
+const importLabel = computed(() => {
+  if (props.track.importStatus === 'importing') {
+    return `Loading ${Math.round((props.track.importProgress || 0) * 100)}%`;
+  }
+  if (props.track.importStatus === 'decoding') {
+    return 'Preparing audio...';
+  }
+  return '';
+});
+const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
 // Get clips for this track (supports multi-clip tracks)
 const trackClips = computed(() => tracksStore.getTrackClips(props.track.id));
@@ -224,6 +237,48 @@ function handleVolumeChange(value: number) {
   emit('setVolume', props.track.id, value);
 }
 
+// Draw static waveform for importing tracks (progressive fill-in)
+function drawImportWaveform() {
+  const canvas = importWaveformRef.value;
+  if (!canvas) return;
+  const waveform = props.track.audioData.waveformData;
+  if (!waveform || waveform.length === 0) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  const centerY = h / 2;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = props.track.color + '80'; // 50% opacity
+
+  const buckets = waveform.length / 2;
+  const pxPerBucket = w / buckets;
+
+  for (let i = 0; i < buckets; i++) {
+    const min = waveform[i * 2];
+    const max = waveform[i * 2 + 1];
+    if (min === 0 && max === 0) continue;
+
+    const x = i * pxPerBucket;
+    const minY = centerY - max * centerY;
+    const maxY = centerY - min * centerY;
+    ctx.fillRect(x, minY, Math.max(1, pxPerBucket), maxY - minY);
+  }
+}
+
+watch(
+  () => [props.track.audioData.waveformData, containerWidth.value, isImporting.value],
+  () => {
+    if (isImporting.value) {
+      nextTick(drawImportWaveform);
+    }
+  },
+  { deep: false }
+);
+
 onMounted(() => {
   updateWidth();
 
@@ -313,12 +368,15 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
-              track.muted
-                ? 'bg-red-600 text-white'
-                : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
+              isImporting
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : track.muted
+                  ? 'bg-red-600 text-white'
+                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
             title="Mute"
-            @click.stop="emit('toggleMute', track.id)"
+            :disabled="isImporting"
+            @click.stop="!isImporting && emit('toggleMute', track.id)"
           >
             M
           </button>
@@ -327,21 +385,30 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
-              track.solo
-                ? 'bg-yellow-500 text-gray-900'
-                : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
+              isImporting
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : track.solo
+                  ? 'bg-yellow-500 text-gray-900'
+                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
             title="Solo"
-            @click.stop="emit('toggleSolo', track.id)"
+            :disabled="isImporting"
+            @click.stop="!isImporting && emit('toggleSolo', track.id)"
           >
             S
           </button>
 
           <button
             type="button"
-            class="w-5 h-5 text-[10px] font-bold rounded bg-gray-700 text-gray-400 hover:bg-green-600 hover:text-white transition-colors"
+            :class="[
+              'w-5 h-5 text-[10px] font-bold rounded transition-colors',
+              isImporting
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : 'bg-gray-700 text-gray-400 hover:bg-green-600 hover:text-white',
+            ]"
             title="Export"
-            @click.stop="emit('export', track.id)"
+            :disabled="isImporting"
+            @click.stop="!isImporting && emit('export', track.id)"
           >
             E
           </button>
@@ -384,7 +451,33 @@ onUnmounted(() => {
       ref="containerRef"
       class="flex-1 relative"
     >
-      <!-- Render each clip in the track -->
+      <!-- Static waveform for importing tracks (progressive fill-in) -->
+      <canvas
+        v-if="isImporting && track.audioData.waveformData.length > 0"
+        ref="importWaveformRef"
+        class="absolute inset-0 w-full h-full"
+        :width="containerWidth"
+        :height="TRACK_HEIGHT"
+      />
+
+      <!-- Import progress overlay -->
+      <div v-if="isImporting" class="absolute inset-0 z-10 pointer-events-none">
+        <!-- Semi-transparent overlay -->
+        <div class="absolute inset-0 bg-gray-900/60" />
+        <!-- Progress bar at bottom -->
+        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gray-700">
+          <div
+            class="h-full bg-cyan-500 transition-all duration-200"
+            :style="{ width: `${(track.importProgress || 0) * 100}%` }"
+          />
+        </div>
+        <!-- Status label -->
+        <div class="absolute inset-0 flex items-center justify-center">
+          <span class="text-xs text-cyan-400">{{ importLabel }}</span>
+        </div>
+      </div>
+
+      <!-- Render each clip in the track (only when not importing) -->
       <ClipRegion
         v-for="clip in trackClips"
         :key="clip.id"

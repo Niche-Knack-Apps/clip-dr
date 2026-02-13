@@ -581,6 +581,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // ─── Background job queue ───
 
   function queueTranscription(trackId: string, priority: 'high' | 'normal' = 'normal'): void {
+    // Don't transcribe tracks that are still importing
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (track?.importStatus && track.importStatus !== 'ready') {
+      console.log(`[Transcription] Track ${trackId} still importing, skipping queue`);
+      return;
+    }
+
     // Skip if already queued or running for this track
     const existing = jobQueue.value.find(j => j.trackId === trackId && (j.status === 'queued' || j.status === 'running'));
     if (existing) {
@@ -662,6 +669,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function loadOrQueueTranscription(trackId: string): Promise<void> {
     logMapState(`loadOrQueueTranscription(${trackId.slice(0, 8)})`);
+
+    // Don't transcribe tracks that are still importing (no audio buffer yet)
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (track?.importStatus && track.importStatus !== 'ready') {
+      console.log(`[Transcription] Track ${trackId.slice(0, 8)} still importing, deferring transcription`);
+      return;
+    }
 
     // Already have it in memory?
     if (transcriptions.value.has(trackId)) {
