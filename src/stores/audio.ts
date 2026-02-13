@@ -165,6 +165,8 @@ export const useAudioStore = defineStore('audio', () => {
           const reader = response.body.getReader();
           const chunks: Uint8Array[] = [];
           let received = 0;
+          let lastReportedProgress = 0;
+          let progressRafId: number | null = null;
 
           while (true) {
             const { done, value } = await reader.read();
@@ -172,9 +174,18 @@ export const useAudioStore = defineStore('audio', () => {
             chunks.push(value);
             received += value.length;
             // Report fetch progress (0-0.8 of decode phase, 0.8-1.0 reserved for decodeAudioData)
-            const fetchProgress = Math.min(received / contentLength, 1) * 0.8;
-            tracksStore.updateImportDecodeProgress(trackId, fetchProgress);
+            lastReportedProgress = Math.min(received / contentLength, 1) * 0.8;
+
+            // Throttle progress updates to one per animation frame
+            if (progressRafId === null) {
+              progressRafId = requestAnimationFrame(() => {
+                progressRafId = null;
+                tracksStore.updateImportDecodeProgress(trackId, lastReportedProgress);
+              });
+            }
           }
+          // Ensure final fetch progress is reported
+          if (progressRafId !== null) cancelAnimationFrame(progressRafId);
 
           console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(received / 1024 / 1024).toFixed(1)}MB streamed`);
 
