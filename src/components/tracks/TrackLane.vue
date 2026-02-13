@@ -69,12 +69,13 @@ const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH
 // Import state
 const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
 
-// Combined progress: waveform (30% weight) + audio fetch/decode (70% weight)
+/// Progress: waveform decode is the meaningful indicator for local files.
+// Browser fetch is instant (asset protocol), decodeAudioData has no progress callback.
+// Waveform progress fills 0→95%, last 5% reserved for "finalizing" state.
 const combinedProgress = computed(() => {
   if (!isImporting.value) return 1;
-  const waveformProg = props.track.importProgress || 0;
-  const decodeProg = props.track.importDecodeProgress || 0;
-  return waveformProg * 0.3 + decodeProg * 0.7;
+  if (props.track.importStatus === 'decoding') return 0.95;
+  return Math.min((props.track.importProgress || 0) * 0.95, 0.95);
 });
 const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
