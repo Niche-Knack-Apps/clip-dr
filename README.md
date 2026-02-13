@@ -6,7 +6,7 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 
 **Import:** MP3, WAV, FLAC, M4A, OGG, AAC, WMA
 
-**Export:** WAV, MP3 (128/192/256/320 kbps)
+**Export:** WAV, MP3 (128/192/256/320 kbps), FLAC, OGG
 
 ## Features
 
@@ -18,11 +18,15 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 - Mute, solo, and per-track volume controls
 - Per-track color coding
 - Export individual tracks or all active tracks mixed together
+- Inline export profile presets in toolbar for one-click export
 - Add empty tracks for organization
 - Resizable track control panel (80-300px)
 
 ### Recording
 - Record from microphone or system audio (PipeWire/PulseAudio)
+- Dedicated mic and system audio buttons in toolbar for one-click recording
+- Mono/stereo channel mode toggle (persisted across sessions)
+- Crash-safe incremental WAV writing (recoverable on unexpected exit)
 - Real-time level meter and duration counter
 - Input device selection
 - Track placement options: append, at playhead, or at time zero
@@ -41,6 +45,8 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 - **Zoomed waveform (Panel 2):** Shows the selection window contents zoomed in, with In/Out marker handles
 - Scroll-wheel zoom on both panels
 - Click to set playhead, drag to create I/O selection
+- Right-click on waveform to add a marker; right-click a marker to delete it
+- Drag markers to reposition them on the timeline
 - Follow-playhead mode (auto-scroll during playback)
 - Resizable panel heights via drag dividers
 
@@ -76,6 +82,7 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 - Clickable word timeline for navigation
 - Live transcription during recording
 - Re-transcribe selected tracks
+- Download transcription as JSON (word-level timestamps) or plain text
 
 ## Keyboard Shortcuts
 
@@ -88,8 +95,10 @@ A multi-track audio editor for cutting, arranging, and exporting clips. Built wi
 | `J` or `Left` | Play reverse |
 | `K` (hold with J/L) | 2x speed |
 | `Shift` (hold with J/L) | 0.5x speed |
-| `.` / `>` | Speed up |
-| `,` / `<` | Speed down |
+| `ArrowUp` | Speed up |
+| `ArrowDown` | Speed down |
+| `>` | Jump to next marker |
+| `<` | Jump to previous marker |
 | `1`-`9` | Nudge playhead (10ms per digit) |
 
 ### Navigation
