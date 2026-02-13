@@ -1,7 +1,10 @@
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use symphonia::core::audio::SampleBuffer;
@@ -14,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use super::audio::AudioMetadata;
+use crate::services::path_service;
 
 pub struct ImportSession {
     cancel: Arc<AtomicBool>,
@@ -60,6 +64,95 @@ struct ImportCompleteEvent {
 struct ImportErrorEvent {
     session_id: String,
     error: String,
+}
+
+// ── Peak cache ──────────────────────────────────────────────────────────
+// Binary format: [magic 4B][version 1B][hash 8B][bucket_count 4B][duration 8B][peaks N*2*4B]
+const PEAK_MAGIC: &[u8; 4] = b"CLPK";
+const PEAK_VERSION: u8 = 1;
+
+/// Compute a cache key from file path + size + mtime.
+fn peak_cache_key(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    if let Ok(mtime) = meta.modified() {
+        mtime.hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Get the cache file path for a given audio file.
+fn peak_cache_path(file_hash: u64, bucket_count: usize) -> Option<PathBuf> {
+    let data_dir = path_service::get_user_data_dir().ok()?;
+    let cache_dir = data_dir.join("peak-cache");
+    fs::create_dir_all(&cache_dir).ok()?;
+    Some(cache_dir.join(format!("{:016x}_{}.peaks", file_hash, bucket_count)))
+}
+
+/// Try to load cached peaks. Returns (waveform, actual_duration) if valid cache exists.
+fn load_peak_cache(path: &Path, bucket_count: usize) -> Option<(Vec<f32>, f64)> {
+    let file_hash = peak_cache_key(path)?;
+    let cache_path = peak_cache_path(file_hash, bucket_count)?;
+
+    let mut file = File::open(&cache_path).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+
+    // Validate header
+    if buf.len() < 25 { return None; } // 4+1+8+4+8 = 25 bytes minimum header
+    if &buf[0..4] != PEAK_MAGIC { return None; }
+    if buf[4] != PEAK_VERSION { return None; }
+
+    let stored_hash = u64::from_le_bytes(buf[5..13].try_into().ok()?);
+    if stored_hash != file_hash { return None; }
+
+    let stored_buckets = u32::from_le_bytes(buf[13..17].try_into().ok()?) as usize;
+    if stored_buckets != bucket_count { return None; }
+
+    let duration = f64::from_le_bytes(buf[17..25].try_into().ok()?);
+
+    // Read peaks (min/max pairs as f32)
+    let peak_bytes = &buf[25..];
+    let expected_len = bucket_count * 2 * 4; // min+max per bucket, 4 bytes each
+    if peak_bytes.len() < expected_len { return None; }
+
+    let peaks: Vec<f32> = peak_bytes[..expected_len]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    log::info!("Peak cache hit for {:?} ({} buckets)", path, bucket_count);
+    Some((peaks, duration))
+}
+
+/// Write peaks to cache file.
+fn save_peak_cache(path: &Path, bucket_count: usize, waveform: &[f32], duration: f64) {
+    let file_hash = match peak_cache_key(path) {
+        Some(h) => h,
+        None => return,
+    };
+    let cache_path = match peak_cache_path(file_hash, bucket_count) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let mut buf = Vec::with_capacity(25 + waveform.len() * 4);
+    buf.extend_from_slice(PEAK_MAGIC);
+    buf.push(PEAK_VERSION);
+    buf.extend_from_slice(&file_hash.to_le_bytes());
+    buf.extend_from_slice(&(bucket_count as u32).to_le_bytes());
+    buf.extend_from_slice(&duration.to_le_bytes());
+    for &val in waveform {
+        buf.extend_from_slice(&val.to_le_bytes());
+    }
+
+    if let Err(e) = File::create(&cache_path).and_then(|mut f| f.write_all(&buf)) {
+        log::warn!("Failed to write peak cache {:?}: {}", cache_path, e);
+    } else {
+        log::info!("Peak cache saved: {:?} ({} buckets)", cache_path, bucket_count);
+    }
 }
 
 #[tauri::command]
@@ -201,6 +294,20 @@ fn decode_waveform_progressive(
     app_handle: &AppHandle,
 ) -> Result<(), String> {
     let path_ref = Path::new(path);
+
+    // ── Check peak cache first ──────────────────────────────────────────
+    if let Some((cached_waveform, cached_duration)) = load_peak_cache(path_ref, bucket_count) {
+        // Cache hit — emit full waveform immediately, skip decode
+        let _ = app_handle.emit(
+            "import-complete",
+            ImportCompleteEvent {
+                session_id: session_id.to_string(),
+                waveform: cached_waveform,
+                actual_duration: cached_duration,
+            },
+        );
+        return Ok(());
+    }
 
     let file = File::open(path_ref).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -346,6 +453,9 @@ fn decode_waveform_progressive(
     };
 
     let actual_duration = total_decoded as f64 / sample_rate as f64;
+
+    // Save to peak cache for instant reopening
+    save_peak_cache(path_ref, bucket_count, &final_waveform, actual_duration);
 
     let _ = app_handle.emit(
         "import-complete",

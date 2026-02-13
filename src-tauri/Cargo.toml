@@ -33,6 +33,9 @@ realfft = "3.4"
 # MP3 encoding
 mp3lame-encoder = "0.1"
 
+# Peak cache + WAV mmap
+memmap2 = "0.9"
+
 # Audio I/O for recording
 cpal = "0.15"
 lazy_static = "1.4"
