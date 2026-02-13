@@ -1345,11 +1345,43 @@ export const useTracksStore = defineStore('tracks', () => {
     selectTrack(track.id);
   }
 
+  /** Add a timemark to any track (not just during recording) */
+  function addTimemark(trackId: string, time: number, label: string, source: 'manual' | 'auto' = 'manual'): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track) return;
+
+    const historyStore = useHistoryStore();
+    historyStore.pushState('Add marker');
+
+    if (!track.timemarks) track.timemarks = [];
+    track.timemarks.push({
+      id: generateId(),
+      time,
+      label,
+      source,
+      color: source === 'manual' ? '#00d4ff' : '#fbbf24',
+    });
+  }
+
+  /** Update a timemark's time (for drag) — no history push (caller handles it at drag start) */
+  function updateTimemarkTime(trackId: string, timemarkId: string, newTime: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track || !track.timemarks) return;
+
+    const mark = track.timemarks.find(m => m.id === timemarkId);
+    if (mark) {
+      mark.time = Math.max(0, newTime);
+    }
+  }
+
   function removeTrackTimemark(trackId: string, timemarkId: string): void {
     const track = tracks.value.find(t => t.id === trackId);
-    if (track?.timemarks) {
-      track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
-    }
+    if (!track?.timemarks) return;
+
+    const historyStore = useHistoryStore();
+    historyStore.pushState('Remove marker');
+
+    track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
   }
 
   return {
@@ -1396,6 +1428,8 @@ export const useTracksStore = defineStore('tracks', () => {
     addEmptyTrack,
     resetMinTimelineDuration,
     activeDrag,
+    addTimemark,
+    updateTimemarkTime,
     removeTrackTimemark,
   };
 });

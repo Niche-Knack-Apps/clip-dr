@@ -11,6 +11,7 @@ import { useSilenceStore } from '@/stores/silence';
 import { useTracksStore } from '@/stores/tracks';
 import { useUIStore } from '@/stores/ui';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
+import { useTimemarkInteraction } from '@/composables/useTimemarkInteraction';
 import { formatTime } from '@/shared/utils';
 import { ZOOMED_HEIGHT } from '@/shared/constants';
 
@@ -32,6 +33,19 @@ const uiStore = useUIStore();
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
+
+// Timemark interaction (context menu + drag) — shared composable
+const {
+  contextMenu,
+  timemarkDrag,
+  handleContextMenu,
+  handleTimemarkContextMenu,
+  handleDeleteMarker,
+  handleTimemarkDragStart,
+} = useTimemarkInteraction(
+  containerRef,
+  () => ({ start: selection.value.start, end: selection.value.end }),
+);
 
 // Drag state
 type DragMode = 'none' | 'scrub' | 'select' | 'in' | 'out';
@@ -72,7 +86,7 @@ const visibleTimemarks = computed(() => {
   const end = selection.value.end;
   const range = end - start;
   if (range <= 0 || containerWidth.value <= 0) return [];
-  const marks: { id: string; label: string; color: string; pixelLeft: number; time: number; trackStart: number }[] = [];
+  const marks: { id: string; trackId: string; label: string; color: string; pixelLeft: number; time: number; trackStart: number }[] = [];
   for (const track of tracksStore.tracks) {
     if (!track.timemarks) continue;
     for (const mark of track.timemarks) {
@@ -80,6 +94,7 @@ const visibleTimemarks = computed(() => {
       if (absTime >= start && absTime <= end) {
         marks.push({
           id: mark.id,
+          trackId: track.id,
           label: mark.label,
           color: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
           pixelLeft: ((absTime - start) / range) * containerWidth.value,
@@ -429,6 +444,7 @@ onUnmounted(() => {
       :style="{ height: `${props.height}px` }"
       @mousedown="handleMouseDown"
       @wheel.prevent="handleWheel"
+      @contextmenu.prevent="handleContextMenu"
     >
       <WaveformCanvas
         :start-time="selection.start"
@@ -452,14 +468,17 @@ onUnmounted(() => {
         @restore="handleSilenceRestore"
       />
 
-      <!-- Timemark indicators -->
+      <!-- Timemark indicators (draggable + right-click to delete) -->
       <div
         v-for="mark in visibleTimemarks"
         :key="mark.id"
-        class="absolute top-0 bottom-0 z-10 cursor-pointer group/tm"
+        class="absolute top-0 bottom-0 z-15 cursor-grab group/tm"
+        :class="{ 'cursor-grabbing': timemarkDrag?.markId === mark.id }"
         :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
         :title="mark.label"
+        @mousedown="handleTimemarkDragStart($event, mark.trackId, mark.id, mark.time)"
         @click.stop="handleTimemarkClick(mark.trackStart, mark.time)"
+        @contextmenu.prevent.stop="handleTimemarkContextMenu($event, mark.trackId, mark.id)"
       >
         <div
           class="absolute top-0 left-0"
@@ -547,5 +566,22 @@ onUnmounted(() => {
         <span>{{ formatTime(selection.end) }}</span>
       </div>
     </div>
+
+    <!-- Context menu for marker deletion -->
+    <Teleport to="body">
+      <div
+        v-if="contextMenu"
+        class="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 min-w-[140px]"
+        :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        @click.stop
+      >
+        <button
+          class="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700 transition-colors"
+          @click="handleDeleteMarker"
+        >
+          Delete marker
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
