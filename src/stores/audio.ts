@@ -38,6 +38,10 @@ export const useAudioStore = defineStore('audio', () => {
   }
 
   // Import a file using progressive three-phase approach
+  // Phase 1: metadata probe (~30ms) → track visible instantly
+  // Phase 2: Rust waveform decode (background) → progressive fill-in
+  // Phase 3: Browser decode via asset protocol → buffer ready for playback
+  // Key: buffer is set as soon as browser decode finishes — does NOT wait for waveform
   async function importFile(path: string): Promise<void> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Import file');
@@ -76,63 +80,48 @@ export const useAudioStore = defineStore('audio', () => {
       tracksStore.selectTrack(trackId);
       lastImportedPath.value = path;
 
-      // Phase 2: Listen for progressive waveform chunks from Rust
+      // Phase 2: Listen for progressive waveform chunks from Rust (runs in background)
       const unlistenChunk = await listen<WaveformChunkEvent>('import-waveform-chunk', (event) => {
         if (event.payload.sessionId !== sessionId) return;
-        // Check track still exists (may have been undone/deleted)
         const track = tracksStore.tracks.find(t => t.id === trackId);
         if (!track) return;
         tracksStore.updateImportWaveform(trackId, event.payload);
       });
 
-      const waveformDone = new Promise<void>((resolve, reject) => {
-        let unlistenComplete: (() => void) | null = null;
-        let unlistenError: (() => void) | null = null;
-
-        const cleanup = () => {
-          unlistenComplete?.();
-          unlistenError?.();
-        };
-
-        listen<ImportCompleteEvent>('import-complete', (event) => {
-          if (event.payload.sessionId !== sessionId) return;
-          const track = tracksStore.tracks.find(t => t.id === trackId);
-          if (track) {
-            tracksStore.finalizeImportWaveform(trackId, event.payload.waveform, event.payload.actualDuration);
-          }
-          cleanup();
-          resolve();
-        }).then(fn => { unlistenComplete = fn; });
-
+      // Waveform completion listener — runs independently, does NOT block playback
+      listen<ImportCompleteEvent>('import-complete', (event) => {
+        if (event.payload.sessionId !== sessionId) return;
+        const track = tracksStore.tracks.find(t => t.id === trackId);
+        if (track) {
+          tracksStore.finalizeImportWaveform(trackId, event.payload.waveform, event.payload.actualDuration);
+          console.log(`[Audio] Waveform complete in ${((performance.now() - startTime) / 1000).toFixed(1)}s`);
+        }
+        unlistenChunk();
+      }).then(unlisten => {
+        // Also listen for errors to clean up
         listen<{ sessionId: string; error: string }>('import-error', (event) => {
           if (event.payload.sessionId !== sessionId) return;
-          cleanup();
-          reject(new Error(event.payload.error));
-        }).then(fn => { unlistenError = fn; });
+          console.error('[Audio] Waveform decode error:', event.payload.error);
+          unlisten();
+          unlistenChunk();
+        });
       });
 
       // Phase 3: Browser decodes audio via asset protocol (concurrent with Phase 2)
-      const browserDecodePromise = (async () => {
-        try {
-          const assetUrl = convertFileSrc(path);
-          console.log('[Audio] Phase 3: fetching via asset protocol:', assetUrl);
-          const response = await fetch(assetUrl);
-          const arrayBuffer = await response.arrayBuffer();
-          console.log(`[Audio] Phase 3: fetched ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB, decoding...`);
-          const buffer = await ctx.decodeAudioData(arrayBuffer);
-          console.log(`[Audio] Phase 3: browser decode done, duration: ${buffer.duration.toFixed(2)}s`);
-          return buffer;
-        } catch (e) {
-          console.warn('[Audio] Phase 3 failed (browser decode), will fall back to legacy:', e);
-          return null;
-        }
-      })();
+      let audioBuffer: AudioBuffer | null = null;
+      try {
+        const assetUrl = convertFileSrc(path);
+        console.log('[Audio] Phase 3: fetching via asset protocol:', assetUrl);
+        const response = await fetch(assetUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        console.log(`[Audio] Phase 3: fetched ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB, decoding...`);
+        audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        console.log(`[Audio] Phase 3: browser decode done, duration: ${audioBuffer.duration.toFixed(2)}s`);
+      } catch (e) {
+        console.warn('[Audio] Phase 3 failed (browser decode), will fall back to legacy:', e);
+      }
 
-      // Wait for both phases to complete
-      const [, audioBuffer] = await Promise.all([waveformDone, browserDecodePromise]);
-      unlistenChunk();
-
-      // Check track still exists
+      // Check track still exists (may have been deleted during decode)
       const track = tracksStore.tracks.find(t => t.id === trackId);
       if (!track) {
         console.log('[Audio] Track was deleted during import, discarding');
@@ -141,17 +130,18 @@ export const useAudioStore = defineStore('audio', () => {
       }
 
       if (audioBuffer) {
-        // Success: set the browser-decoded buffer
+        // Set buffer immediately — track becomes playable NOW
+        // Waveform continues filling in the background (Phase 2 still running)
         tracksStore.setImportBuffer(trackId, audioBuffer);
         const totalTime = performance.now() - startTime;
-        console.log(`[Audio] Progressive import complete in ${(totalTime / 1000).toFixed(2)}s`);
+        console.log(`[Audio] Buffer ready in ${(totalTime / 1000).toFixed(2)}s — playback enabled`);
       } else {
         // Fallback: browser couldn't decode (e.g. WMA) — use legacy monolithic load
         console.warn('[Audio] Falling back to legacy load_audio_complete...');
         await importFileLegacy(path, trackId, ctx);
       }
 
-      // Now that audio is fully loaded, trigger transcription
+      // Now that audio is loaded, trigger transcription
       const { useTranscriptionStore } = await import('./transcription');
       const transcriptionStore = useTranscriptionStore();
       transcriptionStore.loadOrQueueTranscription(trackId);

@@ -463,17 +463,26 @@ onUnmounted(() => {
       <!-- Import progress overlay -->
       <div v-if="isImporting" class="absolute inset-0 z-10 pointer-events-none">
         <!-- Semi-transparent overlay -->
-        <div class="absolute inset-0 bg-gray-900/60" />
+        <div class="absolute inset-0 bg-gray-900/70" />
         <!-- Progress bar at bottom -->
-        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gray-700">
+        <div class="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-700">
           <div
-            class="h-full bg-cyan-500 transition-all duration-200"
+            class="h-full bg-cyan-500 transition-all duration-300"
             :style="{ width: `${(track.importProgress || 0) * 100}%` }"
           />
+          <!-- Animated shimmer on progress bar -->
+          <div
+            class="absolute top-0 h-full w-16 bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent animate-shimmer"
+            :style="{ left: `${Math.max(0, (track.importProgress || 0) * 100 - 8)}%` }"
+          />
         </div>
-        <!-- Status label -->
-        <div class="absolute inset-0 flex items-center justify-center">
-          <span class="text-xs text-cyan-400">{{ importLabel }}</span>
+        <!-- Status label with spinner -->
+        <div class="absolute inset-0 flex items-center justify-center gap-2">
+          <svg class="w-4 h-4 text-cyan-400 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" />
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <span class="text-sm font-medium text-cyan-400">{{ importLabel }}</span>
         </div>
       </div>
 

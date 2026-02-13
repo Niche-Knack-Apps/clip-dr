@@ -1386,7 +1386,7 @@ export const useTracksStore = defineStore('tracks', () => {
   // Update waveform data progressively during import
   function updateImportWaveform(trackId: string, chunk: WaveformChunkEvent): void {
     const track = tracks.value.find(t => t.id === trackId);
-    if (!track || track.importStatus !== 'importing') return;
+    if (!track || !track.importSessionId) return;
 
     // Patch waveform at startBucket (each bucket is 2 values: min, max)
     const waveform = [...track.audioData.waveformData];
@@ -1417,8 +1417,10 @@ export const useTracksStore = defineStore('tracks', () => {
         ...track,
         audioData: { ...track.audioData, waveformData: finalWaveform },
         duration: actualDuration,
-        importStatus: 'decoding' as ImportStatus,
+        // If buffer already set (status 'ready'), keep it — don't regress to 'decoding'
+        importStatus: track.importStatus === 'ready' ? 'ready' : 'decoding' as ImportStatus,
         importProgress: 1,
+        importSessionId: undefined, // waveform session done
       };
       tracks.value = [...tracks.value];
     }
@@ -1443,7 +1445,8 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: buffer.duration,
         importStatus: 'ready' as ImportStatus,
         importProgress: undefined,
-        importSessionId: undefined,
+        // Keep importSessionId — waveform chunks may still be arriving
+        // It gets cleared when finalizeImportWaveform fires
       };
       tracks.value = [...tracks.value];
     }
