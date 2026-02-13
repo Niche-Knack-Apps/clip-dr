@@ -62,11 +62,8 @@
       "Bash(npm run lint:*)",
       "Bash(npx eslint:*)",
       "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr log --oneline -5)",
-      "Bash(git push:*)",
-      "Bash(git tag:*)",
-      "Bash(ls:*)",
-      "Bash(git log:*)",
-      "Bash(npx eslint@8:*)"
+      "Bash(printf:*)",
+      "Bash(git push:*)"
     ]
   }
 }

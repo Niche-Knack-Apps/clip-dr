@@ -144,22 +144,6 @@ watch(
   }
 );
 
-// Re-fit zoom when an import completes (actual duration may differ from metadata estimate)
-const readyTrackCount = computed(() =>
-  tracksStore.tracks.filter(t => t.importStatus === 'ready').length
-);
-
-watch(readyTrackCount, async (now, before) => {
-  if (now > (before ?? 0)) {
-    await nextTick();
-    const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
-    console.log(`[Zoom] readyTrackCount watcher: ${before} → ${now}, scrollW=${scrollContainerRef.value?.clientWidth}, panelW=${panelWidth.value}, containerW=${containerW}, timelineDuration=${tracksStore.timelineDuration.toFixed(2)}`);
-    if (containerW > 0) {
-      uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
-    }
-  }
-});
-
 watch(timelineWidth, (newW, oldW) => {
   console.log(`[Zoom] timelineWidth changed: ${oldW?.toFixed(1)} → ${newW.toFixed(1)}, trackZoom=${trackZoom.value.toFixed(6)}, duration=${tracksStore.timelineDuration.toFixed(2)}, scrollContainerW=${scrollContainerRef.value?.clientWidth}`);
 });
@@ -396,6 +380,18 @@ onMounted(() => {
       }
     });
     contentResizeObserver.observe(contentRef.value);
+  }
+
+  // Auto-fit zoom on first mount when tracks already exist
+  // (tracks.length watcher misses the first import because TrackList
+  // wasn't mounted when the track was created)
+  if (tracksStore.tracks.length > 0 && scrollContainerRef.value) {
+    nextTick(() => {
+      const containerW = (scrollContainerRef.value?.clientWidth || 0) - panelWidth.value;
+      if (containerW > 0) {
+        uiStore.zoomTrackToFit(tracksStore.timelineDuration, containerW);
+      }
+    });
   }
 });
 
