@@ -142,8 +142,10 @@ export interface Track {
   timemarks?: TimeMark[];
   /** Import status — undefined for existing/recording tracks */
   importStatus?: ImportStatus;
-  /** Import progress 0-1 */
+  /** Waveform analysis progress 0-1 (from Rust decode) */
   importProgress?: number;
+  /** Audio fetch/decode progress 0-1 (from browser streaming fetch + decodeAudioData) */
+  importDecodeProgress?: number;
   /** Active import session ID */
   importSessionId?: string;
 }

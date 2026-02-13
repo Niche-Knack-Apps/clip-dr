@@ -110,14 +110,48 @@ export const useAudioStore = defineStore('audio', () => {
       });
 
       // Phase 3: Browser decodes audio via asset protocol (concurrent with Phase 2)
+      // Uses streaming fetch to report download progress to the UI
       let audioBuffer: AudioBuffer | null = null;
       try {
         const assetUrl = convertFileSrc(path);
         console.log('[Audio] Phase 3: fetching via asset protocol:', assetUrl);
         const response = await fetch(assetUrl);
-        const arrayBuffer = await response.arrayBuffer();
+        const contentLength = Number(response.headers.get('content-length') || 0);
+
+        let arrayBuffer: ArrayBuffer;
+        if (contentLength > 0 && response.body) {
+          // Stream the response to track download progress
+          const reader = response.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let received = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            // Report fetch progress (0-0.8 of decode phase, 0.8-1.0 reserved for decodeAudioData)
+            const fetchProgress = Math.min(received / contentLength, 1) * 0.8;
+            tracksStore.updateImportDecodeProgress(trackId, fetchProgress);
+          }
+
+          // Concatenate chunks into single ArrayBuffer
+          const full = new Uint8Array(received);
+          let offset = 0;
+          for (const chunk of chunks) {
+            full.set(chunk, offset);
+            offset += chunk.length;
+          }
+          arrayBuffer = full.buffer;
+        } else {
+          // No content-length (or no body stream) — fall back to simple fetch
+          arrayBuffer = await response.arrayBuffer();
+        }
+
         console.log(`[Audio] Phase 3: fetched ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB, decoding...`);
+        tracksStore.updateImportDecodeProgress(trackId, 0.85);
         audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        tracksStore.updateImportDecodeProgress(trackId, 1.0);
         console.log(`[Audio] Phase 3: browser decode done, duration: ${audioBuffer.duration.toFixed(2)}s`);
       } catch (e) {
         console.warn('[Audio] Phase 3 failed (browser decode), will fall back to legacy:', e);

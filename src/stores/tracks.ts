@@ -1427,6 +1427,20 @@ export const useTracksStore = defineStore('tracks', () => {
     console.log('[Tracks] Finalized import waveform for:', track.name, 'actual duration:', actualDuration);
   }
 
+  // Update decode/fetch progress for the browser-side audio preparation
+  function updateImportDecodeProgress(trackId: string, progress: number): void {
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return;
+    const track = tracks.value[trackIndex];
+    if (!track.importStatus || track.importStatus === 'ready') return;
+
+    tracks.value[trackIndex] = {
+      ...track,
+      importDecodeProgress: progress,
+    };
+    tracks.value = [...tracks.value];
+  }
+
   // Set the AudioBuffer after browser decode completes
   function setImportBuffer(trackId: string, buffer: AudioBuffer): void {
     const track = tracks.value.find(t => t.id === trackId);
@@ -1445,6 +1459,7 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: buffer.duration,
         importStatus: 'ready' as ImportStatus,
         importProgress: undefined,
+        importDecodeProgress: undefined,
         // Keep importSessionId — waveform chunks may still be arriving
         // It gets cleared when finalizeImportWaveform fires
       };
@@ -1508,6 +1523,7 @@ export const useTracksStore = defineStore('tracks', () => {
     createImportingTrack,
     updateImportWaveform,
     finalizeImportWaveform,
+    updateImportDecodeProgress,
     setImportBuffer,
   };
 });
