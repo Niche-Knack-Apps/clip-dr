@@ -26,6 +26,11 @@ const downloadingModel = ref<string | null>(null);
 const downloadError = ref<string | null>(null);
 const bundledModelPath = ref<string | null>(null);
 const defaultProjectFolder = ref<string>('');
+const defaultModelsPath = computed(() => {
+  if (!defaultProjectFolder.value) return '';
+  const base = defaultProjectFolder.value;
+  return base.endsWith('/') || base.endsWith('\\') ? `${base}models/` : `${base}/models/`;
+});
 
 // Export profile management
 const showNewProfileForm = ref(false);
@@ -436,7 +441,7 @@ onMounted(async () => {
                 </Button>
               </div>
               <p class="text-xs text-gray-500 mt-1">
-                <template v-if="defaultProjectFolder">Default: {{ defaultProjectFolder }}models/</template>
+                <template v-if="defaultProjectFolder">Default: {{ defaultModelsPath }}</template>
                 <template v-else>Default: app data directory</template>
               </p>
             </div>
