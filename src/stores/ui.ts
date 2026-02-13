@@ -29,7 +29,7 @@ export const useUIStore = defineStore('ui', () => {
 
   // Track timeline zoom (pixels per second)
   const trackZoom = ref(2);   // Default fully zoomed out
-  const TRACK_ZOOM_MIN = 2;    // Minimum zoom (zoomed way out)
+  const TRACK_ZOOM_MIN = 0.1;  // Minimum zoom (zoomed way out — fits even 2hr files)
   const TRACK_ZOOM_MAX = 2000; // Maximum zoom (zoomed way in)
 
   // Computed helpers
