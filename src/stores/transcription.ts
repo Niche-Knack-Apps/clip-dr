@@ -704,7 +704,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function saveTranscription(trackId: string): Promise<void> {
     const audioPath = getTrackPath(trackId);
     const t = transcriptions.value.get(trackId);
-    if (!audioPath || !t) return;
+    if (!audioPath || !t) {
+      console.warn(`[Transcription] Cannot save: audioPath=${audioPath}, hasData=${!!t}`);
+      return;
+    }
 
     const metadata: TranscriptionMetadata = {
       audioPath,
@@ -732,7 +735,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function loadTranscriptionFromDisk(trackId: string): Promise<boolean> {
     const audioPath = getTrackPath(trackId);
-    if (!audioPath) return false;
+    if (!audioPath) {
+      console.log(`[Transcription] No audio path for track ${trackId.slice(0, 8)}, cannot load sidecar`);
+      return false;
+    }
+    console.log(`[Transcription] Checking sidecar for: ${audioPath}`);
 
     try {
       const metadata = await invoke<TranscriptionMetadata | null>('load_transcription_metadata', {
@@ -762,9 +769,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return true;
       }
 
+      console.log(`[Transcription] Sidecar exists but empty/invalid for: ${audioPath}`);
       return false;
     } catch (e) {
-      console.log(`[Transcription] No existing transcription for track ${trackId}:`, e);
+      console.log(`[Transcription] No sidecar found for ${audioPath}:`, e);
       return false;
     }
   }

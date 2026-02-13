@@ -425,18 +425,45 @@ pub async fn transcribe_audio(
     let mut words: Vec<Word> = Vec::new();
     let mut full_text = String::new();
 
-    for i in 0..num_segments {
-        let segment_text = state.full_get_segment_text(i)
-            .map_err(|e| format!("Failed to get segment text: {}", e))?;
+    let mut skipped_segments = 0;
 
-        let start_time = state.full_get_segment_t0(i)
-            .map_err(|e| format!("Failed to get segment start: {}", e))? as f64 / 100.0;
-        let end_time = state.full_get_segment_t1(i)
-            .map_err(|e| format!("Failed to get segment end: {}", e))? as f64 / 100.0;
+    for i in 0..num_segments {
+        // Non-fatal: skip segments that fail to extract (e.g., UTF-8 errors)
+        let segment_text = match state.full_get_segment_text(i) {
+            Ok(text) => text,
+            Err(e) => {
+                log::warn!("Skipping segment {}/{}: failed to get text: {}", i, num_segments, e);
+                skipped_segments += 1;
+                continue;
+            }
+        };
+
+        let start_time = match state.full_get_segment_t0(i) {
+            Ok(t) => t as f64 / 100.0,
+            Err(e) => {
+                log::warn!("Skipping segment {}/{}: failed to get start time: {}", i, num_segments, e);
+                skipped_segments += 1;
+                continue;
+            }
+        };
+        let end_time = match state.full_get_segment_t1(i) {
+            Ok(t) => t as f64 / 100.0,
+            Err(e) => {
+                log::warn!("Skipping segment {}/{}: failed to get end time: {}", i, num_segments, e);
+                skipped_segments += 1;
+                continue;
+            }
+        };
 
         // Get number of tokens in this segment
-        let num_tokens = state.full_n_tokens(i)
-            .map_err(|e| format!("Failed to get token count: {}", e))?;
+        let num_tokens = match state.full_n_tokens(i) {
+            Ok(n) => n,
+            Err(e) => {
+                log::warn!("Skipping segment {}/{}: failed to get token count: {}", i, num_segments, e);
+                skipped_segments += 1;
+                continue;
+            }
+        };
 
         // Try to get word-level timestamps from tokens
         let mut segment_words: Vec<(String, f64, f64)> = Vec::new();
@@ -530,7 +557,10 @@ pub async fn transcribe_audio(
         }
     }
 
-    log::info!("Transcription complete: {} words", words.len());
+    if skipped_segments > 0 {
+        log::warn!("Transcription finished with {} skipped segments (out of {})", skipped_segments, num_segments);
+    }
+    log::info!("Transcription complete: {} words from {} segments", words.len(), num_segments - skipped_segments);
 
     Ok(TranscriptionResult {
         words,
