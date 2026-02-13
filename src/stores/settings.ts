@@ -210,6 +210,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setRecordingChannelMode(mode: 'mono' | 'stereo'): void {
+    settings.value.recordingChannelMode = mode;
+    saveSettings();
+  }
+
   function setLastExportPath(path: string): void {
     settings.value.lastExportPath = path;
     saveSettings();
@@ -299,5 +304,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setFavoriteProfile,
     setLastExportProfileId,
     setLastExportPath,
+    // Recording channel mode
+    setRecordingChannelMode,
   };
 });

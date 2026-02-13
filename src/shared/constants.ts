@@ -43,6 +43,8 @@ export const DEFAULT_SETTINGS = {
   exportProfiles: [] as ExportProfile[],  // merged with DEFAULT_EXPORT_PROFILES at load time
   lastExportProfileId: 'mp3-192',
   lastExportPath: '',
+  // Recording channel mode
+  recordingChannelMode: 'stereo' as const,
 };
 
 export const KEYBOARD_SHORTCUTS = {

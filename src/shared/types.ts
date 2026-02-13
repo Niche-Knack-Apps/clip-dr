@@ -184,6 +184,8 @@ export interface Settings {
   exportProfiles: ExportProfile[];
   lastExportProfileId: string;
   lastExportPath: string;
+  // Recording channel mode
+  recordingChannelMode: 'mono' | 'stereo';
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';

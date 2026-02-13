@@ -182,6 +182,27 @@ async function handleCancel() {
         </button>
       </div>
 
+      <!-- Mono/Stereo channel mode toggle -->
+      <div class="flex items-center justify-center gap-2 mb-2">
+        <span class="text-[10px] text-gray-500">Channels:</span>
+        <div class="flex items-center gap-1">
+          <button
+            v-for="mode in (['mono', 'stereo'] as const)"
+            :key="mode"
+            type="button"
+            :class="[
+              'px-2 py-0.5 text-[10px] rounded transition-colors',
+              settingsStore.settings.recordingChannelMode === mode
+                ? 'bg-cyan-600 text-white'
+                : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
+            ]"
+            @click="settingsStore.setRecordingChannelMode(mode)"
+          >
+            {{ mode === 'mono' ? 'Mono' : 'Stereo' }}
+          </button>
+        </div>
+      </div>
+
       <!-- Hint text -->
       <p class="text-[10px] text-gray-500 text-center mb-1">
         Click a source to start recording immediately
