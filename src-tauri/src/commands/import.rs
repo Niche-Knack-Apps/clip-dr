@@ -1,3 +1,4 @@
+use memmap2::Mmap;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -286,6 +287,176 @@ impl BucketAccumulator {
     }
 }
 
+// ── WAV memory-map fast path ───────────────────────────────────────────
+// Parse RIFF WAV header, mmap the file, compute peaks directly from mapped
+// PCM samples. Avoids full symphonia decode for WAV files (near-instant).
+
+struct WavInfo {
+    data_offset: usize,
+    data_size: usize,
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+    /// Audio format: 1 = PCM integer, 3 = IEEE float
+    audio_format: u16,
+}
+
+/// Try to parse a RIFF WAV header and return data chunk info.
+/// Returns None for non-WAV files or unsupported formats.
+fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
+    if data.len() < 44 { return None; }
+    // RIFF header
+    if &data[0..4] != b"RIFF" { return None; }
+    if &data[8..12] != b"WAVE" { return None; }
+
+    let mut pos = 12;
+    let mut audio_format: u16 = 0;
+    let mut channels: u16 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut bits_per_sample: u16 = 0;
+    let mut data_offset: usize = 0;
+    let mut data_size: usize = 0;
+    let mut found_fmt = false;
+    let mut found_data = false;
+
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
+
+        if chunk_id == b"fmt " && chunk_size >= 16 {
+            audio_format = u16::from_le_bytes(data[pos + 8..pos + 10].try_into().ok()?);
+            channels = u16::from_le_bytes(data[pos + 10..pos + 12].try_into().ok()?);
+            sample_rate = u32::from_le_bytes(data[pos + 12..pos + 16].try_into().ok()?);
+            // skip byte_rate (4) and block_align (2)
+            bits_per_sample = u16::from_le_bytes(data[pos + 24..pos + 26].try_into().ok()?);
+            found_fmt = true;
+        } else if chunk_id == b"data" {
+            data_offset = pos + 8;
+            data_size = chunk_size;
+            found_data = true;
+            break; // data is the last chunk we need
+        }
+
+        // Advance to next chunk (chunks are word-aligned)
+        pos += 8 + chunk_size;
+        if chunk_size % 2 != 0 { pos += 1; }
+    }
+
+    if !found_fmt || !found_data { return None; }
+    // Only support PCM integer (1) and IEEE float (3)
+    if audio_format != 1 && audio_format != 3 { return None; }
+    // Only support 16-bit, 24-bit, 32-bit integer and 32-bit float
+    if audio_format == 1 && bits_per_sample != 16 && bits_per_sample != 24 && bits_per_sample != 32 {
+        return None;
+    }
+    if audio_format == 3 && bits_per_sample != 32 { return None; }
+    if channels == 0 || sample_rate == 0 { return None; }
+
+    Some(WavInfo {
+        data_offset,
+        data_size,
+        sample_rate,
+        channels,
+        bits_per_sample,
+        audio_format,
+    })
+}
+
+/// Compute peaks from memory-mapped WAV PCM data. Returns (waveform, duration).
+fn wav_mmap_peaks(
+    mmap: &Mmap,
+    wav: &WavInfo,
+    bucket_count: usize,
+    cancel: &AtomicBool,
+    session_id: &str,
+    app_handle: &AppHandle,
+) -> Option<(Vec<f32>, f64)> {
+    let bytes_per_sample = (wav.bits_per_sample / 8) as usize;
+    let frame_size = bytes_per_sample * wav.channels as usize;
+    let data_end = (wav.data_offset + wav.data_size).min(mmap.len());
+    let actual_data_size = data_end - wav.data_offset;
+    let total_frames = actual_data_size / frame_size;
+    if total_frames == 0 { return None; }
+
+    let samples_per_bucket = (total_frames / bucket_count).max(1);
+    let mut buckets: Vec<BucketAccumulator> = (0..bucket_count)
+        .map(|_| BucketAccumulator::new())
+        .collect();
+
+    let chunk_interval = (bucket_count / 20).max(10);
+    let mut last_emitted_bucket: usize = 0;
+    let data = &mmap[wav.data_offset..data_end];
+
+    for frame_idx in 0..total_frames {
+        if frame_idx % 65536 == 0 && cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        let frame_offset = frame_idx * frame_size;
+
+        // Mix channels to mono
+        let mut mono: f32 = 0.0;
+        for ch in 0..wav.channels as usize {
+            let sample_offset = frame_offset + ch * bytes_per_sample;
+            let sample = match (wav.audio_format, wav.bits_per_sample) {
+                (1, 16) => {
+                    let raw = i16::from_le_bytes(
+                        data[sample_offset..sample_offset + 2].try_into().ok()?,
+                    );
+                    raw as f32 / 32768.0
+                }
+                (1, 24) => {
+                    // 24-bit signed: sign-extend from 3 bytes
+                    let b0 = data[sample_offset] as i32;
+                    let b1 = data[sample_offset + 1] as i32;
+                    let b2 = data[sample_offset + 2] as i32;
+                    let raw = (b2 << 16) | (b1 << 8) | b0;
+                    let signed = if raw & 0x800000 != 0 { raw | !0xFFFFFF } else { raw };
+                    signed as f32 / 8388608.0
+                }
+                (1, 32) => {
+                    let raw = i32::from_le_bytes(
+                        data[sample_offset..sample_offset + 4].try_into().ok()?,
+                    );
+                    raw as f32 / 2147483648.0
+                }
+                (3, 32) => {
+                    f32::from_le_bytes(
+                        data[sample_offset..sample_offset + 4].try_into().ok()?,
+                    )
+                }
+                _ => 0.0,
+            };
+            mono += sample;
+        }
+        mono /= wav.channels as f32;
+
+        let bucket_idx = (frame_idx / samples_per_bucket).min(bucket_count - 1);
+        buckets[bucket_idx].push(mono);
+
+        // Emit progress chunks
+        let progress = frame_idx as f32 / total_frames as f32;
+        let current_filled = ((progress * bucket_count as f32) as usize).min(bucket_count);
+        if current_filled >= last_emitted_bucket + chunk_interval {
+            let chunk_waveform = extract_bucket_range(&buckets, last_emitted_bucket, current_filled);
+            let _ = app_handle.emit(
+                "import-waveform-chunk",
+                WaveformChunkEvent {
+                    session_id: session_id.to_string(),
+                    start_bucket: last_emitted_bucket,
+                    waveform: chunk_waveform,
+                    progress,
+                },
+            );
+            last_emitted_bucket = current_filled;
+        }
+    }
+
+    let waveform = extract_bucket_range(&buckets, 0, bucket_count);
+    let duration = total_frames as f64 / wav.sample_rate as f64;
+    Some((waveform, duration))
+}
+
 fn decode_waveform_progressive(
     path: &str,
     bucket_count: usize,
@@ -295,7 +466,7 @@ fn decode_waveform_progressive(
 ) -> Result<(), String> {
     let path_ref = Path::new(path);
 
-    // ── Check peak cache first ──────────────────────────────────────────
+    // ── Check peak cache first (instant for previously opened files) ───
     if let Some((cached_waveform, cached_duration)) = load_peak_cache(path_ref, bucket_count) {
         // Cache hit — emit full waveform immediately, skip decode
         let _ = app_handle.emit(
@@ -307,6 +478,38 @@ fn decode_waveform_progressive(
             },
         );
         return Ok(());
+    }
+
+    // ── WAV mmap fast path — compute peaks directly from mapped PCM ───
+    if let Some(ext) = path_ref.extension().and_then(|e| e.to_str()) {
+        if ext.eq_ignore_ascii_case("wav") || ext.eq_ignore_ascii_case("wave") {
+            if let Ok(file) = File::open(path_ref) {
+                if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                    if let Some(wav) = parse_wav_header(&mmap) {
+                        log::info!(
+                            "WAV mmap fast path: {}ch {}bit {}Hz, data offset={}, size={}",
+                            wav.channels, wav.bits_per_sample, wav.sample_rate,
+                            wav.data_offset, wav.data_size
+                        );
+                        if let Some((waveform, duration)) =
+                            wav_mmap_peaks(&mmap, &wav, bucket_count, cancel, session_id, app_handle)
+                        {
+                            save_peak_cache(path_ref, bucket_count, &waveform, duration);
+                            let _ = app_handle.emit(
+                                "import-complete",
+                                ImportCompleteEvent {
+                                    session_id: session_id.to_string(),
+                                    waveform,
+                                    actual_duration: duration,
+                                },
+                            );
+                            return Ok(());
+                        }
+                        log::warn!("WAV mmap peaks failed, falling back to symphonia decode");
+                    }
+                }
+            }
+        }
     }
 
     let file = File::open(path_ref).map_err(|e| format!("Failed to open file: {}", e))?;
