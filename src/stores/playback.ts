@@ -727,10 +727,21 @@ export const usePlaybackStore = defineStore('playback', () => {
     });
   }
 
-  // Watch for track changes during playback
-  let lastTracksKey = '';
+  // Watch for track mute/solo changes during playback
+  // Uses a numeric key to avoid per-evaluation string allocation
+  let lastTracksKey = 0;
   watch(
-    () => tracksStore.tracks.map(t => `${t.id}:${t.muted}:${t.solo}`).join(','),
+    () => {
+      const tracks = tracksStore.tracks;
+      let key = tracks.length;
+      for (const t of tracks) {
+        // Hash track identity + mute/solo state; id.charCodeAt(0) differentiates tracks cheaply
+        key = ((key << 5) - key + t.id.charCodeAt(0)) | 0;
+        if (t.muted) key = (key * 31 + 1) | 0;
+        if (t.solo) key = (key * 31 + 2) | 0;
+      }
+      return key;
+    },
     async (newKey) => {
       if (newKey === lastTracksKey) return;
       lastTracksKey = newKey;

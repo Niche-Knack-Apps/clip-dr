@@ -305,6 +305,15 @@ export const useRecordingStore = defineStore('recording', () => {
       }, 100);
 
     } catch (e) {
+      // Clean up intervals if recording failed to start
+      if (levelPollInterval) {
+        clearInterval(levelPollInterval);
+        levelPollInterval = null;
+      }
+      if (durationInterval) {
+        clearInterval(durationInterval);
+        durationInterval = null;
+      }
       console.error('[Recording] Failed to start:', e);
       error.value = e instanceof Error ? e.message : String(e);
     } finally {

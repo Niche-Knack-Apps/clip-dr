@@ -11,7 +11,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile, Mp3Bitrate } from '@/shared/types';
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.7.1';
 
 const emit = defineEmits<{
   close: [];
@@ -317,8 +317,8 @@ onMounted(async () => {
                 class="w-full h-7 px-2 text-xs bg-gray-900 border border-gray-600 rounded text-gray-200
                        focus:outline-none focus:ring-1 focus:ring-cyan-500"
               />
-              <div class="flex gap-2">
-                <label v-for="fmt in (['wav', 'mp3'] as const)" :key="fmt" class="flex items-center gap-1 text-xs">
+              <div class="flex gap-2 flex-wrap">
+                <label v-for="fmt in (['wav', 'mp3', 'flac', 'ogg'] as const)" :key="fmt" class="flex items-center gap-1 text-xs">
                   <input
                     type="radio"
                     name="newProfileFormat"

@@ -11,6 +11,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useSelectionStore } from '@/stores/selection';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
+import type { ExportProfile } from '@/shared/types';
 
 const audioStore = useAudioStore();
 const uiStore = useUIStore();
@@ -33,6 +34,20 @@ const {
 } = useClipping();
 
 const exporting = ref(false);
+const exportPickerTrackId = ref<string | null>(null);
+const exportProfiles = computed(() => settingsStore.getExportProfiles());
+const exportPickerTrackName = computed(() => {
+  if (!exportPickerTrackId.value) return '';
+  return tracks.value.find(t => t.id === exportPickerTrackId.value)?.name || '';
+});
+
+function formatProfileLabel(profile: ExportProfile): string {
+  if (profile.format === 'mp3' && profile.mp3Bitrate) {
+    return `${profile.mp3Bitrate} kbps`;
+  }
+  return profile.format === 'wav' ? 'Lossless' : profile.format.toUpperCase();
+}
+
 const isResizing = ref(false);
 const resizeStartX = ref(0);
 const resizeStartWidth = ref(0);
@@ -155,14 +170,20 @@ function handleMouseUp() {
   canDrag.value = false;
 }
 
-async function handleExport(trackId: string) {
+function handleExport(trackId: string) {
+  exportPickerTrackId.value = trackId;
+}
+
+async function handleProfileExport(profile: ExportProfile) {
+  const trackId = exportPickerTrackId.value;
+  if (!trackId) return;
   const track = tracks.value.find((t) => t.id === trackId);
   if (!track) return;
 
   try {
     exporting.value = true;
-    // Uses favorite export profile (single-filter dialog)
-    const result = await exportStore.exportTrack(track);
+    exportPickerTrackId.value = null;
+    const result = await exportStore.exportTrackWithProfile(track, profile);
     if (result) {
       console.log('[TrackList] Exported track:', track.name, 'to:', result);
     }
@@ -487,6 +508,40 @@ function handleClipSelect(trackId: string, clipId: string) {
           class="flex items-center justify-center h-16 text-xs text-gray-600"
         >
           No tracks - Import or record audio
+        </div>
+      </div>
+    </div>
+
+    <!-- Export profile picker overlay -->
+    <div
+      v-if="exportPickerTrackId"
+      class="absolute inset-0 z-20 flex items-start justify-center pt-4 bg-black/40"
+      @click.self="exportPickerTrackId = null"
+    >
+      <div class="p-3 bg-gray-800 rounded-lg shadow-xl border border-gray-700">
+        <div class="flex items-center justify-between mb-2 gap-4">
+          <span class="text-xs text-gray-300 truncate">Export: {{ exportPickerTrackName }}</span>
+          <button
+            class="text-gray-500 hover:text-gray-300 text-sm leading-none"
+            @click="exportPickerTrackId = null"
+          >
+            &times;
+          </button>
+        </div>
+        <div class="flex gap-2">
+          <button
+            v-for="profile in exportProfiles"
+            :key="profile.id"
+            :disabled="exporting"
+            class="relative flex flex-col items-center justify-center w-[80px] h-[56px] rounded-lg border transition-all
+                   border-gray-600 bg-gray-700 text-gray-200 hover:border-cyan-500 hover:bg-gray-600
+                   disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="handleProfileExport(profile)"
+          >
+            <span class="text-xs font-medium">{{ profile.format.toUpperCase() }}</span>
+            <span class="text-[10px] text-gray-400">{{ formatProfileLabel(profile) }}</span>
+            <span v-if="profile.isFavorite" class="absolute top-0.5 right-1 text-[9px] text-yellow-400">&#9733;</span>
+          </button>
         </div>
       </div>
     </div>

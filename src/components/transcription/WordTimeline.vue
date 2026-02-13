@@ -102,6 +102,11 @@ const enableFalloff = computed(() => {
 });
 
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
+
+// RAF-throttled drag state
+let dragRafId: number | null = null;
+let pendingDragEvent: MouseEvent | null = null;
 
 function updateWidth() {
   if (containerRef.value) {
@@ -168,6 +173,18 @@ function handleGlobalDragStart(event: MouseEvent) {
 }
 
 function handleMouseMove(event: MouseEvent) {
+  pendingDragEvent = event;
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(flushDrag);
+  }
+}
+
+function flushDrag() {
+  dragRafId = null;
+  if (!pendingDragEvent) return;
+  const event = pendingDragEvent;
+  pendingDragEvent = null;
+
   if (dragMode.value === 'word' && dragWordId.value && dragTrackId.value) {
     const deltaX = event.clientX - dragStartX.value;
     const deltaMs = xToMs(deltaX);
@@ -182,6 +199,13 @@ function handleMouseMove(event: MouseEvent) {
 }
 
 function handleMouseUp() {
+  // Flush any pending RAF drag update before finalizing
+  if (pendingDragEvent) flushDrag();
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
+
   if (dragMode.value !== 'none' && dragTrackId.value) {
     transcriptionStore.saveTranscription(dragTrackId.value);
   }
@@ -205,10 +229,18 @@ function isWordBeingDragged(word: Word): boolean {
   return dragMode.value === 'word' && dragWordId.value === word.id;
 }
 
+function handleResize() {
+  if (resizeRafId !== null) return;
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    updateWidth();
+  });
+}
+
 onMounted(() => {
   updateWidth();
 
-  resizeObserver = new ResizeObserver(updateWidth);
+  resizeObserver = new ResizeObserver(handleResize);
   if (containerRef.value) {
     resizeObserver.observe(containerRef.value);
   }
@@ -218,6 +250,12 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   if (activeWordRafId !== null) {
     cancelAnimationFrame(activeWordRafId);
+  }
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+  }
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
   }
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseup', handleMouseUp);

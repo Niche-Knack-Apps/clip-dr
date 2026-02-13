@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, computed, ref, watch, nextTick } from 'vue';
+import { inject, computed, ref, watch, nextTick, onUnmounted } from 'vue';
 import FullWaveform from '@/components/waveform/FullWaveform.vue';
 import ZoomedWaveform from '@/components/waveform/ZoomedWaveform.vue';
 import WordTimeline from '@/components/transcription/WordTimeline.vue';
@@ -152,6 +152,14 @@ function stopZoomedResize() {
   document.body.style.cursor = '';
   document.body.style.userSelect = '';
 }
+
+// Clean up document-level event listeners on unmount
+onUnmounted(() => {
+  document.removeEventListener('mousemove', handleWaveformResize);
+  document.removeEventListener('mouseup', stopWaveformResize);
+  document.removeEventListener('mousemove', handleZoomedResize);
+  document.removeEventListener('mouseup', stopZoomedResize);
+});
 
 useKeyboardShortcuts({
   onPlayPause: () => playbackStore.togglePlay(),
