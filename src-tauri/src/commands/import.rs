@@ -42,6 +42,11 @@ impl ImportState {
 pub struct ImportStartResult {
     pub session_id: String,
     pub metadata: AudioMetadata,
+    /// If peak cache hit, waveform is returned directly (no background events needed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_waveform: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_duration: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,6 +220,20 @@ pub async fn import_audio_start(
     };
 
     let session_id = Uuid::new_v4().to_string();
+
+    // ── Check peak cache BEFORE spawning background thread ──
+    // If cache hits, return waveform in the result directly (avoids event race condition
+    // where import-complete fires before frontend registers listeners).
+    if let Some((cached_waveform, cached_duration)) = load_peak_cache(path_ref, bucket_count) {
+        log::info!("[Waveform] Peak cache HIT for {:?} — returning inline (no background task)", path_ref.file_name().unwrap_or_default());
+        return Ok(ImportStartResult {
+            session_id,
+            metadata,
+            cached_waveform: Some(cached_waveform),
+            cached_duration: Some(cached_duration),
+        });
+    }
+
     let cancel = Arc::new(AtomicBool::new(false));
 
     // Store session
@@ -260,6 +279,8 @@ pub async fn import_audio_start(
     Ok(ImportStartResult {
         session_id,
         metadata,
+        cached_waveform: None,
+        cached_duration: None,
     })
 }
 

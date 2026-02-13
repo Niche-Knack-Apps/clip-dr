@@ -68,8 +68,9 @@ export const useAudioStore = defineStore('audio', () => {
         bucketCount: WAVEFORM_BUCKET_COUNT,
       });
 
-      const { sessionId, metadata } = result;
-      console.log(`[Audio] [${ms()}] Phase 1 complete: metadata probe — ${metadata.format} ${metadata.channels}ch ${metadata.sampleRate}Hz ${metadata.duration.toFixed(1)}s`);
+      const { sessionId, metadata, cachedWaveform, cachedDuration } = result;
+      const cacheHit = !!(cachedWaveform && cachedDuration);
+      console.log(`[Audio] [${ms()}] Phase 1 complete: metadata probe — ${metadata.format} ${metadata.channels}ch ${metadata.sampleRate}Hz ${metadata.duration.toFixed(1)}s${cacheHit ? ' (PEAK CACHE HIT)' : ''}`);
 
       const fileName = getFileName(path);
       const trackStart = tracksStore.timelineDuration;
@@ -87,50 +88,66 @@ export const useAudioStore = defineStore('audio', () => {
       tracksStore.selectTrack(trackId);
       lastImportedPath.value = path;
 
-      // ── Waveform completion promise ──
-      // importFile awaits BOTH buffer and waveform before finishing.
-      let resolveWaveform: () => void;
+      // ── Waveform completion tracking ──
       let waveformSettled = false;
-      const waveformDone = new Promise<void>(resolve => { resolveWaveform = resolve; });
 
-      // Phase 2: Listen for progressive waveform chunks from Rust (runs in background)
-      let chunkCount = 0;
-      const unlistenChunk = await listen<WaveformChunkEvent>('import-waveform-chunk', (event) => {
-        if (event.payload.sessionId !== sessionId) return;
-        const track = tracksStore.tracks.find(t => t.id === trackId);
-        if (!track) return;
-        tracksStore.updateImportWaveform(trackId, event.payload);
-        chunkCount++;
-        if (chunkCount === 1) {
-          console.log(`[Audio] [${ms()}] First waveform chunk received (progress: ${(event.payload.progress * 100).toFixed(0)}%)`);
-        }
-      });
-      console.log(`[Audio] [${ms()}] Phase 2 listeners registered`);
-
-      // Register both completion and error listeners simultaneously (no race condition)
-      const unlistenComplete = await listen<ImportCompleteEvent>('import-complete', (event) => {
-        if (event.payload.sessionId !== sessionId) return;
-        const track = tracksStore.tracks.find(t => t.id === trackId);
-        if (track) {
-          tracksStore.finalizeImportWaveform(trackId, event.payload.waveform, event.payload.actualDuration);
-          console.log(`[Audio] [${ms()}] Phase 2 complete: waveform finalized (${chunkCount} chunks, duration: ${event.payload.actualDuration.toFixed(1)}s)`);
-        }
+      if (cacheHit) {
+        // Peak cache hit: waveform returned inline, no background events needed
+        tracksStore.finalizeImportWaveform(trackId, cachedWaveform!, cachedDuration!);
         waveformSettled = true;
-        resolveWaveform!();
-        unlistenChunk();
-        unlistenComplete();
-        unlistenError();
-      });
+        console.log(`[Audio] [${ms()}] Waveform loaded from cache (${cachedDuration!.toFixed(1)}s)`);
+      }
 
-      const unlistenError = await listen<{ sessionId: string; error: string }>('import-error', (event) => {
-        if (event.payload.sessionId !== sessionId) return;
-        console.error(`[Audio] [${ms()}] Phase 2 error: ${event.payload.error}`);
-        waveformSettled = true;
-        resolveWaveform!();
-        unlistenChunk();
-        unlistenComplete();
-        unlistenError();
-      });
+      // Only set up listeners if waveform is NOT already settled from cache
+      let resolveWaveform: (() => void) | undefined;
+      const waveformDone = waveformSettled
+        ? Promise.resolve()
+        : new Promise<void>(resolve => { resolveWaveform = resolve; });
+
+      let unlistenChunk: (() => void) | undefined;
+      let unlistenComplete: (() => void) | undefined;
+      let unlistenError: (() => void) | undefined;
+
+      if (!waveformSettled) {
+        // Phase 2: Listen for progressive waveform chunks from Rust (runs in background)
+        let chunkCount = 0;
+        unlistenChunk = await listen<WaveformChunkEvent>('import-waveform-chunk', (event) => {
+          if (event.payload.sessionId !== sessionId) return;
+          const track = tracksStore.tracks.find(t => t.id === trackId);
+          if (!track) return;
+          tracksStore.updateImportWaveform(trackId, event.payload);
+          chunkCount++;
+          if (chunkCount === 1) {
+            console.log(`[Audio] [${ms()}] First waveform chunk received (progress: ${(event.payload.progress * 100).toFixed(0)}%)`);
+          }
+        });
+        console.log(`[Audio] [${ms()}] Phase 2 listeners registered`);
+
+        // Register both completion and error listeners simultaneously (no race condition)
+        unlistenComplete = await listen<ImportCompleteEvent>('import-complete', (event) => {
+          if (event.payload.sessionId !== sessionId) return;
+          const track = tracksStore.tracks.find(t => t.id === trackId);
+          if (track) {
+            tracksStore.finalizeImportWaveform(trackId, event.payload.waveform, event.payload.actualDuration);
+            console.log(`[Audio] [${ms()}] Phase 2 complete: waveform finalized (${chunkCount} chunks, duration: ${event.payload.actualDuration.toFixed(1)}s)`);
+          }
+          waveformSettled = true;
+          resolveWaveform?.();
+          unlistenChunk?.();
+          unlistenComplete?.();
+          unlistenError?.();
+        });
+
+        unlistenError = await listen<{ sessionId: string; error: string }>('import-error', (event) => {
+          if (event.payload.sessionId !== sessionId) return;
+          console.error(`[Audio] [${ms()}] Phase 2 error: ${event.payload.error}`);
+          waveformSettled = true;
+          resolveWaveform?.();
+          unlistenChunk?.();
+          unlistenComplete?.();
+          unlistenError?.();
+        });
+      }
 
       // Phase 3: Browser decodes audio via asset protocol (concurrent with Phase 2)
       // Uses streaming fetch to report download progress to the UI
@@ -190,9 +207,9 @@ export const useAudioStore = defineStore('audio', () => {
         console.log(`[Audio] [${ms()}] Track deleted during import, discarding`);
         // Clean up waveform listeners if still pending
         if (!waveformSettled) {
-          unlistenChunk();
-          unlistenComplete();
-          unlistenError();
+          unlistenChunk?.();
+          unlistenComplete?.();
+          unlistenError?.();
         }
         historyStore.endBatch();
         return;

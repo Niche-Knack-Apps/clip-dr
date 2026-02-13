@@ -476,25 +476,20 @@ onUnmounted(() => {
 
       <!-- Import progress bar — visible bar moving toward loaded -->
       <div v-if="isImporting" class="absolute inset-0 z-10 pointer-events-none">
-        <!-- Light dim overlay -->
-        <div class="absolute inset-0 bg-gray-900/40" />
+        <!-- Dim overlay to push waveform back so progress bar stands out -->
+        <div class="absolute inset-0 bg-gray-900/70" />
         <!-- Progress bar at bottom -->
-        <div class="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-700/60 rounded-sm overflow-hidden">
+        <div class="absolute bottom-0 left-0 right-0 h-2 bg-gray-700/80 overflow-hidden">
           <div
-            class="h-full bg-cyan-500 transition-all duration-300 ease-out rounded-sm"
+            class="h-full bg-emerald-400 transition-all duration-300 ease-out"
             :style="{ width: `${combinedProgress * 100}%` }"
           />
           <!-- Shimmer pulse at leading edge -->
           <div
-            class="absolute top-0 h-full w-16 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer"
+            class="absolute top-0 h-full w-16 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"
             :style="{ left: `${Math.max(0, combinedProgress * 100 - 8)}%` }"
           />
         </div>
-        <!-- Thin glow line above the bar for visibility -->
-        <div
-          class="absolute bottom-1.5 left-0 h-px bg-cyan-400/40 transition-all duration-300"
-          :style="{ width: `${combinedProgress * 100}%` }"
-        />
       </div>
 
       <!-- Render each clip in the track (only when not importing) -->

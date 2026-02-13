@@ -103,6 +103,9 @@ export type ImportStatus = 'importing' | 'decoding' | 'ready' | 'error';
 export interface ImportStartResult {
   sessionId: string;
   metadata: AudioMetadata;
+  /** If peak cache hit, waveform is returned directly (no background events needed) */
+  cachedWaveform?: number[];
+  cachedDuration?: number;
 }
 
 export interface WaveformChunkEvent {
