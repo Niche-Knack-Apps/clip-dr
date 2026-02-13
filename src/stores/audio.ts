@@ -41,10 +41,15 @@ export const useAudioStore = defineStore('audio', () => {
   // Phase 1: metadata probe (~30ms) → track visible instantly
   // Phase 2: Rust waveform decode (background) → progressive fill-in
   // Phase 3: Browser decode via asset protocol → buffer ready for playback
-  // Key: buffer is set as soon as browser decode finishes — does NOT wait for waveform
+  //
+  // Import is "complete" when BOTH buffer AND waveform are ready.
+  // Playback is enabled as soon as buffer arrives (Phase 3).
+  // Transcription only starts after import is fully complete.
+  // The loading flag (import button spinner) stays active until fully complete.
   async function importFile(path: string): Promise<void> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Import file');
+    loading.value = true;
     error.value = null;
 
     try {
@@ -53,8 +58,9 @@ export const useAudioStore = defineStore('audio', () => {
       const selectionStore = useSelectionStore();
       const ctx = initAudioContext();
 
-      const startTime = performance.now();
-      console.log('[Audio] Starting progressive import...');
+      const t0 = performance.now();
+      const ms = () => `${(performance.now() - t0).toFixed(0)}ms`;
+      console.log(`[Audio] ── Import started ──`);
 
       // Phase 1: Probe metadata and create track instantly
       const result = await invoke<ImportStartResult>('import_audio_start', {
@@ -63,7 +69,7 @@ export const useAudioStore = defineStore('audio', () => {
       });
 
       const { sessionId, metadata } = result;
-      console.log(`[Audio] Phase 1 done in ${(performance.now() - startTime).toFixed(0)}ms — metadata:`, metadata);
+      console.log(`[Audio] [${ms()}] Phase 1 complete: metadata probe — ${metadata.format} ${metadata.channels}ch ${metadata.sampleRate}Hz ${metadata.duration.toFixed(1)}s`);
 
       const fileName = getFileName(path);
       const trackStart = tracksStore.timelineDuration;
@@ -75,18 +81,31 @@ export const useAudioStore = defineStore('audio', () => {
         path,
       );
       const trackId = newTrack.id;
+      console.log(`[Audio] [${ms()}] Track created: ${trackId.slice(0, 8)} at ${trackStart.toFixed(1)}s`);
 
       selectionStore.resetSelection();
       tracksStore.selectTrack(trackId);
       lastImportedPath.value = path;
 
+      // ── Waveform completion promise ──
+      // importFile awaits BOTH buffer and waveform before finishing.
+      let resolveWaveform: () => void;
+      let waveformSettled = false;
+      const waveformDone = new Promise<void>(resolve => { resolveWaveform = resolve; });
+
       // Phase 2: Listen for progressive waveform chunks from Rust (runs in background)
+      let chunkCount = 0;
       const unlistenChunk = await listen<WaveformChunkEvent>('import-waveform-chunk', (event) => {
         if (event.payload.sessionId !== sessionId) return;
         const track = tracksStore.tracks.find(t => t.id === trackId);
         if (!track) return;
         tracksStore.updateImportWaveform(trackId, event.payload);
+        chunkCount++;
+        if (chunkCount === 1) {
+          console.log(`[Audio] [${ms()}] First waveform chunk received (progress: ${(event.payload.progress * 100).toFixed(0)}%)`);
+        }
       });
+      console.log(`[Audio] [${ms()}] Phase 2 listeners registered`);
 
       // Register both completion and error listeners simultaneously (no race condition)
       const unlistenComplete = await listen<ImportCompleteEvent>('import-complete', (event) => {
@@ -94,8 +113,10 @@ export const useAudioStore = defineStore('audio', () => {
         const track = tracksStore.tracks.find(t => t.id === trackId);
         if (track) {
           tracksStore.finalizeImportWaveform(trackId, event.payload.waveform, event.payload.actualDuration);
-          console.log(`[Audio] Waveform complete in ${((performance.now() - startTime) / 1000).toFixed(1)}s`);
+          console.log(`[Audio] [${ms()}] Phase 2 complete: waveform finalized (${chunkCount} chunks, duration: ${event.payload.actualDuration.toFixed(1)}s)`);
         }
+        waveformSettled = true;
+        resolveWaveform!();
         unlistenChunk();
         unlistenComplete();
         unlistenError();
@@ -103,7 +124,9 @@ export const useAudioStore = defineStore('audio', () => {
 
       const unlistenError = await listen<{ sessionId: string; error: string }>('import-error', (event) => {
         if (event.payload.sessionId !== sessionId) return;
-        console.error('[Audio] Waveform decode error:', event.payload.error);
+        console.error(`[Audio] [${ms()}] Phase 2 error: ${event.payload.error}`);
+        waveformSettled = true;
+        resolveWaveform!();
         unlistenChunk();
         unlistenComplete();
         unlistenError();
@@ -114,9 +137,10 @@ export const useAudioStore = defineStore('audio', () => {
       let audioBuffer: AudioBuffer | null = null;
       try {
         const assetUrl = convertFileSrc(path);
-        console.log('[Audio] Phase 3: fetching via asset protocol:', assetUrl);
+        console.log(`[Audio] [${ms()}] Phase 3 started: fetching via asset protocol`);
         const response = await fetch(assetUrl);
         const contentLength = Number(response.headers.get('content-length') || 0);
+        console.log(`[Audio] [${ms()}] Phase 3 response: status=${response.status}, content-length=${contentLength > 0 ? (contentLength / 1024 / 1024).toFixed(1) + 'MB' : 'unknown'}`);
 
         let arrayBuffer: ArrayBuffer;
         if (contentLength > 0 && response.body) {
@@ -135,6 +159,8 @@ export const useAudioStore = defineStore('audio', () => {
             tracksStore.updateImportDecodeProgress(trackId, fetchProgress);
           }
 
+          console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(received / 1024 / 1024).toFixed(1)}MB streamed`);
+
           // Concatenate chunks into single ArrayBuffer
           const full = new Uint8Array(received);
           let offset = 0;
@@ -146,43 +172,55 @@ export const useAudioStore = defineStore('audio', () => {
         } else {
           // No content-length (or no body stream) — fall back to simple fetch
           arrayBuffer = await response.arrayBuffer();
+          console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB (non-streamed)`);
         }
 
-        console.log(`[Audio] Phase 3: fetched ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB, decoding...`);
         tracksStore.updateImportDecodeProgress(trackId, 0.85);
+        console.log(`[Audio] [${ms()}] Phase 3 decoding audio buffer...`);
         audioBuffer = await ctx.decodeAudioData(arrayBuffer);
         tracksStore.updateImportDecodeProgress(trackId, 1.0);
-        console.log(`[Audio] Phase 3: browser decode done, duration: ${audioBuffer.duration.toFixed(2)}s`);
+        console.log(`[Audio] [${ms()}] Phase 3 complete: browser decode done (${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.numberOfChannels}ch, ${audioBuffer.sampleRate}Hz)`);
       } catch (e) {
-        console.warn('[Audio] Phase 3 failed (browser decode), will fall back to legacy:', e);
+        console.warn(`[Audio] [${ms()}] Phase 3 failed (browser decode):`, e);
       }
 
       // Check track still exists (may have been deleted during decode)
       const track = tracksStore.tracks.find(t => t.id === trackId);
       if (!track) {
-        console.log('[Audio] Track was deleted during import, discarding');
+        console.log(`[Audio] [${ms()}] Track deleted during import, discarding`);
+        // Clean up waveform listeners if still pending
+        if (!waveformSettled) {
+          unlistenChunk();
+          unlistenComplete();
+          unlistenError();
+        }
         historyStore.endBatch();
         return;
       }
 
       if (audioBuffer) {
         // Set buffer immediately — track becomes playable NOW
-        // Waveform continues filling in the background (Phase 2 still running)
         tracksStore.setImportBuffer(trackId, audioBuffer);
-        const totalTime = performance.now() - startTime;
-        console.log(`[Audio] Buffer ready in ${(totalTime / 1000).toFixed(2)}s — playback enabled`);
+        console.log(`[Audio] [${ms()}] Buffer set — playback enabled`);
       } else {
         // Fallback: browser couldn't decode (e.g. WMA) — use legacy monolithic load
-        console.warn('[Audio] Falling back to legacy load_audio_complete...');
+        console.warn(`[Audio] [${ms()}] Falling back to legacy load_audio_complete...`);
         await importFileLegacy(path, trackId, ctx);
       }
 
-      // Now that audio is loaded, trigger transcription
+      // Wait for waveform to also complete before considering import "done"
+      if (!waveformSettled) {
+        console.log(`[Audio] [${ms()}] Waiting for waveform to finalize...`);
+        await waveformDone;
+        console.log(`[Audio] [${ms()}] Waveform settled`);
+      }
+
+      // NOW import is fully complete — trigger transcription
       const { useTranscriptionStore } = await import('./transcription');
       const transcriptionStore = useTranscriptionStore();
       transcriptionStore.loadOrQueueTranscription(trackId);
 
-      console.log('[Audio] Audio ready for playback');
+      console.log(`[Audio] ── Import complete in ${((performance.now() - t0) / 1000).toFixed(2)}s ──`);
     } catch (e) {
       console.error('[Audio] Import error:', e);
       error.value = e instanceof Error ? e.message : 'Failed to load audio file';

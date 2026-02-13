@@ -66,29 +66,15 @@ const currentTime = computed(() => playbackStore.currentTime);
 const panelWidth = computed(() => uiStore.trackPanelWidth);
 const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH + 40);
 
-// Import state — goal-based progress combining waveform analysis + audio preparation
+// Import state
 const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
 
 // Combined progress: waveform (30% weight) + audio fetch/decode (70% weight)
-// This gives the user a single bar that moves toward 100%
 const combinedProgress = computed(() => {
   if (!isImporting.value) return 1;
   const waveformProg = props.track.importProgress || 0;
   const decodeProg = props.track.importDecodeProgress || 0;
   return waveformProg * 0.3 + decodeProg * 0.7;
-});
-
-const importLabel = computed(() => {
-  if (!isImporting.value) return '';
-  const pct = Math.round(combinedProgress.value * 100);
-  const decodeProg = props.track.importDecodeProgress || 0;
-  if (decodeProg >= 0.8) {
-    return `Decoding audio ${pct}%`;
-  }
-  if (decodeProg > 0) {
-    return `Preparing audio ${pct}%`;
-  }
-  return `Analyzing ${pct}%`;
 });
 const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
@@ -488,29 +474,21 @@ onUnmounted(() => {
         :height="TRACK_HEIGHT"
       />
 
-      <!-- Import progress overlay -->
+      <!-- Import progress overlay — subtle bar moving toward loaded -->
       <div v-if="isImporting" class="absolute inset-0 z-10 pointer-events-none">
-        <!-- Semi-transparent overlay -->
-        <div class="absolute inset-0 bg-gray-900/70" />
+        <!-- Dim overlay -->
+        <div class="absolute inset-0 bg-gray-900/50" />
         <!-- Progress bar at bottom -->
-        <div class="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-700">
+        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gray-800/80">
           <div
-            class="h-full bg-cyan-500 transition-all duration-300"
+            class="h-full bg-cyan-500/70 transition-all duration-300 ease-out"
             :style="{ width: `${combinedProgress * 100}%` }"
           />
-          <!-- Animated shimmer at progress edge -->
+          <!-- Subtle shimmer at leading edge -->
           <div
-            class="absolute top-0 h-full w-16 bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent animate-shimmer"
-            :style="{ left: `${Math.max(0, combinedProgress * 100 - 8)}%` }"
+            class="absolute top-0 h-full w-12 bg-gradient-to-r from-transparent via-cyan-400/30 to-transparent animate-shimmer"
+            :style="{ left: `${Math.max(0, combinedProgress * 100 - 6)}%` }"
           />
-        </div>
-        <!-- Status label with percentage -->
-        <div class="absolute inset-0 flex items-center justify-center gap-2">
-          <svg class="w-4 h-4 text-cyan-400 animate-spin" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" />
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          <span class="text-sm font-medium text-cyan-400">{{ importLabel }}</span>
         </div>
       </div>
 

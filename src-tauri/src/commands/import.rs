@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -464,11 +465,13 @@ fn decode_waveform_progressive(
     cancel: &AtomicBool,
     app_handle: &AppHandle,
 ) -> Result<(), String> {
+    let t0 = Instant::now();
     let path_ref = Path::new(path);
+    log::info!("[Waveform] Starting decode for {:?} ({} buckets)", path_ref.file_name().unwrap_or_default(), bucket_count);
 
     // ── Check peak cache first (instant for previously opened files) ───
     if let Some((cached_waveform, cached_duration)) = load_peak_cache(path_ref, bucket_count) {
-        // Cache hit — emit full waveform immediately, skip decode
+        log::info!("[Waveform] Peak cache HIT in {:?} — skipping decode", t0.elapsed());
         let _ = app_handle.emit(
             "import-complete",
             ImportCompleteEvent {
@@ -479,21 +482,25 @@ fn decode_waveform_progressive(
         );
         return Ok(());
     }
+    log::info!("[Waveform] Peak cache miss, checked in {:?}", t0.elapsed());
 
     // ── WAV mmap fast path — compute peaks directly from mapped PCM ───
     if let Some(ext) = path_ref.extension().and_then(|e| e.to_str()) {
         if ext.eq_ignore_ascii_case("wav") || ext.eq_ignore_ascii_case("wave") {
+            let mmap_start = Instant::now();
             if let Ok(file) = File::open(path_ref) {
                 if let Ok(mmap) = unsafe { Mmap::map(&file) } {
                     if let Some(wav) = parse_wav_header(&mmap) {
                         log::info!(
-                            "WAV mmap fast path: {}ch {}bit {}Hz, data offset={}, size={}",
+                            "[Waveform] WAV mmap: {}ch {}bit {}Hz, data={}B, mapped in {:?}",
                             wav.channels, wav.bits_per_sample, wav.sample_rate,
-                            wav.data_offset, wav.data_size
+                            wav.data_size, mmap_start.elapsed()
                         );
+                        let peaks_start = Instant::now();
                         if let Some((waveform, duration)) =
                             wav_mmap_peaks(&mmap, &wav, bucket_count, cancel, session_id, app_handle)
                         {
+                            log::info!("[Waveform] WAV mmap peaks computed in {:?} (total: {:?})", peaks_start.elapsed(), t0.elapsed());
                             save_peak_cache(path_ref, bucket_count, &waveform, duration);
                             let _ = app_handle.emit(
                                 "import-complete",
@@ -505,7 +512,7 @@ fn decode_waveform_progressive(
                             );
                             return Ok(());
                         }
-                        log::warn!("WAV mmap peaks failed, falling back to symphonia decode");
+                        log::warn!("[Waveform] WAV mmap peaks failed, falling back to symphonia");
                     }
                 }
             }
@@ -546,6 +553,11 @@ fn decode_waveform_progressive(
         .make(codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
+    log::info!(
+        "[Waveform] Symphonia decode starting: {}ch {}Hz, est_frames={}, probed in {:?}",
+        channels, sample_rate, n_frames, t0.elapsed()
+    );
+
     // Estimated total mono samples for bucket assignment
     let estimated_total = if n_frames > 0 { n_frames } else { sample_rate as usize * 60 };
     let samples_per_bucket = (estimated_total / bucket_count).max(1);
@@ -558,6 +570,8 @@ fn decode_waveform_progressive(
 
     let mut total_decoded: usize = 0;
     let mut last_emitted_bucket: usize = 0;
+    let mut packet_count: usize = 0;
+    let decode_start = Instant::now();
 
     // Emit chunks every ~5% of buckets
     let chunk_interval = (bucket_count / 20).max(10);
@@ -581,6 +595,7 @@ fn decode_waveform_progressive(
         if packet.track_id() != track_id {
             continue;
         }
+        packet_count += 1;
 
         let decoded = match decoder.decode(&packet) {
             Ok(decoded) => decoded,
@@ -635,6 +650,11 @@ fn decode_waveform_progressive(
         }
     }
 
+    log::info!(
+        "[Waveform] Decode loop finished: {} packets, {} samples in {:?} (total: {:?})",
+        packet_count, total_decoded, decode_start.elapsed(), t0.elapsed()
+    );
+
     // For VBR files the estimated_total may be wrong — redistribute samples into
     // buckets using the actual total. Only needed if estimate was significantly off.
     let actual_samples_per_bucket = (total_decoded / bucket_count).max(1);
@@ -643,10 +663,8 @@ fn decode_waveform_progressive(
         > 0.05; // >5% drift
 
     let final_waveform = if needs_recompute {
-        // Drift too large — the bucket boundaries shifted. Emit the best we have
-        // (the buckets are still visually close enough for an overview waveform).
         log::info!(
-            "VBR drift detected: estimated {} actual {} samples/bucket",
+            "[Waveform] VBR drift: estimated {} vs actual {} samples/bucket",
             samples_per_bucket,
             actual_samples_per_bucket
         );
@@ -659,6 +677,11 @@ fn decode_waveform_progressive(
 
     // Save to peak cache for instant reopening
     save_peak_cache(path_ref, bucket_count, &final_waveform, actual_duration);
+
+    log::info!(
+        "[Waveform] Complete: duration={:.1}s, emitting import-complete (total: {:?})",
+        actual_duration, t0.elapsed()
+    );
 
     let _ = app_handle.emit(
         "import-complete",
