@@ -161,6 +161,7 @@ Pressing a loop mode key also enables looping if it was disabled.
 
 | Key | Action |
 |-----|--------|
+| `M` | Add marker at playhead |
 | `Ctrl+F` | Focus search bar |
 | `Escape` | Unfocus text input |
 

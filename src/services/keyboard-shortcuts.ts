@@ -43,7 +43,7 @@ export interface KeyboardActions {
   // Marker navigation
   onNextMarker?: () => void;
   onPreviousMarker?: () => void;
-  // Recording timemark
+  // Add marker (recording timemark or at playhead)
   onAddTimemark?: () => void;
   // Quick Re-Export (Ctrl+Shift+E)
   onQuickExport?: () => void;
@@ -326,11 +326,8 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
 
       case KEYBOARD_SHORTCUTS.MARK_TIME:
         if (!isCtrlOrCmd) {
-          const recStoreForMark = useRecordingStore();
-          if (recStoreForMark.isRecording) {
-            event.preventDefault();
-            actions.onAddTimemark?.();
-          }
+          event.preventDefault();
+          actions.onAddTimemark?.();
         }
         break;
 

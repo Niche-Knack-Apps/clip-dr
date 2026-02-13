@@ -215,7 +215,19 @@ useKeyboardShortcuts({
   onZoomOut: () => uiStore.zoomTrackOut(),
   onNextMarker: () => playbackStore.jumpToNextMarker(),
   onPreviousMarker: () => playbackStore.jumpToPreviousMarker(),
-  onAddTimemark: () => recordingStore.addTimemark(),
+  onAddTimemark: () => {
+    if (recordingStore.isRecording) {
+      recordingStore.addTimemark();
+    } else {
+      // Add marker at playhead on selected (or first) track
+      const trackId = tracksStore.selectedTrackId && tracksStore.selectedTrackId !== 'ALL'
+        ? tracksStore.selectedTrackId
+        : tracksStore.tracks[0]?.id;
+      if (trackId) {
+        tracksStore.addTimemark(trackId, playbackStore.currentTime, 'Marker');
+      }
+    }
+  },
   // Track selection cycling (Tab/Shift+Tab)
   onSelectNextTrack: () => {
     const tracks = tracksStore.tracks;
@@ -412,7 +424,7 @@ useKeyboardShortcuts({
               <div class="space-y-1">
                 <div class="flex justify-between"><span class="text-gray-400">Search</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">F</kbd></span></div>
                 <div class="flex justify-between"><span class="text-gray-400">Quick Re-Export</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Ctrl</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Shift</kbd>+<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">E</kbd></span></div>
-                <div class="flex justify-between"><span class="text-gray-400">Mark time (while recording)</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">M</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Add marker at playhead</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">M</kbd></div>
                 <div class="flex justify-between"><span class="text-gray-400">Show this modal</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">?</kbd></div>
               </div>
             </div>
