@@ -2,11 +2,15 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::WavReader;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::services::path_service;
 
 // ── Types ──
 
@@ -173,8 +177,21 @@ pub(crate) fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Decode a compressed audio file to PCM via symphonia
-pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String> {
+/// Compute a cache key for a file based on path, size, and mtime
+fn decode_cache_key(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    if let Ok(mtime) = meta.modified() {
+        mtime.hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Decode a compressed audio file to a cached 32-bit float WAV, then mmap it.
+/// This avoids holding the entire decoded PCM in memory.
+fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -182,6 +199,33 @@ pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String>
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
+    let src_path = Path::new(path);
+    let file_hash = decode_cache_key(src_path)
+        .ok_or_else(|| format!("Cannot stat source file: {}", path))?;
+
+    // Cache path: {app_data_dir}/decode-cache/{hash}.wav
+    let data_dir = path_service::get_user_data_dir()
+        .map_err(|e| format!("Path service error: {}", e))?;
+    let cache_dir = data_dir.join("decode-cache");
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create decode-cache dir: {}", e))?;
+    let cache_path = cache_dir.join(format!("{:016x}.wav", file_hash));
+
+    // If cached WAV exists and is newer than source, reuse it
+    if cache_path.exists() {
+        if let (Ok(src_meta), Ok(cache_meta)) = (fs::metadata(src_path), fs::metadata(&cache_path)) {
+            if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
+                if cache_mtime >= src_mtime {
+                    log::info!("Decode cache hit: {:?}", cache_path);
+                    return Ok(cache_path);
+                }
+            }
+        }
+    }
+
+    log::info!("Decoding {:?} to cache WAV {:?}", path, cache_path);
+
+    // Open source with symphonia
     let file = File::open(path)
         .map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -209,15 +253,24 @@ pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String>
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    let mut all_samples: Vec<f32> = Vec::new();
+    // Create WAV writer — 32-bit float so load_wav_mmap() can handle it
+    let wav_spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(&cache_path, wav_spec)
+        .map_err(|e| format!("Failed to create cache WAV: {}", e))?;
 
+    // Decode in chunks, writing each directly to WAV (O(1) memory)
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
-                log::warn!("Playback decode error: {}", e);
+                log::warn!("Decode error (continuing): {}", e);
                 break;
             }
         };
@@ -226,7 +279,7 @@ pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String>
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             Err(e) => {
-                log::warn!("Playback decode error: {}", e);
+                log::warn!("Decode packet error: {}", e);
                 continue;
             }
         };
@@ -235,10 +288,40 @@ pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String>
         let num_frames = decoded.frames();
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
-        all_samples.extend_from_slice(sample_buf.samples());
+
+        for &s in sample_buf.samples() {
+            writer.write_sample(s)
+                .map_err(|e| format!("WAV write error: {}", e))?;
+        }
     }
 
-    Ok((PcmData::Vec(all_samples), sample_rate, channels))
+    writer.finalize()
+        .map_err(|e| format!("Failed to finalize cache WAV: {}", e))?;
+
+    log::info!("Decode cache written: {:?}", cache_path);
+    Ok(cache_path)
+}
+
+/// Decode a compressed audio file to PCM via cached temp WAV + mmap
+pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String> {
+    let wav_path = decode_to_temp_wav(path)?;
+    let wav_str = wav_path.to_string_lossy();
+
+    // Try mmap first (fast, zero-copy)
+    match load_wav_mmap(&wav_str) {
+        Ok(result) => Ok(result),
+        Err(mmap_err) => {
+            // Fall back to hound decode if mmap fails (e.g. alignment issues)
+            log::warn!("Mmap of decoded WAV failed ({}), falling back to hound read", mmap_err);
+            let mut reader = WavReader::open(&wav_path)
+                .map_err(|e| format!("Failed to open decoded WAV: {}", e))?;
+            let spec = reader.spec();
+            let samples: Vec<f32> = reader.samples::<f32>()
+                .map(|s| s.unwrap_or(0.0))
+                .collect();
+            Ok((PcmData::Vec(samples), spec.sample_rate, spec.channels))
+        }
+    }
 }
 
 /// Load a track source from a file path
