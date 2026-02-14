@@ -21,7 +21,7 @@ pub struct PlaybackTrackConfig {
 }
 
 /// Per-track audio source — either an mmap'd WAV or decoded PCM in memory
-struct TrackSource {
+pub(crate) struct TrackSource {
     config: PlaybackTrackConfig,
     /// Interleaved f32 PCM data (mmap'd or decoded)
     pcm: PcmData,
@@ -29,7 +29,7 @@ struct TrackSource {
     channels: u16,
 }
 
-enum PcmData {
+pub(crate) enum PcmData {
     /// Memory-mapped WAV file — zero-copy access to PCM samples
     Mmap {
         _mmap: Mmap,
@@ -46,7 +46,7 @@ unsafe impl Send for PcmData {}
 unsafe impl Sync for PcmData {}
 
 impl PcmData {
-    fn samples(&self) -> &[f32] {
+    pub(crate) fn samples(&self) -> &[f32] {
         match self {
             PcmData::Mmap { samples_ptr, sample_count, .. } => {
                 // Safety: pointer is valid for sample_count f32s, mmap is alive
@@ -56,7 +56,7 @@ impl PcmData {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             PcmData::Mmap { sample_count, .. } => *sample_count,
             PcmData::Vec(v) => v.len(),
@@ -129,7 +129,7 @@ impl PlaybackEngine {
 // ── Audio source loading ──
 
 /// Try to mmap a WAV file for zero-copy PCM access
-fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
+pub(crate) fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
     let file = File::open(path)
         .map_err(|e| format!("Failed to open WAV: {}", e))?;
     let mmap = unsafe { Mmap::map(&file) }
@@ -162,7 +162,7 @@ fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
 }
 
 /// Find the byte offset of WAV PCM data (after 'data' chunk header)
-fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
+pub(crate) fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
     // Search for 'data' marker
     for i in 0..data.len().saturating_sub(8) {
         if &data[i..i + 4] == b"data" {
@@ -174,7 +174,7 @@ fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
 }
 
 /// Decode a compressed audio file to PCM via symphonia
-fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String> {
+pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;

@@ -46,6 +46,7 @@ fn main() {
             transcribe::download_model,
             export::export_audio_region,
             export::export_audio_mp3,
+            export::export_edl,
             vad::detect_speech_segments,
             vad::export_without_silence,
             clean::clean_audio,

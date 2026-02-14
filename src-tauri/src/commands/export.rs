@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -8,6 +9,10 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use hound::{WavSpec, WavWriter};
 use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm};
+use serde::Deserialize;
+use tauri::Emitter;
+
+use super::playback::{PcmData, load_wav_mmap, load_compressed};
 
 #[tauri::command]
 pub async fn export_audio_region(
@@ -294,4 +299,293 @@ pub async fn export_audio_mp3(
     log::info!("Exported MP3 {} to {} ({}kbps)", source_path, output_path, bitrate);
 
     Ok(())
+}
+
+// ── EDL (Edit Decision List) streaming export ──
+// Reads source files via mmap/symphonia, mixes in 64K-frame chunks,
+// writes directly to output. Memory: O(chunk_size * channels * tracks).
+
+const CHUNK_FRAMES: usize = 65536;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExportEDL {
+    pub tracks: Vec<ExportEDLTrack>,
+    pub output_path: String,
+    pub format: String,        // "wav" | "mp3"
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub mp3_bitrate: Option<u32>,
+    pub start_time: f64,
+    pub end_time: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExportEDLTrack {
+    pub source_path: String,
+    pub track_start: f64,  // timeline offset in seconds
+    pub duration: f64,
+    pub volume: f32,
+}
+
+/// Loaded audio source for EDL mixing
+struct EdlSource {
+    track_start: f64,
+    duration: f64,
+    volume: f32,
+    pcm: PcmData,
+    sample_rate: u32,
+    channels: u16,
+}
+
+#[tauri::command]
+pub async fn export_edl(edl: ExportEDL, app: tauri::AppHandle) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        export_edl_inner(&edl, &app)
+    }).await.map_err(|e| format!("Export task failed: {}", e))?
+}
+
+fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, String> {
+    log::info!(
+        "EDL export: {} tracks, format={}, {}Hz {}ch, {:.1}s-{:.1}s",
+        edl.tracks.len(), edl.format, edl.sample_rate, edl.channels,
+        edl.start_time, edl.end_time,
+    );
+
+    // Load all track sources
+    let mut sources: Vec<EdlSource> = Vec::new();
+    for track in &edl.tracks {
+        let (pcm, sample_rate, channels) = match load_wav_mmap(&track.source_path) {
+            Ok(result) => result,
+            Err(_) => load_compressed(&track.source_path)?,
+        };
+        log::info!("  Loaded source: {}Hz {}ch {} samples", sample_rate, channels, pcm.len());
+        sources.push(EdlSource {
+            track_start: track.track_start,
+            duration: track.duration,
+            volume: track.volume,
+            pcm,
+            sample_rate,
+            channels,
+        });
+    }
+
+    let total_frames = ((edl.end_time - edl.start_time) * edl.sample_rate as f64) as usize;
+
+    let result = match edl.format.as_str() {
+        "wav" => export_edl_wav(edl, &sources, total_frames, app),
+        "mp3" => export_edl_mp3(edl, &sources, total_frames, app),
+        f => Err(format!("Unsupported EDL export format: '{}'. Use 'wav' or 'mp3'.", f)),
+    };
+
+    if result.is_ok() {
+        log::info!("EDL export complete: {}", edl.output_path);
+    }
+
+    result
+}
+
+/// Mix source tracks into a buffer for a range of output frames.
+/// `mix_buf` is filled with interleaved f32 samples (output_channels per frame).
+fn mix_chunk(
+    sources: &[EdlSource],
+    start_frame: usize,
+    frame_count: usize,
+    timeline_start: f64,
+    output_rate: f64,
+    output_channels: usize,
+    mix_buf: &mut Vec<f32>,
+) {
+    mix_buf.clear();
+    mix_buf.resize(frame_count * output_channels, 0.0);
+
+    for src in sources {
+        let src_rate = src.sample_rate as f64;
+        let src_ch = src.channels as usize;
+        let samples = src.pcm.samples();
+
+        for i in 0..frame_count {
+            let t = timeline_start + (start_frame + i) as f64 / output_rate;
+            let rel_t = t - src.track_start;
+            if rel_t < 0.0 || rel_t >= src.duration { continue; }
+
+            let src_frame = (rel_t * src_rate) as usize;
+            let interleaved_idx = src_frame * src_ch;
+            if interleaved_idx >= samples.len() { continue; }
+
+            let out_base = i * output_channels;
+
+            if src_ch == 1 {
+                let s = samples[interleaved_idx] * src.volume;
+                mix_buf[out_base] += s;
+                if output_channels >= 2 {
+                    mix_buf[out_base + 1] += s;
+                }
+            } else {
+                mix_buf[out_base] += samples[interleaved_idx] * src.volume;
+                if output_channels >= 2 && interleaved_idx + 1 < samples.len() {
+                    mix_buf[out_base + 1] += samples[interleaved_idx + 1] * src.volume;
+                }
+            }
+        }
+    }
+}
+
+fn export_edl_wav(
+    edl: &ExportEDL,
+    sources: &[EdlSource],
+    total_frames: usize,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    let spec = WavSpec {
+        channels: edl.channels,
+        sample_rate: edl.sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    let mut writer = WavWriter::create(&edl.output_path, spec)
+        .map_err(|e| format!("Failed to create WAV: {}", e))?;
+
+    let output_rate = edl.sample_rate as f64;
+    let output_channels = edl.channels as usize;
+    let mut frames_written = 0usize;
+    let mut mix_buf: Vec<f32> = Vec::new();
+
+    while frames_written < total_frames {
+        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+
+        mix_chunk(
+            sources, frames_written, chunk_size,
+            edl.start_time, output_rate, output_channels, &mut mix_buf,
+        );
+
+        for &sample in &mix_buf {
+            writer.write_sample(sample)
+                .map_err(|e| format!("Write error: {}", e))?;
+        }
+
+        frames_written += chunk_size;
+
+        // Emit progress every chunk
+        let progress = frames_written as f64 / total_frames as f64;
+        let _ = app.emit("export-progress", serde_json::json!({
+            "progress": progress,
+            "framesWritten": frames_written,
+            "totalFrames": total_frames,
+        }));
+    }
+
+    writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+
+    Ok(edl.output_path.clone())
+}
+
+fn export_edl_mp3(
+    edl: &ExportEDL,
+    sources: &[EdlSource],
+    total_frames: usize,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    let bitrate = edl.mp3_bitrate.unwrap_or(192);
+    let output_rate = edl.sample_rate;
+    let output_channels = edl.channels as usize;
+
+    // LAME always expects stereo interleaved data
+    let encode_channels = 2u8;
+
+    let mut builder = Builder::new().ok_or("Failed to create MP3 encoder")?;
+    builder.set_num_channels(encode_channels)
+        .map_err(|e| format!("Set channels: {:?}", e))?;
+    builder.set_sample_rate(output_rate)
+        .map_err(|e| format!("Set sample rate: {:?}", e))?;
+    builder.set_brate(map_bitrate(bitrate))
+        .map_err(|e| format!("Set bitrate: {:?}", e))?;
+    builder.set_quality(mp3lame_encoder::Quality::Best)
+        .map_err(|e| format!("Set quality: {:?}", e))?;
+
+    let mut encoder = builder.build()
+        .map_err(|e| format!("Build encoder: {:?}", e))?;
+
+    let mut output_file = File::create(&edl.output_path)
+        .map_err(|e| format!("Create output: {}", e))?;
+
+    let output_rate_f64 = output_rate as f64;
+    let mut frames_written = 0usize;
+    let mut mix_buf: Vec<f32> = Vec::new();
+    let mut chunk_i16: Vec<i16> = Vec::with_capacity(CHUNK_FRAMES * 2);
+    // MP3 output buffer: 1.25x input + 7200 safety margin
+    let mp3_buf_capacity = CHUNK_FRAMES * 2 * 5 / 4 + 7200;
+    let mut mp3_out: Vec<u8> = Vec::with_capacity(mp3_buf_capacity);
+
+    while frames_written < total_frames {
+        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+
+        mix_chunk(
+            sources, frames_written, chunk_size,
+            edl.start_time, output_rate_f64, output_channels, &mut mix_buf,
+        );
+
+        // Convert mix to stereo i16 for LAME
+        chunk_i16.clear();
+        for i in 0..chunk_size {
+            let base = i * output_channels;
+            let left = mix_buf[base].clamp(-1.0, 1.0);
+            let right = if output_channels >= 2 {
+                mix_buf[base + 1].clamp(-1.0, 1.0)
+            } else {
+                left
+            };
+            chunk_i16.push((left * 32767.0) as i16);
+            chunk_i16.push((right * 32767.0) as i16);
+        }
+
+        // Encode chunk to MP3
+        mp3_out.clear();
+        mp3_out.reserve(mp3_buf_capacity);
+        let input = InterleavedPcm(&chunk_i16);
+        let encoded = encoder.encode(input, mp3_out.spare_capacity_mut())
+            .map_err(|e| format!("Encode error: {:?}", e))?;
+        unsafe { mp3_out.set_len(encoded); }
+        output_file.write_all(&mp3_out)
+            .map_err(|e| format!("Write error: {}", e))?;
+
+        frames_written += chunk_size;
+
+        let progress = frames_written as f64 / total_frames as f64;
+        let _ = app.emit("export-progress", serde_json::json!({
+            "progress": progress,
+            "framesWritten": frames_written,
+            "totalFrames": total_frames,
+        }));
+    }
+
+    // Flush LAME encoder
+    mp3_out.clear();
+    mp3_out.reserve(7200);
+    let flush_size = encoder.flush::<FlushNoGap>(mp3_out.spare_capacity_mut())
+        .map_err(|e| format!("Flush error: {:?}", e))?;
+    unsafe { mp3_out.set_len(flush_size); }
+    output_file.write_all(&mp3_out)
+        .map_err(|e| format!("Write error: {}", e))?;
+
+    Ok(edl.output_path.clone())
+}
+
+fn map_bitrate(bitrate: u32) -> mp3lame_encoder::Bitrate {
+    match bitrate {
+        0..=32 => mp3lame_encoder::Bitrate::Kbps32,
+        33..=40 => mp3lame_encoder::Bitrate::Kbps40,
+        41..=48 => mp3lame_encoder::Bitrate::Kbps48,
+        49..=64 => mp3lame_encoder::Bitrate::Kbps64,
+        65..=80 => mp3lame_encoder::Bitrate::Kbps80,
+        81..=96 => mp3lame_encoder::Bitrate::Kbps96,
+        97..=112 => mp3lame_encoder::Bitrate::Kbps112,
+        113..=128 => mp3lame_encoder::Bitrate::Kbps128,
+        129..=160 => mp3lame_encoder::Bitrate::Kbps160,
+        161..=192 => mp3lame_encoder::Bitrate::Kbps192,
+        193..=224 => mp3lame_encoder::Bitrate::Kbps224,
+        225..=256 => mp3lame_encoder::Bitrate::Kbps256,
+        257..=320 => mp3lame_encoder::Bitrate::Kbps320,
+        _ => mp3lame_encoder::Bitrate::Kbps192,
+    }
 }
