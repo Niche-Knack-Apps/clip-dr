@@ -67,7 +67,8 @@ const panelWidth = computed(() => uiStore.trackPanelWidth);
 const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH + 40);
 
 // Import state
-const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready');
+const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready' && props.track.importStatus !== 'large-file');
+const isLargeFile = computed(() => props.track.importStatus === 'large-file');
 
 // Density check: skip import waveform when zoomed out too far
 const effectiveZoom = computed(() => {
@@ -374,6 +375,11 @@ onUnmounted(() => {
           </div>
           <div class="text-[10px] text-gray-500">
             {{ formattedDuration }}
+            <span
+              v-if="isLargeFile"
+              class="ml-1 text-amber-400"
+              title="Large file — waveform and transcription available. Playback requires Rust engine (coming soon)."
+            >LARGE</span>
           </div>
         </div>
 
@@ -417,13 +423,13 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
-              isImporting
+              isImporting || isLargeFile
                 ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
                 : 'bg-gray-700 text-gray-400 hover:bg-green-600 hover:text-white',
             ]"
-            title="Export"
-            :disabled="isImporting"
-            @click.stop="!isImporting && emit('export', track.id)"
+            :title="isLargeFile ? 'Export unavailable for large files' : 'Export'"
+            :disabled="isImporting || isLargeFile"
+            @click.stop="!isImporting && !isLargeFile && emit('export', track.id)"
           >
             E
           </button>
