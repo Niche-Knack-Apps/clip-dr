@@ -6,6 +6,10 @@ export const WAVEFORM_BUCKET_COUNT = 1000;
 
 export const MIN_SELECTION_DURATION = 0.1;
 
+// Maximum estimated PCM size (bytes) for browser decode - 500MB
+// Files larger than this skip decodeAudioData to avoid WebView OOM crashes
+export const LARGE_FILE_PCM_THRESHOLD = 524_288_000;
+
 export const SEARCH_MIN_WORDS = 1;
 
 export const SEARCH_STOPWORDS = new Set([

@@ -98,7 +98,7 @@ export const TRACK_COLORS = [
   '#fcbad3', // pink
 ] as const;
 
-export type ImportStatus = 'importing' | 'decoding' | 'ready' | 'error';
+export type ImportStatus = 'importing' | 'decoding' | 'ready' | 'error' | 'large-file';
 
 export interface ImportStartResult {
   sessionId: string;
