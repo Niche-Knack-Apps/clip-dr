@@ -20,7 +20,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 const containerRef = ref<HTMLDivElement | null>(null);
 const width = ref(0);
 
-const { getBucketsForRange, renderWaveform, waveformData, duration } = useWaveform();
+const { getBucketsForRange, renderWaveform, waveformData, duration, tileVersion } = useWaveform();
 
 let resizeObserver: ResizeObserver | null = null;
 let resizeRafId: number | null = null;
@@ -102,7 +102,7 @@ onUnmounted(() => {
 });
 
 // Watch for props changes and waveform data changes (when tracks are modified)
-watch([() => props.startTime, () => props.endTime, () => props.color, waveformVersion, duration], scheduleRender, { immediate: true });
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformVersion, tileVersion, duration], scheduleRender, { immediate: true });
 </script>
 
 <template>

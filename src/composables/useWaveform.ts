@@ -1,4 +1,7 @@
+import { ref } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
+import { useTracksStore } from '@/stores/tracks';
 import type { WaveformBucket } from '@/shared/types';
 
 export interface WaveformRenderOptions {
@@ -12,10 +15,18 @@ export interface WaveformRenderOptions {
 
 export function useWaveform() {
   const { effectiveWaveformData, effectiveDuration } = useEffectiveAudio();
+  const tracksStore = useTracksStore();
 
   // Use effective waveform/duration which switches when a processed track is soloed
   const waveformData = effectiveWaveformData;
   const duration = effectiveDuration;
+
+  // Peak tile cache for high-resolution waveform at deep zoom
+  const tileVersion = ref(0);
+  const tileCache = new Map<string, number[]>();
+  let pendingTileKey = '';
+  let tileDebounceId: number | null = null;
+  const TILE_CACHE_MAX = 16; // LRU eviction limit
 
   function getBucketsForRange(
     start: number,
@@ -31,6 +42,34 @@ export function useWaveform() {
     const endBucket = Math.ceil((end / duration.value) * totalBuckets);
     const rangeBuckets = endBucket - startBucket;
 
+    // Check if peak tile can provide better detail (single-track with pyramid)
+    if (rangeBuckets < bucketCount / 2) {
+      const tracks = tracksStore.tracks;
+      if (tracks.length === 1 && tracks[0].hasPeakPyramid && tracks[0].sourcePath) {
+        const cacheKey = `${start.toFixed(3)}:${end.toFixed(3)}:${bucketCount}`;
+        const cached = tileCache.get(cacheKey);
+        if (cached && cached.length >= bucketCount * 2) {
+          // Return cached tile data
+          const buckets: WaveformBucket[] = [];
+          for (let i = 0; i < bucketCount; i++) {
+            buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
+          }
+          return buckets;
+        }
+
+        // Schedule async tile fetch (debounced)
+        if (pendingTileKey !== cacheKey) {
+          pendingTileKey = cacheKey;
+          if (tileDebounceId !== null) cancelAnimationFrame(tileDebounceId);
+          tileDebounceId = requestAnimationFrame(() => {
+            tileDebounceId = null;
+            fetchPeakTile(tracks[0].sourcePath!, start, end, bucketCount, cacheKey);
+          });
+        }
+      }
+    }
+
+    // Fall back to existing 1000-bucket data
     if (rangeBuckets <= bucketCount) {
       const buckets: WaveformBucket[] = [];
       for (let i = startBucket; i < endBucket; i++) {
@@ -67,6 +106,34 @@ export function useWaveform() {
     }
 
     return buckets;
+  }
+
+  async function fetchPeakTile(
+    sourcePath: string,
+    startTime: number,
+    endTime: number,
+    bucketCount: number,
+    cacheKey: string,
+  ): Promise<void> {
+    try {
+      const tileData = await invoke<number[]>('get_peak_tile', {
+        path: sourcePath,
+        startTime,
+        endTime,
+        bucketCount,
+      });
+
+      // LRU eviction
+      if (tileCache.size >= TILE_CACHE_MAX) {
+        const firstKey = tileCache.keys().next().value;
+        if (firstKey !== undefined) tileCache.delete(firstKey);
+      }
+
+      tileCache.set(cacheKey, tileData);
+      tileVersion.value++; // Trigger re-render
+    } catch (e) {
+      // Peak tile not available — silently fall back to 1000-bucket data
+    }
   }
 
   function renderWaveform(
@@ -123,6 +190,7 @@ export function useWaveform() {
   return {
     waveformData,
     duration,
+    tileVersion,
     getBucketsForRange,
     renderWaveform,
     timeToX,

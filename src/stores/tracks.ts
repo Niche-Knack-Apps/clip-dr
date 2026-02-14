@@ -1470,6 +1470,13 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
+  function setHasPeakPyramid(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    tracks.value[idx] = { ...tracks.value[idx], hasPeakPyramid: true };
+    tracks.value = [...tracks.value];
+  }
+
   /** Add a timemark to any track (not just during recording) */
   function addTimemark(trackId: string, time: number, label: string, source: 'manual' | 'auto' = 'manual'): void {
     const track = tracks.value.find(t => t.id === trackId);
@@ -1562,5 +1569,6 @@ export const useTracksStore = defineStore('tracks', () => {
     updateImportDecodeProgress,
     setImportBuffer,
     setImportLargeFile,
+    setHasPeakPyramid,
   };
 });

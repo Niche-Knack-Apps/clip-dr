@@ -151,6 +151,8 @@ export interface Track {
   importDecodeProgress?: number;
   /** Active import session ID */
   importSessionId?: string;
+  /** Whether a multi-LOD peak pyramid is available for this track */
+  hasPeakPyramid?: boolean;
 }
 
 /** @deprecated Clips are now part of tracks */

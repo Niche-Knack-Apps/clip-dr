@@ -17,6 +17,16 @@ export const useAudioStore = defineStore('audio', () => {
   // Track the last imported file path for reference
   const lastImportedPath = ref<string | null>(null);
 
+  // Listen for peak pyramid completion from Rust
+  listen<{ sourcePath: string }>('peak-pyramid-ready', (event) => {
+    const tracksStore = useTracksStore();
+    const track = tracksStore.tracks.find(t => t.sourcePath === event.payload.sourcePath);
+    if (track) {
+      tracksStore.setHasPeakPyramid(track.id);
+      console.log(`[Audio] Peak pyramid ready for track: ${track.name}`);
+    }
+  });
+
   function initAudioContext() {
     if (!audioContext.value) {
       audioContext.value = new AudioContext();
