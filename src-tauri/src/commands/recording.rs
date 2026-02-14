@@ -7,8 +7,19 @@ use std::io::{BufReader, BufWriter, Read};
 use std::panic;
 use std::path::PathBuf;
 use std::process::{ChildStdout, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+/// Wrapper to make cpal::Stream storable in a Mutex (it's !Send but we only
+/// access from the main thread during setup/teardown)
+struct StreamHolder(cpal::Stream);
+unsafe impl Send for StreamHolder {}
+
+/// Properly hold recording and monitor streams so they can be dropped
+static RECORDING_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
+static MONITOR_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +48,6 @@ lazy_static::lazy_static! {
     static ref SYSTEM_MONITOR_CHILD: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
     static ref CURRENT_LEVEL: AtomicU32 = AtomicU32::new(0);
     static ref DEBUG_CALLBACK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    static ref RECORDING_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     // For streaming system audio - track sample count (no accumulation)
     static ref SYSTEM_AUDIO_SAMPLE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static ref SYSTEM_WAV_WRITER: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>> = Arc::new(Mutex::new(None));
@@ -50,8 +60,159 @@ struct RecordingState {
     output_path: PathBuf,
     use_system_buffer: bool,
     target_mono: bool,
-    // Incremental WAV writer for crash safety
-    wav_writer: Option<WavWriter<BufWriter<File>>>,
+    // Ring buffer + writer thread (mic recording only; system audio uses SYSTEM_WAV_WRITER)
+    ring_buffer: Option<Arc<RecordingRingBuffer>>,
+    writer_handle: Option<JoinHandle<(WavWriter<BufWriter<File>>, usize)>>,
+}
+
+// ── Lock-free ring buffer for realtime-safe recording ──
+
+/// SPSC ring buffer: audio callback (producer) writes samples lock-free,
+/// dedicated writer thread (consumer) drains to disk.
+struct RecordingRingBuffer {
+    #[allow(dead_code)] // Keeps allocation alive; data_ptr points into it
+    data: Box<[f32]>,
+    data_ptr: *mut f32,
+    capacity: usize,
+    /// Total samples written by producer (monotonically increasing)
+    write_pos: AtomicUsize,
+    /// Total samples read by consumer (monotonically increasing)
+    read_pos: AtomicUsize,
+    /// False = writer thread should drain remaining samples and exit
+    active: AtomicBool,
+    /// Number of input channels (for bad-channel detection)
+    channels: u16,
+    /// Bad channel detected: 0=none, 1=ch0 bad, 2=ch1 bad
+    bad_channel: AtomicUsize,
+}
+
+unsafe impl Send for RecordingRingBuffer {}
+unsafe impl Sync for RecordingRingBuffer {}
+
+impl RecordingRingBuffer {
+    fn new(capacity: usize) -> Self {
+        let mut data = vec![0.0f32; capacity].into_boxed_slice();
+        let data_ptr = data.as_mut_ptr();
+        Self {
+            data,
+            data_ptr,
+            capacity,
+            write_pos: AtomicUsize::new(0),
+            read_pos: AtomicUsize::new(0),
+            active: AtomicBool::new(true),
+            channels: 2,
+            bad_channel: AtomicUsize::new(0),
+        }
+    }
+
+    fn with_channels(mut self, channels: u16) -> Self {
+        self.channels = channels;
+        self
+    }
+}
+
+/// Spawn a dedicated writer thread that drains the ring buffer to a WavWriter.
+/// Returns a JoinHandle that yields (WavWriter, total_sample_count) on join.
+fn spawn_wav_writer_thread(
+    ring: Arc<RecordingRingBuffer>,
+    wav_writer: WavWriter<BufWriter<File>>,
+    channels: u16,
+    _target_mono: bool,
+) -> JoinHandle<(WavWriter<BufWriter<File>>, usize)> {
+    std::thread::Builder::new()
+        .name("wav-writer".into())
+        .spawn(move || {
+            let mut writer = wav_writer;
+            let mut total_written: usize = 0;
+            let mut bad_channel_checked = false;
+
+            loop {
+                let wp = ring.write_pos.load(Ordering::Acquire);
+                let rp = ring.read_pos.load(Ordering::Relaxed);
+                let available = wp.wrapping_sub(rp);
+
+                if available == 0 {
+                    if !ring.active.load(Ordering::Acquire) {
+                        break; // No more data and signaled to stop
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                    continue;
+                }
+
+                // Bad-channel detection on first batch of samples (first ~100ms)
+                if !bad_channel_checked && channels == 2 && available >= 200 {
+                    bad_channel_checked = true;
+                    let check_pairs = 100.min(available / 2);
+                    let mut ch0_clipped = 0usize;
+                    let mut ch1_clipped = 0usize;
+                    for i in 0..check_pairs {
+                        let idx0 = (rp + i * 2) % ring.capacity;
+                        let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                        let s0 = unsafe { *ring.data_ptr.add(idx0) };
+                        let s1 = unsafe { *ring.data_ptr.add(idx1) };
+                        if s0.abs() >= 0.999 { ch0_clipped += 1; }
+                        if s1.abs() >= 0.999 { ch1_clipped += 1; }
+                    }
+                    if ch0_clipped >= check_pairs * 8 / 10 && ch1_clipped < check_pairs * 3 / 10 {
+                        log::info!("Detected bad channel 0, duplicating channel 1");
+                        ring.bad_channel.store(1, Ordering::Release);
+                    } else if ch1_clipped >= check_pairs * 8 / 10 && ch0_clipped < check_pairs * 3 / 10 {
+                        log::info!("Detected bad channel 1, duplicating channel 0");
+                        ring.bad_channel.store(2, Ordering::Release);
+                    }
+                }
+
+                let bad_ch = ring.bad_channel.load(Ordering::Relaxed);
+
+                // Drain available samples to WAV
+                if channels == 2 && bad_ch > 0 {
+                    // Write with bad-channel fixup (replace bad channel with good one)
+                    let pairs = available / 2;
+                    for i in 0..pairs {
+                        let idx0 = (rp + i * 2) % ring.capacity;
+                        let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                        let s0 = unsafe { *ring.data_ptr.add(idx0) };
+                        let s1 = unsafe { *ring.data_ptr.add(idx1) };
+                        if bad_ch == 1 {
+                            // Channel 0 is bad, duplicate channel 1
+                            let _ = writer.write_sample(s1);
+                            let _ = writer.write_sample(s1);
+                        } else {
+                            // Channel 1 is bad, duplicate channel 0
+                            let _ = writer.write_sample(s0);
+                            let _ = writer.write_sample(s0);
+                        }
+                    }
+                    let consumed = pairs * 2;
+                    ring.read_pos.store(rp + consumed, Ordering::Release);
+                    total_written += consumed;
+                } else {
+                    // Normal path: write all samples directly
+                    for i in 0..available {
+                        let idx = (rp + i) % ring.capacity;
+                        let sample = unsafe { *ring.data_ptr.add(idx) };
+                        let _ = writer.write_sample(sample);
+                    }
+                    ring.read_pos.store(rp + available, Ordering::Release);
+                    total_written += available;
+                }
+            }
+
+            // Final drain after active=false (in case more samples arrived)
+            let wp = ring.write_pos.load(Ordering::Acquire);
+            let rp = ring.read_pos.load(Ordering::Relaxed);
+            let remaining = wp.wrapping_sub(rp);
+            for i in 0..remaining {
+                let idx = (rp + i) % ring.capacity;
+                let sample = unsafe { *ring.data_ptr.add(idx) };
+                let _ = writer.write_sample(sample);
+            }
+            total_written += remaining;
+
+            log::info!("WAV writer thread finished: {} total samples written", total_written);
+            (writer, total_written)
+        })
+        .expect("Failed to spawn wav-writer thread")
 }
 
 /// Streaming stereo-to-mono WAV conversion (file-to-file, constant memory)
@@ -325,7 +486,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     let wav_writer = WavWriter::new(buf_writer, spec)
         .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
 
-    // Initialize recording state
+    // Initialize recording state (writer_handle and ring_buffer set after spawn below)
     {
         let mut state = RECORDING_STATE.lock().unwrap();
         *state = Some(RecordingState {
@@ -335,30 +496,49 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
             output_path: output_path.clone(),
             use_system_buffer: false,
             target_mono,
-            wav_writer: Some(wav_writer),
+            ring_buffer: None,
+            writer_handle: None,
         });
     }
 
     RECORDING_ACTIVE.store(true, Ordering::SeqCst);
     DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
 
-    // Increment epoch so any leaked streams from previous recordings stop writing
-    let epoch = RECORDING_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    // Create ring buffer for lock-free audio callback → writer thread communication
+    let ring = Arc::new(RecordingRingBuffer::new(
+        sample_rate as usize * channels as usize * 10, // 10 seconds of headroom
+    ).with_channels(channels));
+
+    // Spawn the WAV writer thread (drains ring buffer → disk)
+    let writer_ring = ring.clone();
+    let writer_handle = spawn_wav_writer_thread(writer_ring, wav_writer, channels, target_mono);
+
+    // Store writer handle for stop_recording() to join
+    {
+        let mut state = RECORDING_STATE.lock().unwrap();
+        if let Some(ref mut s) = *state {
+            s.writer_handle = Some(writer_handle);
+            s.ring_buffer = Some(ring.clone());
+        }
+    }
 
     // Build stream based on sample format
-    let stream = match config.sample_format() {
-        SampleFormat::F32 => build_input_stream::<f32>(&device, &config.into(), epoch)?,
-        SampleFormat::I16 => build_input_stream::<i16>(&device, &config.into(), epoch)?,
-        SampleFormat::U16 => build_input_stream::<u16>(&device, &config.into(), epoch)?,
-        SampleFormat::I32 => build_input_stream::<i32>(&device, &config.into(), epoch)?,
-        SampleFormat::U8 => build_input_stream::<u8>(&device, &config.into(), epoch)?,
+    let stream_config: cpal::StreamConfig = config.into();
+    let stream = match sample_format {
+        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone())?,
+        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone())?,
+        SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone())?,
+        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone())?,
+        SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone())?,
         fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
     stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
 
-    // Keep stream alive by leaking it (will be stopped when recording ends)
-    std::mem::forget(stream);
+    // Store stream properly (dropped on stop/cancel to release OS audio resources)
+    if let Ok(mut guard) = RECORDING_STREAM.lock() {
+        *guard = Some(StreamHolder(stream));
+    }
 
     Ok(output_path.to_string_lossy().to_string())
 }
@@ -366,14 +546,13 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
 fn build_input_stream<T: Sample + cpal::SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    epoch: usize,
+    ring: Arc<RecordingRingBuffer>,
 ) -> Result<cpal::Stream, String>
 where
     f32: cpal::FromSample<T>,
 {
     let err_fn = |err| {
         log::error!("Recording error: {}", err);
-        // Don't panic on stream errors, just log them
     };
 
     device
@@ -383,120 +562,42 @@ where
                 if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
                     return;
                 }
-                // Check epoch to prevent leaked streams from previous recordings
-                // from writing to the current recording's buffer
-                if RECORDING_EPOCH.load(Ordering::SeqCst) != epoch {
-                    return;
-                }
 
                 // Wrap in catch_unwind to prevent ALSA timing panics from crashing
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    // Convert samples to f32
-                    let raw_samples: Vec<f32> = data
-                        .iter()
-                        .map(|s| f32::from_sample(*s))
-                        .collect();
+                    let cap = ring.capacity;
+                    let wp = ring.write_pos.load(Ordering::Relaxed);
+                    let rp = ring.read_pos.load(Ordering::Acquire);
 
-                    // For stereo input, check if one channel is bad (clipped/saturated)
-                    // and extract only the good channel if needed
-                    let samples: Vec<f32> = if let Ok(state) = RECORDING_STATE.lock() {
-                        if let Some(ref s) = *state {
-                            if s.channels == 2 && raw_samples.len() >= 20 {
-                                // Check first 10 samples of each channel for clipping
-                                let mut ch0_clipped = 0;
-                                let mut ch1_clipped = 0;
-                                for i in 0..10 {
-                                    let idx = i * 2;
-                                    if idx + 1 < raw_samples.len() {
-                                        if raw_samples[idx].abs() >= 0.999 {
-                                            ch0_clipped += 1;
-                                        }
-                                        if raw_samples[idx + 1].abs() >= 0.999 {
-                                            ch1_clipped += 1;
-                                        }
-                                    }
-                                }
-
-                                // If one channel is mostly clipped, use only the other
-                                if ch0_clipped >= 8 && ch1_clipped < 3 {
-                                    // Channel 0 is bad, use channel 1 only
-                                    let mono: Vec<f32> = raw_samples.chunks(2)
-                                        .filter_map(|chunk| chunk.get(1).copied())
-                                        .collect();
-                                    let count = DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst);
-                                    if count < 3 {
-                                        log::info!("Detected bad channel 0, using channel 1 only");
-                                    }
-                                    // Duplicate to stereo for WAV output
-                                    mono.iter().flat_map(|&s| [s, s]).collect()
-                                } else if ch1_clipped >= 8 && ch0_clipped < 3 {
-                                    // Channel 1 is bad, use channel 0 only
-                                    let mono: Vec<f32> = raw_samples.chunks(2)
-                                        .filter_map(|chunk| chunk.first().copied())
-                                        .collect();
-                                    let count = DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst);
-                                    if count < 3 {
-                                        log::info!("Detected bad channel 1, using channel 0 only");
-                                    }
-                                    // Duplicate to stereo for WAV output
-                                    mono.iter().flat_map(|&s| [s, s]).collect()
-                                } else {
-                                    raw_samples
-                                }
-                            } else {
-                                raw_samples
-                            }
-                        } else {
-                            raw_samples
-                        }
-                    } else {
-                        raw_samples
-                    };
-
-                    // Calculate level
-                    let mut max_level: f32 = 0.0;
-                    let mut min_sample: f32 = 0.0;
-                    let mut max_sample: f32 = 0.0;
-                    for &s in &samples {
-                        max_level = max_level.max(s.abs());
-                        min_sample = min_sample.min(s);
-                        max_sample = max_sample.max(s);
+                    // Check if ring buffer has enough space (drop samples if full)
+                    let used = wp.wrapping_sub(rp);
+                    if used + data.len() > cap {
+                        // Buffer full — writer thread can't keep up. Drop this callback.
+                        return;
                     }
+
+                    // Convert and write samples directly to ring buffer (no Vec alloc)
+                    let mut max_level: f32 = 0.0;
+                    for (i, s) in data.iter().enumerate() {
+                        let f = f32::from_sample(*s);
+                        let idx = (wp + i) % cap;
+                        unsafe { *ring.data_ptr.add(idx) = f; }
+                        let abs = f.abs();
+                        if abs > max_level { max_level = abs; }
+                    }
+                    ring.write_pos.store(wp + data.len(), Ordering::Release);
+
+                    // Update level meter (atomic, no alloc)
+                    CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
 
                     // Debug logging every ~1 second
                     let count = DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
                     if count % 43 == 0 {
                         log::info!(
-                            "Recording callback #{}: {} samples, range [{:.4}, {:.4}], max_level={:.4}",
-                            count, samples.len(), min_sample, max_sample, max_level
+                            "Recording callback #{}: {} samples, max_level={:.4}, ring used={}/{}",
+                            count, data.len(), max_level, used + data.len(), cap
                         );
-                        if samples.len() >= 10 {
-                            log::info!(
-                                "  First 10 samples: {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}",
-                                samples[0], samples[1], samples[2], samples[3], samples[4],
-                                samples[5], samples[6], samples[7], samples[8], samples[9]
-                            );
-                        }
                     }
-
-                    // Update level (convert to 0-1000 range for AtomicU32)
-                    let level_int = (max_level * 1000.0) as u32;
-                    CURRENT_LEVEL.store(level_int, Ordering::SeqCst);
-
-                    // Write to disk incrementally and count samples
-                    if let Ok(mut state) = RECORDING_STATE.lock() {
-                        if let Some(ref mut s) = *state {
-                            s.sample_count += samples.len();
-
-                            // Write samples to WAV file incrementally for crash safety
-                            if let Some(ref mut writer) = s.wav_writer {
-                                for &sample in &samples {
-                                    let _ = writer.write_sample(sample);
-                                }
-                            }
-                        }
-                    }
-
                 }));
 
                 if result.is_err() {
@@ -517,8 +618,13 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
 
     RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 
-    // Give the stream a moment to stop
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Give the stream callback a moment to see the flag
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Drop cpal stream to release OS audio resources
+    if let Ok(mut guard) = RECORDING_STREAM.lock() {
+        *guard = None;
+    }
 
     // Extract recording state
     let state = {
@@ -528,34 +634,46 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
 
     let state = state.ok_or("Recording state not found")?;
 
-    if state.sample_count == 0 {
+    // Signal ring buffer to stop and join writer thread to get WAV writer back
+    let (writer, sample_count) = if let (Some(ring), Some(handle)) = (state.ring_buffer, state.writer_handle) {
+        ring.active.store(false, Ordering::Release);
+        match handle.join() {
+            Ok((w, count)) => (Some(w), count),
+            Err(_) => {
+                log::error!("Writer thread panicked");
+                return Err("Writer thread panicked".to_string());
+            }
+        }
+    } else {
+        // System audio recording path (no ring buffer)
+        (None, state.sample_count)
+    };
+
+    if sample_count == 0 {
         return Err("No audio recorded".to_string());
     }
 
     // Calculate duration
-    let total_samples = state.sample_count;
-    let samples_per_channel = total_samples / state.channels as usize;
+    let samples_per_channel = sample_count / state.channels as usize;
     let duration = samples_per_channel as f64 / state.sample_rate as f64;
 
     log::info!(
         "Recording complete: {} samples, {:.2}s duration",
-        total_samples,
+        sample_count,
         duration
     );
 
     // Finalize the WAV writer (or rewrite as mono if needed)
     let final_channels = if state.target_mono && state.channels == 2 {
-        // Finalize stereo writer first, then convert to mono via streaming
-        if let Some(writer) = state.wav_writer {
-            writer.finalize()
+        if let Some(w) = writer {
+            w.finalize()
                 .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
         }
         stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
         1u16
     } else {
-        // Finalize the existing incremental writer
-        if let Some(writer) = state.wav_writer {
-            writer.finalize()
+        if let Some(w) = writer {
+            w.finalize()
                 .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
         }
         state.channels
@@ -590,11 +708,22 @@ pub async fn cancel_recording() -> Result<(), String> {
 
     RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 
+    // Drop cpal stream to release OS audio resources
+    if let Ok(mut guard) = RECORDING_STREAM.lock() {
+        *guard = None;
+    }
+
     // Clear the recording state and clean up incomplete file
     if let Ok(mut state_guard) = RECORDING_STATE.lock() {
         if let Some(s) = state_guard.take() {
             let output_path = s.output_path.clone();
-            drop(s); // Drop entire state including wav_writer
+            // Stop ring buffer and join writer thread before cleaning up
+            if let Some(ring) = &s.ring_buffer {
+                ring.active.store(false, Ordering::Release);
+            }
+            if let Some(handle) = s.writer_handle {
+                let _ = handle.join(); // Don't care about result — file gets deleted
+            }
             let _ = std::fs::remove_file(&output_path);
         }
     }
@@ -651,9 +780,10 @@ pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
 
     stream.play().map_err(|e| format!("Failed to start monitor stream: {}", e))?;
 
-    // Keep stream alive by leaking it (will stop processing when MONITORING_ACTIVE is false)
-    // This is the same approach used for recording streams
-    std::mem::forget(stream);
+    // Store stream properly (dropped on stop to release OS audio resources)
+    if let Ok(mut guard) = MONITOR_STREAM.lock() {
+        *guard = Some(StreamHolder(stream));
+    }
 
     Ok(())
 }
@@ -704,8 +834,10 @@ where
 
 fn stop_monitoring_internal() {
     MONITORING_ACTIVE.store(false, Ordering::SeqCst);
-    // The stream was leaked with mem::forget, so we can't drop it.
-    // The callback will stop processing when MONITORING_ACTIVE is false.
+    // Drop the cpal stream to release OS audio resources
+    if let Ok(mut guard) = MONITOR_STREAM.lock() {
+        *guard = None;
+    }
     CURRENT_LEVEL.store(0, Ordering::SeqCst);
 }
 
@@ -906,8 +1038,19 @@ pub fn reset_recording_state() {
     RECORDING_ACTIVE.store(false, Ordering::SeqCst);
     MONITORING_ACTIVE.store(false, Ordering::SeqCst);
     CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    // Drop any held cpal streams
+    if let Ok(mut guard) = RECORDING_STREAM.lock() { *guard = None; }
+    if let Ok(mut guard) = MONITOR_STREAM.lock() { *guard = None; }
     if let Ok(mut state) = RECORDING_STATE.lock() {
-        *state = None;
+        if let Some(s) = state.take() {
+            // Stop ring buffer and join writer thread
+            if let Some(ring) = &s.ring_buffer {
+                ring.active.store(false, Ordering::Release);
+            }
+            if let Some(handle) = s.writer_handle {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -1161,7 +1304,8 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
                 output_path: output_path.clone(),
                 use_system_buffer: true,
                 target_mono,
-                wav_writer: None,
+                ring_buffer: None,
+                writer_handle: None,
             });
         }
 

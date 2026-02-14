@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+use tauri::Emitter;
 
 use crate::services::path_service;
 
@@ -43,6 +45,8 @@ pub(crate) enum PcmData {
     },
     /// Decoded PCM held in a Vec (for compressed formats)
     Vec(Vec<f32>),
+    /// Streaming from a background decode thread
+    Stream(Arc<StreamBuffer>),
 }
 
 // Safety: Mmap data is read-only and the pointer is valid for the lifetime of the Mmap
@@ -57,6 +61,10 @@ impl PcmData {
                 unsafe { std::slice::from_raw_parts(*samples_ptr, *sample_count) }
             }
             PcmData::Vec(v) => v.as_slice(),
+            PcmData::Stream(_) => {
+                // Stream variant uses read_sample() — return empty slice
+                &[]
+            }
         }
     }
 
@@ -64,7 +72,90 @@ impl PcmData {
         match self {
             PcmData::Mmap { sample_count, .. } => *sample_count,
             PcmData::Vec(v) => v.len(),
+            PcmData::Stream(buf) => {
+                buf.base_offset.load(Ordering::Acquire) + buf.valid.load(Ordering::Acquire)
+            }
         }
+    }
+
+    pub(crate) fn is_stream(&self) -> bool {
+        matches!(self, PcmData::Stream(_))
+    }
+}
+
+// ── StreamBuffer — lock-free shared buffer for streaming decode ──
+
+/// Lock-free buffer shared between decode thread (writer) and cpal callback (reader).
+/// Writer appends sequentially and updates `valid` with Release ordering.
+/// Reader reads up to `valid` with Acquire ordering. No overlap possible.
+pub(crate) struct StreamBuffer {
+    #[allow(dead_code)] // Keeps allocation alive; data_ptr points into it
+    data: Box<[f32]>,
+    data_ptr: *mut f32,
+    capacity: usize,
+    /// Absolute interleaved sample offset that data[0] corresponds to
+    pub(crate) base_offset: AtomicUsize,
+    /// Number of valid samples written (writer updates with Release)
+    pub(crate) valid: AtomicUsize,
+    /// Decode thread checks this to know when to stop
+    pub(crate) stop: AtomicBool,
+    /// Seek request: f64 seconds stored as u64 bits, u64::MAX = no request
+    pub(crate) seek_request: AtomicU64,
+    /// Set to true once initial buffer fill (0.5s) is complete
+    pub(crate) ready: AtomicBool,
+}
+
+unsafe impl Send for StreamBuffer {}
+unsafe impl Sync for StreamBuffer {}
+
+impl StreamBuffer {
+    fn new(capacity: usize) -> Self {
+        let mut data = vec![0.0f32; capacity].into_boxed_slice();
+        let data_ptr = data.as_mut_ptr();
+        Self {
+            data,
+            data_ptr,
+            capacity,
+            base_offset: AtomicUsize::new(0),
+            valid: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+            seek_request: AtomicU64::new(u64::MAX),
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    /// Called by cpal callback — lock-free read
+    fn read_sample(&self, absolute_idx: usize) -> Option<f32> {
+        let base = self.base_offset.load(Ordering::Acquire);
+        let count = self.valid.load(Ordering::Acquire);
+        if absolute_idx < base {
+            return None;
+        }
+        let local = absolute_idx - base;
+        if local >= count || local >= self.capacity {
+            return None;
+        }
+        // Safety: local < count <= capacity, data_ptr valid for capacity f32s
+        Some(unsafe { *self.data_ptr.add(local) })
+    }
+
+    /// Called by decode thread — write a sample at the next position
+    fn write_sample(&self, value: f32) -> bool {
+        let count = self.valid.load(Ordering::Relaxed);
+        if count >= self.capacity {
+            return false; // Buffer full
+        }
+        // Safety: count < capacity, only one writer thread
+        unsafe { *self.data_ptr.add(count) = value; }
+        self.valid.store(count + 1, Ordering::Release);
+        true
+    }
+
+    /// Reset buffer for a seek operation
+    fn reset(&self, new_base_offset: usize) {
+        self.valid.store(0, Ordering::Release);
+        self.base_offset.store(new_base_offset, Ordering::Release);
+        self.ready.store(false, Ordering::Release);
     }
 }
 
@@ -165,14 +256,20 @@ pub(crate) fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
     Ok((PcmData::Mmap { _mmap: mmap, samples_ptr, sample_count }, sample_rate, channels))
 }
 
-/// Find the byte offset of WAV PCM data (after 'data' chunk header)
+/// Find the byte offset of WAV PCM data by walking RIFF chunks structurally
 pub(crate) fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
-    // Search for 'data' marker
-    for i in 0..data.len().saturating_sub(8) {
-        if &data[i..i + 4] == b"data" {
-            // Skip 'data' (4 bytes) + chunk size (4 bytes)
-            return Some(i + 8);
+    if data.len() < 12 { return None; }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+
+    let mut pos = 12;
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
+        if chunk_id == b"data" {
+            return Some(pos + 8);
         }
+        pos += 8 + chunk_size;
+        if chunk_size % 2 != 0 { pos += 1; } // RIFF word alignment padding
     }
     None
 }
@@ -189,9 +286,227 @@ fn decode_cache_key(path: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
-/// Decode a compressed audio file to a cached 32-bit float WAV, then mmap it.
-/// This avoids holding the entire decoded PCM in memory.
-fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
+/// Check if a cached WAV exists for the given source path
+fn check_decode_cache(path: &str) -> Result<PathBuf, String> {
+    let src_path = Path::new(path);
+    let file_hash = decode_cache_key(src_path)
+        .ok_or_else(|| format!("Cannot stat source file: {}", path))?;
+
+    let data_dir = path_service::get_user_data_dir()
+        .map_err(|e| format!("Path service error: {}", e))?;
+    let cache_dir = data_dir.join("decode-cache");
+    let cache_path = cache_dir.join(format!("{:016x}.wav", file_hash));
+
+    if cache_path.exists() {
+        if let (Ok(src_meta), Ok(cache_meta)) = (fs::metadata(src_path), fs::metadata(&cache_path)) {
+            if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
+                if cache_mtime >= src_mtime {
+                    return Ok(cache_path);
+                }
+            }
+        }
+    }
+
+    Err("No cache".to_string())
+}
+
+/// Probe audio format to get sample_rate and channels without decoding
+fn probe_audio_format(path: &str) -> Result<(u32, u16), String> {
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = File::open(path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = PathBuf::from(path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("Failed to probe format: {}", e))?;
+
+    let track = probed.format.default_track()
+        .ok_or("No default track")?;
+
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    let channels = track.codec_params.channels
+        .map(|c| c.count() as u16)
+        .unwrap_or(2);
+
+    Ok((sample_rate, channels))
+}
+
+/// Start a background streaming decode thread that fills a StreamBuffer
+fn start_streaming_decode(
+    path: &str,
+    start_seconds: f64,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Arc<StreamBuffer>, String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+    use symphonia::core::units::Time;
+
+    let buffer_seconds = 30;
+    let capacity = sample_rate as usize * channels as usize * buffer_seconds;
+    let stream_buf = Arc::new(StreamBuffer::new(capacity));
+    let buf_ref = stream_buf.clone();
+
+    let base_offset = (start_seconds * sample_rate as f64 * channels as f64) as usize;
+    stream_buf.base_offset.store(base_offset, Ordering::Release);
+
+    let path = path.to_string();
+    let initial_fill_samples = (0.5 * sample_rate as f64 * channels as f64) as usize;
+
+    std::thread::Builder::new()
+        .name("stream-decode".into())
+        .spawn(move || {
+            let start_time = std::time::Instant::now();
+            log::info!("[Stream] Decode thread started: {} @ {:.1}s", path, start_seconds);
+
+            // Open with symphonia
+            let file = match File::open(&path) {
+                Ok(f) => f,
+                Err(e) => { log::error!("[Stream] Failed to open: {}", e); return; }
+            };
+            let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+            let mut hint = Hint::new();
+            if let Some(ext) = PathBuf::from(&path).extension().and_then(|e| e.to_str()) {
+                hint.with_extension(ext);
+            }
+
+            let probed = match symphonia::default::get_probe()
+                .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default()) {
+                Ok(p) => p,
+                Err(e) => { log::error!("[Stream] Probe failed: {}", e); return; }
+            };
+
+            let mut format = probed.format;
+            let track = match format.default_track() {
+                Some(t) => t,
+                None => { log::error!("[Stream] No default track"); return; }
+            };
+            let track_id = track.id;
+
+            let mut decoder = match symphonia::default::get_codecs()
+                .make(&track.codec_params, &DecoderOptions::default()) {
+                Ok(d) => d,
+                Err(e) => { log::error!("[Stream] Decoder creation failed: {}", e); return; }
+            };
+
+            // Seek to start position if > 0
+            if start_seconds > 0.01 {
+                let _ = format.seek(
+                    SeekMode::Coarse,
+                    SeekTo::Time { time: Time::from(start_seconds), track_id: Some(track_id) },
+                );
+            }
+
+            // Decode loop
+            loop {
+                // Check stop signal
+                if buf_ref.stop.load(Ordering::Acquire) {
+                    log::info!("[Stream] Decode thread stopped (stop signal) in {:.0}ms", start_time.elapsed().as_millis());
+                    return;
+                }
+
+                // Check seek request
+                let seek_bits = buf_ref.seek_request.load(Ordering::Acquire);
+                if seek_bits != u64::MAX {
+                    buf_ref.seek_request.store(u64::MAX, Ordering::Release);
+                    let seek_secs = f64::from_bits(seek_bits);
+                    let seek_start = std::time::Instant::now();
+                    log::info!("[Stream] Seek to {:.1}s", seek_secs);
+
+                    let new_base = (seek_secs * sample_rate as f64 * channels as f64) as usize;
+                    buf_ref.reset(new_base);
+
+                    let _ = format.seek(
+                        SeekMode::Coarse,
+                        SeekTo::Time { time: Time::from(seek_secs), track_id: Some(track_id) },
+                    );
+                    // Reset decoder state after seek
+                    decoder.reset();
+
+                    log::info!("[Stream] Seek buffer refill started in {:.0}ms", seek_start.elapsed().as_millis());
+                }
+
+                // Check if buffer is full
+                let current_valid = buf_ref.valid.load(Ordering::Relaxed);
+                if current_valid >= buf_ref.capacity {
+                    // Buffer full — sleep and check for stop/seek
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+
+                // Decode next packet
+                let packet = match format.next_packet() {
+                    Ok(p) => p,
+                    Err(symphonia::core::errors::Error::IoError(ref e))
+                        if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        log::info!("[Stream] Decode thread stopped (end of file) in {:.0}ms", start_time.elapsed().as_millis());
+                        // Mark ready even if we hit EOF before filling 0.5s
+                        buf_ref.ready.store(true, Ordering::Release);
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!("[Stream] Decode error: {}", e);
+                        buf_ref.ready.store(true, Ordering::Release);
+                        return;
+                    }
+                };
+                if packet.track_id() != track_id { continue; }
+
+                let decoded = match decoder.decode(&packet) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log::warn!("[Stream] Packet decode error: {}", e);
+                        continue;
+                    }
+                };
+
+                let spec = *decoded.spec();
+                let num_frames = decoded.frames();
+                let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
+                sample_buf.copy_interleaved_ref(decoded);
+
+                for &s in sample_buf.samples() {
+                    if !buf_ref.write_sample(s) {
+                        break; // Buffer full
+                    }
+                }
+
+                // Check if initial fill is complete
+                if !buf_ref.ready.load(Ordering::Relaxed) {
+                    let valid = buf_ref.valid.load(Ordering::Relaxed);
+                    if valid >= initial_fill_samples {
+                        let fill_secs = valid as f64 / (sample_rate as f64 * channels as f64);
+                        log::info!("[Stream] Initial fill: {:.1}s decoded in {:.0}ms", fill_secs, start_time.elapsed().as_millis());
+                        buf_ref.ready.store(true, Ordering::Release);
+                    }
+                }
+            }
+        }).map_err(|e| format!("Failed to spawn decode thread: {}", e))?;
+
+    Ok(stream_buf)
+}
+
+/// Decode compressed audio to cached WAV with optional progress events
+fn decode_to_temp_wav_with_progress(
+    path: &str,
+    app_handle: Option<&tauri::AppHandle>,
+    emit_track_id: Option<&str>,
+) -> Result<PathBuf, String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -223,11 +538,13 @@ fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
         }
     }
 
-    log::info!("Decoding {:?} to cache WAV {:?}", path, cache_path);
+    let decode_start = std::time::Instant::now();
+    log::info!("[Playback] Background cache decode started for {}", path);
 
     // Open source with symphonia
     let file = File::open(path)
         .map_err(|e| format!("Failed to open file: {}", e))?;
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(1) as f64;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -249,6 +566,9 @@ fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
         .unwrap_or(2);
     let track_id = track.id;
 
+    // Estimate total samples for progress (if n_frames available)
+    let total_frames_est = track.codec_params.n_frames.unwrap_or(0);
+
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
@@ -262,6 +582,9 @@ fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
     };
     let mut writer = hound::WavWriter::create(&cache_path, wav_spec)
         .map_err(|e| format!("Failed to create cache WAV: {}", e))?;
+
+    let mut last_progress = 0u8;
+    let mut decoded_frames: u64 = 0;
 
     // Decode in chunks, writing each directly to WAV (O(1) memory)
     loop {
@@ -286,6 +609,7 @@ fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
 
         let spec = *decoded.spec();
         let num_frames = decoded.frames();
+        decoded_frames += num_frames as u64;
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
 
@@ -293,35 +617,86 @@ fn decode_to_temp_wav(path: &str) -> Result<PathBuf, String> {
             writer.write_sample(s)
                 .map_err(|e| format!("WAV write error: {}", e))?;
         }
+
+        // Emit progress events
+        if let (Some(handle), Some(tid)) = (app_handle, emit_track_id) {
+            let progress = if total_frames_est > 0 {
+                (decoded_frames as f64 / total_frames_est as f64).min(1.0)
+            } else {
+                // Fallback: estimate from writer position vs expected file size
+                let written_bytes = decoded_frames * channels as u64 * 4;
+                let est_total = (file_size * sample_rate as f64 * channels as f64 * 4.0 / file_size).max(1.0);
+                (written_bytes as f64 / est_total).min(0.99)
+            };
+            let pct = (progress * 100.0) as u8;
+            if pct >= last_progress + 2 {
+                last_progress = pct;
+                let _ = handle.emit("audio-cache-progress", serde_json::json!({
+                    "trackId": tid,
+                    "progress": progress,
+                }));
+            }
+        }
     }
 
     writer.finalize()
         .map_err(|e| format!("Failed to finalize cache WAV: {}", e))?;
 
-    log::info!("Decode cache written: {:?}", cache_path);
+    let size_mb = fs::metadata(&cache_path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0);
+    log::info!("[Playback] Background cache decode complete: {:.1}MB WAV in {:.1}s", size_mb, decode_start.elapsed().as_secs_f64());
     Ok(cache_path)
 }
 
-/// Decode a compressed audio file to PCM via cached temp WAV + mmap
+/// Decode a compressed audio file to PCM via cached temp WAV + mmap.
+/// If cache exists, returns mmap instantly. Otherwise, starts streaming decode.
 pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String> {
-    let wav_path = decode_to_temp_wav(path)?;
-    let wav_str = wav_path.to_string_lossy();
+    let load_start = std::time::Instant::now();
+    log::info!("[Playback] load_compressed({}) — checking cache...", path);
 
-    // Try mmap first (fast, zero-copy)
-    match load_wav_mmap(&wav_str) {
-        Ok(result) => Ok(result),
-        Err(mmap_err) => {
-            // Fall back to hound decode if mmap fails (e.g. alignment issues)
-            log::warn!("Mmap of decoded WAV failed ({}), falling back to hound read", mmap_err);
-            let mut reader = WavReader::open(&wav_path)
-                .map_err(|e| format!("Failed to open decoded WAV: {}", e))?;
-            let spec = reader.spec();
-            let samples: Vec<f32> = reader.samples::<f32>()
-                .map(|s| s.unwrap_or(0.0))
-                .collect();
-            Ok((PcmData::Vec(samples), spec.sample_rate, spec.channels))
+    // Try cached WAV first (instant if cache exists)
+    if let Ok(wav_path) = check_decode_cache(path) {
+        let wav_str = wav_path.to_string_lossy();
+        match load_wav_mmap(&wav_str) {
+            Ok(result) => {
+                let size_mb = fs::metadata(&wav_path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0);
+                log::info!("[Playback] Cache HIT: mmap'd {:.1}MB WAV in {:.1}ms", size_mb, load_start.elapsed().as_secs_f64() * 1000.0);
+                return Ok(result);
+            }
+            Err(mmap_err) => {
+                log::warn!("Mmap of cached WAV failed ({}), falling back to hound read", mmap_err);
+                let mut reader = WavReader::open(&wav_path)
+                    .map_err(|e| format!("Failed to open decoded WAV: {}", e))?;
+                let spec = reader.spec();
+                let samples: Vec<f32> = reader.samples::<f32>()
+                    .map(|s| s.unwrap_or(0.0))
+                    .collect();
+                return Ok((PcmData::Vec(samples), spec.sample_rate, spec.channels));
+            }
         }
     }
+
+    // No cache: probe format to get sample_rate/channels
+    log::info!("[Playback] Cache MISS: starting stream decode");
+    let (sample_rate, channels) = probe_audio_format(path)?;
+
+    // Start streaming decode for immediate playback
+    let stream_buf = start_streaming_decode(path, 0.0, sample_rate, channels)?;
+
+    // Wait for initial buffer fill (~0.5s)
+    let wait_start = std::time::Instant::now();
+    while !stream_buf.ready.load(Ordering::Acquire) {
+        if wait_start.elapsed().as_secs() > 10 {
+            log::warn!("[Playback] Stream buffer fill timeout after 10s");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let valid = stream_buf.valid.load(Ordering::Acquire);
+    let buf_secs = valid as f64 / (sample_rate as f64 * channels as f64);
+    log::info!("[Playback] Stream buffer ready ({:.1}s audio) in {:.0}ms", buf_secs, load_start.elapsed().as_secs_f64() * 1000.0);
+
+    Ok((PcmData::Stream(stream_buf), sample_rate, channels))
 }
 
 /// Load a track source from a file path
@@ -431,18 +806,36 @@ fn build_output_stream(
                     let sample_idx = (rel_pos * src_rate) as usize;
                     let interleaved_idx = sample_idx * src_ch;
 
-                    let samples = track_src.pcm.samples();
-                    if interleaved_idx >= samples.len() { continue; }
+                    // Read source sample(s) — lock-free for Stream, slice for Mmap/Vec
+                    match &track_src.pcm {
+                        PcmData::Stream(buf) => {
+                            if let Some(s) = buf.read_sample(interleaved_idx) {
+                                if src_ch == 1 {
+                                    mix[0] += s * track_vol;
+                                    mix[1] += s * track_vol;
+                                } else {
+                                    mix[0] += s * track_vol;
+                                    if let Some(s2) = buf.read_sample(interleaved_idx + 1) {
+                                        mix[1] += s2 * track_vol;
+                                    }
+                                }
+                            }
+                            // else: silence (not yet decoded or buffer underrun)
+                        }
+                        _ => {
+                            let samples = track_src.pcm.samples();
+                            if interleaved_idx >= samples.len() { continue; }
 
-                    // Read source sample(s)
-                    if src_ch == 1 {
-                        let s = samples[interleaved_idx] * track_vol;
-                        mix[0] += s;
-                        mix[1] += s;
-                    } else {
-                        mix[0] += samples[interleaved_idx] * track_vol;
-                        if interleaved_idx + 1 < samples.len() {
-                            mix[1] += samples[interleaved_idx + 1] * track_vol;
+                            if src_ch == 1 {
+                                let s = samples[interleaved_idx] * track_vol;
+                                mix[0] += s;
+                                mix[1] += s;
+                            } else {
+                                mix[0] += samples[interleaved_idx] * track_vol;
+                                if interleaved_idx + 1 < samples.len() {
+                                    mix[1] += samples[interleaved_idx + 1] * track_vol;
+                                }
+                            }
                         }
                     }
                 }
@@ -478,43 +871,53 @@ fn build_output_stream(
 // ── Tauri commands ──
 
 #[tauri::command]
-pub fn playback_set_tracks(
+pub async fn playback_set_tracks(
     tracks: Vec<PlaybackTrackConfig>,
     state: tauri::State<'_, PlaybackEngine>,
 ) -> Result<(), String> {
-    log::info!("Setting {} playback tracks", tracks.len());
+    let inner_arc = state.inner.clone();
+    let position_arc = state.position.clone();
+    let playing_arc = state.playing.clone();
 
-    let mut loaded: Vec<TrackSource> = Vec::new();
-    for config in tracks {
-        match load_track_source(config) {
-            Ok(source) => {
-                log::info!(
-                    "  Loaded track '{}': {}Hz {}ch, {} samples",
-                    source.config.track_id,
-                    source.sample_rate,
-                    source.channels,
-                    source.pcm.len(),
-                );
-                loaded.push(source);
-            }
-            Err(e) => {
-                log::warn!("  Failed to load track: {}", e);
+    let set_start = std::time::Instant::now();
+
+    // Load tracks on a blocking thread so streaming buffer fill doesn't block IPC
+    let loaded = tokio::task::spawn_blocking(move || {
+        log::info!("Setting {} playback tracks", tracks.len());
+        let mut loaded: Vec<TrackSource> = Vec::new();
+        for config in tracks {
+            match load_track_source(config) {
+                Ok(source) => {
+                    log::info!(
+                        "  Loaded track '{}': {}Hz {}ch, {} samples{}",
+                        source.config.track_id,
+                        source.sample_rate,
+                        source.channels,
+                        source.pcm.len(),
+                        if source.pcm.is_stream() { " (STREAMING)" } else { "" },
+                    );
+                    loaded.push(source);
+                }
+                Err(e) => {
+                    log::warn!("  Failed to load track: {}", e);
+                }
             }
         }
-    }
+        loaded
+    }).await.map_err(|e| e.to_string())?;
 
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let count = loaded.len();
+    let mut inner = inner_arc.lock().map_err(|e| e.to_string())?;
     inner.tracks = loaded;
 
     // Build output stream if not already running
     if !inner.stream_started {
-        match build_output_stream(&state.inner, &state.position, &state.playing) {
+        match build_output_stream(&inner_arc, &position_arc, &playing_arc) {
             Ok((stream, sample_rate, channels)) => {
                 stream.play().map_err(|e| format!("Failed to start output: {}", e))?;
                 inner.output_sample_rate = sample_rate;
                 inner.output_channels = channels;
                 inner.stream_started = true;
-                // Store in global to keep alive (cpal::Stream is !Send)
                 if let Ok(mut guard) = PLAYBACK_STREAM.lock() {
                     *guard = Some(StreamHolder(stream));
                 }
@@ -527,6 +930,7 @@ pub fn playback_set_tracks(
         }
     }
 
+    log::info!("[Playback] playback_set_tracks: {} tracks loaded in {:.0}ms", count, set_start.elapsed().as_secs_f64() * 1000.0);
     Ok(())
 }
 
@@ -555,6 +959,16 @@ pub fn playback_stop(state: tauri::State<'_, PlaybackEngine>) -> Result<(), Stri
 #[tauri::command]
 pub fn playback_seek(position: f64, state: tauri::State<'_, PlaybackEngine>) -> Result<(), String> {
     state.set_position(position);
+
+    // If any track is streaming, signal seek to decode thread
+    if let Ok(inner) = state.inner.lock() {
+        for track in &inner.tracks {
+            if let PcmData::Stream(buf) = &track.pcm {
+                buf.seek_request.store(position.to_bits(), Ordering::Release);
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -611,4 +1025,56 @@ pub fn playback_set_loop(
 #[tauri::command]
 pub fn playback_get_position(state: tauri::State<'_, PlaybackEngine>) -> Result<f64, String> {
     Ok(state.get_position())
+}
+
+/// Start background decode-to-cache for a compressed audio file.
+/// Emits `audio-cache-progress` events during decode and `audio-cache-ready` when done.
+#[tauri::command]
+pub async fn prepare_audio_cache(
+    app_handle: tauri::AppHandle,
+    path: String,
+    track_id: String,
+) -> Result<(), String> {
+    let handle = app_handle.clone();
+    let tid = track_id.clone();
+    tokio::task::spawn_blocking(move || {
+        match decode_to_temp_wav_with_progress(&path, Some(&handle), Some(&tid)) {
+            Ok(wav_path) => {
+                let cached = wav_path.to_string_lossy().to_string();
+                log::info!("[Playback] Audio cache ready for track {}", tid);
+                let _ = handle.emit("audio-cache-ready", serde_json::json!({
+                    "trackId": tid,
+                    "cachedPath": cached,
+                }));
+            }
+            Err(e) => log::error!("[Playback] Audio cache failed for track {}: {}", tid, e),
+        }
+    });
+    Ok(())
+}
+
+/// Hot-swap a streaming track to mmap'd cached WAV.
+/// Called by frontend when `audio-cache-ready` event fires.
+#[tauri::command]
+pub fn playback_swap_to_cache(
+    track_id: String,
+    cached_path: String,
+    state: tauri::State<'_, PlaybackEngine>,
+) -> Result<(), String> {
+    let swap_start = std::time::Instant::now();
+    let (pcm, sr, ch) = load_wav_mmap(&cached_path)?;
+    let size_mb = fs::metadata(&cached_path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0);
+
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if let Some(track) = inner.tracks.iter_mut().find(|t| t.config.track_id == track_id) {
+        // Stop streaming decode thread if active
+        if let PcmData::Stream(buf) = &track.pcm {
+            buf.stop.store(true, Ordering::Release);
+        }
+        track.pcm = pcm;
+        track.sample_rate = sr;
+        track.channels = ch;
+        log::info!("[Playback] Hot-swap stream→mmap for track {} ({:.1}MB, {:.0}ms)", track_id, size_mb, swap_start.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(())
 }
