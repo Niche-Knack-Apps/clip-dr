@@ -7,3 +7,4 @@ pub mod clean;
 pub mod metadata;
 pub mod recording;
 pub mod import;
+pub mod playback;
