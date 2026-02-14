@@ -105,6 +105,28 @@ export const useAudioStore = defineStore('audio', () => {
         console.warn(`[Audio] [${ms()}] File too large for browser decode: ${(estimatedPcm / 1024 / 1024).toFixed(0)}MB estimated PCM (threshold: ${(LARGE_FILE_PCM_THRESHOLD / 1024 / 1024).toFixed(0)}MB)`);
       }
 
+      // Set up listeners for background cache decode events (large files)
+      let unlistenCacheProgress: (() => void) | undefined;
+      let unlistenCacheReady: (() => void) | undefined;
+
+      if (isLargeFile) {
+        unlistenCacheProgress = await listen<{ trackId: string; progress: number }>('audio-cache-progress', (event) => {
+          if (event.payload.trackId !== trackId) return;
+          tracksStore.updateImportDecodeProgress(trackId, event.payload.progress);
+        });
+
+        unlistenCacheReady = await listen<{ trackId: string; cachedPath: string }>('audio-cache-ready', (event) => {
+          if (event.payload.trackId !== trackId) return;
+          console.log(`[Audio] [${ms()}] Cache ready for ${trackId}: ${event.payload.cachedPath}`);
+          tracksStore.setCachedAudioPath(trackId, event.payload.cachedPath);
+          // If track is currently loaded in playback engine, hot-swap stream → mmap
+          invoke('playback_swap_to_cache', { trackId, cachedPath: event.payload.cachedPath })
+            .catch(e => console.warn('[Audio] swap_to_cache:', e));
+          unlistenCacheProgress?.();
+          unlistenCacheReady?.();
+        });
+      }
+
       // ── Waveform completion tracking ──
       let waveformSettled = false;
 
@@ -170,9 +192,13 @@ export const useAudioStore = defineStore('audio', () => {
       // Skipped for large files to avoid WebView OOM crashes
       let audioBuffer: AudioBuffer | null = null;
       if (isLargeFile) {
-        // Skip browser decode entirely — mark track as large-file
+        // Skip browser decode — mark as large-file then start background cache
         tracksStore.setImportLargeFile(trackId);
+        tracksStore.setImportCaching(trackId);
         console.log(`[Audio] [${ms()}] Phase 3 skipped: file too large for browser decode`);
+        console.log(`[Audio] [${ms()}] Background cache started via prepare_audio_cache`);
+        invoke('prepare_audio_cache', { path, trackId })
+          .catch(e => console.error('[Audio] prepare_audio_cache failed:', e));
       } else {
         // Uses streaming fetch to report download progress to the UI
         try {
@@ -246,6 +272,9 @@ export const useAudioStore = defineStore('audio', () => {
           unlistenComplete?.();
           unlistenError?.();
         }
+        // Clean up cache listeners
+        unlistenCacheProgress?.();
+        unlistenCacheReady?.();
         historyStore.endBatch();
         return;
       }
@@ -259,7 +288,13 @@ export const useAudioStore = defineStore('audio', () => {
         // Update selection to cover full timeline with actual buffer duration
         selectionStore.setSelection(0, tracksStore.timelineDuration);
         console.log(`[Audio] [${ms()}] Buffer set — playback enabled, playhead at ${trackStart.toFixed(1)}s`);
-      } else if (!isLargeFile) {
+      } else if (isLargeFile) {
+        // Large file: playback through Rust streaming decode — position playhead
+        const { usePlaybackStore } = await import('./playback');
+        usePlaybackStore().seek(trackStart);
+        selectionStore.setSelection(0, tracksStore.timelineDuration);
+        console.log(`[Audio] [${ms()}] Large file ready for Rust playback, playhead at ${trackStart.toFixed(1)}s`);
+      } else {
         // Fallback: browser couldn't decode (e.g. WMA) — use legacy monolithic load
         console.warn(`[Audio] [${ms()}] Falling back to legacy load_audio_complete...`);
         await importFileLegacy(path, trackId, ctx);

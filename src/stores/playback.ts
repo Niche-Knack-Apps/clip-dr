@@ -49,7 +49,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     const tracks = tracksStore.tracks;
 
     // Filter out tracks that are still importing (large files are OK — Rust engine handles them)
-    const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file');
+    const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching');
 
     // Check if any track is soloed
     const soloedTracks = playable.filter(t => t.solo && !t.muted);
@@ -115,13 +115,13 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Get all tracks with sourcePath that can be loaded by Rust
   function getPlayableTracks(): Track[] {
     return tracksStore.tracks.filter(t =>
-      t.sourcePath && (!t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file')
+      t.sourcePath && (!t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching')
     );
   }
 
   function computeTrackHash(): string {
     return getPlayableTracks()
-      .map(t => `${t.id}:${t.sourcePath}`)
+      .map(t => `${t.id}:${t.cachedAudioPath || t.sourcePath}`)
       .sort()
       .join('|');
   }
@@ -133,7 +133,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     const playable = getPlayableTracks();
     const trackConfigs = playable.map(t => ({
       track_id: t.id,
-      source_path: t.sourcePath!,
+      source_path: t.cachedAudioPath || t.sourcePath!,
       track_start: t.trackStart,
       duration: t.duration,
       volume: t.volume,
@@ -232,8 +232,12 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Set playing flag immediately to prevent race conditions
     isPlaying.value = true;
 
+    const playT0 = performance.now();
+
     // Sync state to Rust engine (only reloads files if track list changed)
+    console.log('[Playback] syncTracksToRust starting');
     await syncTracksToRust();
+    console.log(`[Playback] syncTracksToRust complete in ${(performance.now() - playT0).toFixed(0)}ms`);
     await syncLoopToRust();
     await invoke('playback_set_speed', { speed: playbackSpeed.value });
     await invoke('playback_set_volume', { volume: volume.value });
@@ -249,6 +253,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     await invoke('playback_seek', { position: playStart });
     await invoke('playback_play');
 
+    console.log(`[Playback] Audio started in ${(performance.now() - playT0).toFixed(0)}ms from play() call`);
     startPositionPoll();
   }
 

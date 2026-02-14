@@ -88,6 +88,8 @@ fn main() {
             playback::playback_set_track_muted,
             playback::playback_set_loop,
             playback::playback_get_position,
+            playback::prepare_audio_cache,
+            playback::playback_swap_to_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

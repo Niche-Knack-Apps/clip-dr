@@ -98,7 +98,7 @@ export const TRACK_COLORS = [
   '#fcbad3', // pink
 ] as const;
 
-export type ImportStatus = 'importing' | 'decoding' | 'ready' | 'error' | 'large-file';
+export type ImportStatus = 'importing' | 'decoding' | 'ready' | 'error' | 'large-file' | 'caching';
 
 export interface ImportStartResult {
   sessionId: string;
@@ -153,6 +153,8 @@ export interface Track {
   importSessionId?: string;
   /** Whether a multi-LOD peak pyramid is available for this track */
   hasPeakPyramid?: boolean;
+  /** Cached WAV path for large files (set when background cache decode completes) */
+  cachedAudioPath?: string;
 }
 
 /** @deprecated Clips are now part of tracks */

@@ -725,8 +725,8 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find((t) => t.id === trackId);
     if (!track) return [];
 
-    // Large-file tracks have no AudioBuffer — no clips available
-    if (track.importStatus === 'large-file') return [];
+    // Large-file / caching tracks have no AudioBuffer — no clips available
+    if (track.importStatus === 'large-file' || track.importStatus === 'caching') return [];
 
     if (track.clips && track.clips.length > 0) {
       return track.clips;
@@ -1470,6 +1470,31 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
+  // Transition from 'large-file' to 'caching' — shows progress bar
+  function setImportCaching(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    tracks.value[idx] = {
+      ...tracks.value[idx],
+      importStatus: 'caching' as ImportStatus,
+      importDecodeProgress: 0,
+    };
+    tracks.value = [...tracks.value];
+  }
+
+  // Set cached audio path and mark import as ready
+  function setCachedAudioPath(trackId: string, cachedPath: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    tracks.value[idx] = {
+      ...tracks.value[idx],
+      cachedAudioPath: cachedPath,
+      importStatus: 'ready' as ImportStatus,
+      importDecodeProgress: undefined,
+    };
+    tracks.value = [...tracks.value];
+  }
+
   function setHasPeakPyramid(trackId: string): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
@@ -1569,6 +1594,8 @@ export const useTracksStore = defineStore('tracks', () => {
     updateImportDecodeProgress,
     setImportBuffer,
     setImportLargeFile,
+    setImportCaching,
+    setCachedAudioPath,
     setHasPeakPyramid,
   };
 });
