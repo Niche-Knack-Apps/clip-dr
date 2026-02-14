@@ -3,12 +3,9 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
-import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
-import type { TrackPlacement, AudioLoadResult, TimeMark } from '@/shared/types';
-import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
-import { useHistoryStore } from './history';
+import type { TrackPlacement, TimeMark } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 
 export interface AudioDevice {
@@ -193,20 +190,6 @@ export const useRecordingStore = defineStore('recording', () => {
     placement.value = newPlacement;
   }
 
-  // Calculate track start position based on placement setting
-  function calculateTrackStart(): number {
-    switch (placement.value) {
-      case 'append':
-        return tracksStore.timelineDuration;
-      case 'playhead':
-        const playbackStore = usePlaybackStore();
-        return playbackStore.currentTime;
-      case 'zero':
-      default:
-        return 0;
-    }
-  }
-
   async function quickStart(quickSource: 'microphone' | 'system'): Promise<void> {
     if (isRecording.value || isPreparing.value) return;
 
@@ -369,78 +352,41 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
-  // Create a track from recorded audio file
+  // Create a track from recorded audio file using the progressive import pipeline
   async function createTrackFromRecording(path: string, _duration: number): Promise<void> {
-    const historyStore = useHistoryStore();
-    historyStore.beginBatch('Record track');
     try {
-      const ctx = audioStore.getAudioContext();
+      console.log('[Recording] Importing recorded audio via progressive pipeline...');
 
-      console.log('[Recording] Loading recorded audio...');
-      const loadResult = await invoke<AudioLoadResult>('load_audio_complete', {
-        path,
-        bucketCount: WAVEFORM_BUCKET_COUNT,
-      });
+      // Capture track count before import to identify the new track afterwards
+      const trackCountBefore = tracksStore.tracks.length;
+      const savedTimemarks = timemarks.value.length > 0 ? [...timemarks.value] : null;
 
-      const { metadata, waveform: waveformData, channels } = loadResult;
+      // Use the progressive import pipeline (3-phase: metadata, waveform, browser decode)
+      await audioStore.importFile(path);
 
-      if (channels.length === 0 || channels[0].length === 0) {
-        throw new Error('No audio data in recording');
-      }
+      // Find the newly created track (last track added)
+      if (tracksStore.tracks.length > trackCountBefore) {
+        const newTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
+        const recordingNumber = tracksStore.tracks.length;
+        tracksStore.renameTrack(newTrack.id, `Recording ${recordingNumber}`);
 
-      const samplesPerChannel = channels[0].length;
-      const buffer = ctx.createBuffer(
-        metadata.channels,
-        samplesPerChannel,
-        metadata.sampleRate
-      );
+        // Transfer timemarks to the new track
+        if (savedTimemarks) {
+          newTrack.timemarks = savedTimemarks;
+          console.log('[Recording] Transferred', savedTimemarks.length, 'timemarks to track');
+        }
 
-      for (let channel = 0; channel < metadata.channels; channel++) {
-        const channelData = buffer.getChannelData(channel);
-        const sourceData = channels[channel];
+        // Register trigger phrases for post-transcription auto-marks
+        if (triggerPhrases.value.length > 0) {
+          const transcriptionStore = useTranscriptionStore();
+          transcriptionStore.registerPendingTriggerPhrases(newTrack.id, [...triggerPhrases.value]);
+        }
 
-        if (!sourceData || sourceData.length === 0) continue;
-
-        const float32Data = sourceData instanceof Float32Array
-          ? sourceData
-          : new Float32Array(sourceData);
-
-        channelData.set(float32Data);
-      }
-
-      const trackStart = calculateTrackStart();
-      const recordingNumber = tracksStore.tracks.length + 1;
-      const name = `Recording ${recordingNumber}`;
-
-      const newTrack = tracksStore.createTrackFromBuffer(buffer, waveformData, name, trackStart, path);
-
-      // Transfer timemarks to the new track
-      if (timemarks.value.length > 0) {
-        newTrack.timemarks = [...timemarks.value];
-        console.log('[Recording] Transferred', timemarks.value.length, 'timemarks to track');
-      }
-
-      // Select the new track
-      tracksStore.selectTrack(newTrack.id);
-
-      // Also update lastImportedPath for backwards compatibility
-      audioStore.lastImportedPath = path;
-
-      console.log('[Recording] Created track at position:', trackStart, 'selected:', newTrack.id);
-
-      // Queue transcription for the new track
-      const transcriptionStore = useTranscriptionStore();
-      transcriptionStore.queueTranscription(newTrack.id, 'high');
-
-      // Register trigger phrases for post-transcription auto-marks
-      if (triggerPhrases.value.length > 0) {
-        transcriptionStore.registerPendingTriggerPhrases(newTrack.id, [...triggerPhrases.value]);
+        console.log('[Recording] Created track via import:', newTrack.name, 'id:', newTrack.id);
       }
     } catch (e) {
       console.error('[Recording] Failed to create track:', e);
       error.value = e instanceof Error ? e.message : String(e);
-    } finally {
-      historyStore.endBatch();
     }
   }
 
