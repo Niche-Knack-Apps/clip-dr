@@ -355,3 +355,22 @@ export interface SilenceRegion {
   enabled: boolean;   // If false, this region is "restored" (not cut)
 }
 
+/** EDL (Edit Decision List) for Rust-side streaming export */
+export interface ExportEDL {
+  tracks: ExportEDLTrack[];
+  output_path: string;
+  format: string;        // "wav" | "mp3"
+  sample_rate: number;
+  channels: number;
+  mp3_bitrate?: number;
+  start_time: number;
+  end_time: number;
+}
+
+export interface ExportEDLTrack {
+  source_path: string;
+  track_start: number;   // timeline offset in seconds
+  duration: number;
+  volume: number;
+}
+

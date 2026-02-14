@@ -8,7 +8,8 @@ import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
-import type { ExportFormat, ExportProfile, Track } from '@/shared/types';
+import { listen } from '@tauri-apps/api/event';
+import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track } from '@/shared/types';
 
 const FORMAT_LABELS: Record<string, string> = {
   mp3: 'MP3 Audio',
@@ -46,9 +47,11 @@ export const useExportStore = defineStore('export', () => {
   const progress = ref(0);
   const lastExportResult = ref<string | null>(null);
 
-  // Get active (non-muted) tracks, excluding tracks still importing or too large
+  // Get active (non-muted) tracks, excluding tracks still importing
   const activeTracks = computed(() => {
-    const tracks = tracksStore.tracks.filter(t => !t.importStatus || t.importStatus === 'ready');
+    const tracks = tracksStore.tracks.filter(t =>
+      !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file'
+    );
     const hasSolo = tracks.some(t => t.solo);
 
     if (hasSolo) {
@@ -139,7 +142,47 @@ export const useExportStore = defineStore('export', () => {
   }
 
   /**
+   * Check if all active tracks have source paths (can use EDL export).
+   */
+  function canUseEdlExport(tracks: Track[]): boolean {
+    return tracks.length > 0 && tracks.every(t => !!t.sourcePath);
+  }
+
+  /**
+   * Build an EDL from active tracks for Rust-side streaming export.
+   */
+  function buildEdl(tracks: Track[], outputPath: string, format: ExportFormat, bitrate: number): ExportEDL {
+    // Use the sample rate of the first track, or default to 44100
+    const firstTrack = tracks[0];
+    const sampleRate = firstTrack?.audioData.sampleRate || 44100;
+    const channels = Math.min(firstTrack?.audioData.channels || 2, 2) as number;
+
+    const edlTracks: ExportEDLTrack[] = tracks.map(t => ({
+      source_path: t.sourcePath!,
+      track_start: t.trackStart,
+      duration: t.duration,
+      volume: t.volume,
+    }));
+
+    // Timeline range: from 0 to the end of the last track
+    const endTime = Math.max(...tracks.map(t => t.trackStart + t.duration));
+
+    return {
+      tracks: edlTracks,
+      output_path: outputPath,
+      format: format === 'mp3' ? 'mp3' : 'wav',
+      sample_rate: sampleRate,
+      channels,
+      mp3_bitrate: format === 'mp3' ? bitrate : undefined,
+      start_time: 0,
+      end_time: endTime,
+    };
+  }
+
+  /**
    * Core mixed export logic — used by both exportWithProfile and quickReExport.
+   * Uses EDL streaming export when all tracks have source paths (handles large files).
+   * Falls back to JS AudioBuffer mixing for tracks without source paths.
    */
   async function doMixedExport(outputPath: string, format: ExportFormat, bitrate: number): Promise<string | null> {
     loading.value = true;
@@ -148,6 +191,29 @@ export const useExportStore = defineStore('export', () => {
     lastExportResult.value = null;
 
     try {
+      const tracks = activeTracks.value;
+
+      // Use EDL streaming export when possible (required for large files)
+      if (canUseEdlExport(tracks)) {
+        const edl = buildEdl(tracks, outputPath, format, bitrate);
+
+        // Listen for progress events from Rust
+        const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
+          progress.value = Math.round(event.payload.progress * 100);
+        });
+
+        try {
+          await invoke('export_edl', { edl });
+          progress.value = 100;
+          lastExportResult.value = outputPath;
+          console.log('[Export] EDL export complete:', outputPath);
+          return outputPath;
+        } finally {
+          unlisten();
+        }
+      }
+
+      // Fallback: JS-side AudioBuffer mixing (for tracks without source paths)
       const audioContext = audioStore.getAudioContext();
       progress.value = 30;
 
@@ -230,7 +296,28 @@ export const useExportStore = defineStore('export', () => {
 
       loading.value = true;
       error.value = null;
+      progress.value = 10;
 
+      // Use EDL path for tracks with source paths (required for large files)
+      if (track.sourcePath) {
+        const edl = buildEdl([track], outputPath, format, profile.mp3Bitrate || 192);
+
+        const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
+          progress.value = Math.round(event.payload.progress * 100);
+        });
+
+        try {
+          await invoke('export_edl', { edl });
+          progress.value = 100;
+          lastExportResult.value = outputPath;
+          console.log('[Export] Track EDL export complete:', track.name, '->', outputPath);
+          return outputPath;
+        } finally {
+          unlisten();
+        }
+      }
+
+      // Fallback: JS-side mixing for tracks without source paths
       const audioContext = audioStore.getAudioContext();
       const trackBuffer = mixSingleTrack(track.id, audioContext);
 
