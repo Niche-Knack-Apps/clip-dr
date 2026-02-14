@@ -75,6 +75,7 @@ fn main() {
             transcribe::get_bundled_model_info,
             import::import_audio_start,
             import::import_audio_cancel,
+            import::get_peak_tile,
             playback::playback_set_tracks,
             playback::playback_play,
             playback::playback_pause,

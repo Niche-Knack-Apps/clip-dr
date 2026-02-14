@@ -226,6 +226,19 @@ pub async fn import_audio_start(
     // where import-complete fires before frontend registers listeners).
     if let Some((cached_waveform, cached_duration)) = load_peak_cache(path_ref, bucket_count) {
         log::info!("[Waveform] Peak cache HIT for {:?} — returning inline (no background task)", path_ref.file_name().unwrap_or_default());
+
+        // Build pyramid in background if not yet built (for long files)
+        if duration >= PYRAMID_MIN_DURATION {
+            let pyramid_path = path.clone();
+            let pyramid_app = app_handle.clone();
+            tokio::task::spawn_blocking(move || {
+                build_and_save_pyramid(Path::new(&pyramid_path));
+                let _ = pyramid_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
+                    source_path: pyramid_path,
+                });
+            });
+        }
+
         return Ok(ImportStartResult {
             session_id,
             metadata,
@@ -252,6 +265,7 @@ pub async fn import_audio_start(
     let bg_session_id = session_id.clone();
     let bg_path = path.clone();
     let bg_app = app_handle.clone();
+    let bg_duration = duration;
 
     tokio::task::spawn_blocking(move || {
         if let Err(e) = decode_waveform_progressive(
@@ -274,6 +288,18 @@ pub async fn import_audio_start(
         let state = bg_app.state::<ImportState>();
         let mut sessions = state.sessions.lock().unwrap();
         sessions.remove(&bg_session_id);
+
+        // Build peak pyramid in background for long files (> 5 min)
+        if bg_duration >= PYRAMID_MIN_DURATION {
+            let pyramid_path = bg_path.clone();
+            let pyramid_app = bg_app.clone();
+            std::thread::spawn(move || {
+                build_and_save_pyramid(Path::new(&pyramid_path));
+                let _ = pyramid_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
+                    source_path: pyramid_path,
+                });
+            });
+        }
     });
 
     Ok(ImportStartResult {
@@ -728,6 +754,425 @@ fn extract_bucket_range(
         waveform.push(bucket.max);
     }
     waveform
+}
+
+// ── Peak Pyramid (multi-LOD) ──────────────────────────────────────────
+// Provides detailed waveform data at multiple zoom levels.
+// Level 0: 256 spp, Level 1: 1024 spp, Level 2: 4096 spp,
+// Level 3: 16384 spp, Level 4: 65536 spp
+// Binary format: [magic "CLPP"][version 2][hash 8B][sample_rate 4B]
+//   [total_frames 8B][num_levels 1B][level_headers...][peak_data...]
+
+const PYRAMID_MAGIC: &[u8; 4] = b"CLPP";
+const PYRAMID_VERSION: u8 = 2;
+const PYRAMID_LEVELS: &[usize] = &[256, 1024, 4096, 16384, 65536];
+const PYRAMID_MIN_DURATION: f64 = 300.0; // only build for files > 5 minutes
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeakPyramidReadyEvent {
+    source_path: String,
+}
+
+struct PyramidLevel {
+    samples_per_peak: usize,
+    peaks: Vec<(f32, f32)>, // (min, max) pairs
+}
+
+/// Get the pyramid cache file path.
+fn pyramid_cache_path(file_hash: u64) -> Option<PathBuf> {
+    let data_dir = path_service::get_user_data_dir().ok()?;
+    let cache_dir = data_dir.join("peak-cache");
+    fs::create_dir_all(&cache_dir).ok()?;
+    Some(cache_dir.join(format!("{:016x}.pyramid", file_hash)))
+}
+
+/// Build level-0 (finest) peaks from WAV mmap data.
+fn build_level0_wav_mmap(mmap: &Mmap, wav: &WavInfo) -> Vec<(f32, f32)> {
+    let bytes_per_sample = (wav.bits_per_sample / 8) as usize;
+    let frame_size = bytes_per_sample * wav.channels as usize;
+    let data_end = (wav.data_offset + wav.data_size).min(mmap.len());
+    let actual_data_size = data_end - wav.data_offset;
+    let total_frames = actual_data_size / frame_size;
+    let spp = PYRAMID_LEVELS[0];
+    let peak_count = (total_frames + spp - 1) / spp;
+
+    let mut peaks: Vec<(f32, f32)> = vec![(0.0, 0.0); peak_count];
+    let mut counts: Vec<usize> = vec![0; peak_count];
+    let data = &mmap[wav.data_offset..data_end];
+
+    for frame_idx in 0..total_frames {
+        let frame_offset = frame_idx * frame_size;
+        let mut mono: f32 = 0.0;
+        for ch in 0..wav.channels as usize {
+            let so = frame_offset + ch * bytes_per_sample;
+            let sample = match (wav.audio_format, wav.bits_per_sample) {
+                (1, 16) => {
+                    let raw = i16::from_le_bytes(data[so..so + 2].try_into().unwrap_or([0; 2]));
+                    raw as f32 / 32768.0
+                }
+                (1, 24) => {
+                    let b0 = data[so] as i32;
+                    let b1 = data[so + 1] as i32;
+                    let b2 = data[so + 2] as i32;
+                    let raw = (b2 << 16) | (b1 << 8) | b0;
+                    let signed = if raw & 0x800000 != 0 { raw | !0xFFFFFF } else { raw };
+                    signed as f32 / 8388608.0
+                }
+                (1, 32) => {
+                    let raw = i32::from_le_bytes(data[so..so + 4].try_into().unwrap_or([0; 4]));
+                    raw as f32 / 2147483648.0
+                }
+                (3, 32) => {
+                    f32::from_le_bytes(data[so..so + 4].try_into().unwrap_or([0; 4]))
+                }
+                _ => 0.0,
+            };
+            mono += sample;
+        }
+        mono /= wav.channels as f32;
+
+        let pidx = (frame_idx / spp).min(peak_count - 1);
+        if counts[pidx] == 0 {
+            peaks[pidx] = (mono, mono);
+        } else {
+            if mono < peaks[pidx].0 { peaks[pidx].0 = mono; }
+            if mono > peaks[pidx].1 { peaks[pidx].1 = mono; }
+        }
+        counts[pidx] += 1;
+    }
+
+    peaks
+}
+
+/// Build level-0 (finest) peaks via symphonia decode.
+fn build_level0_symphonia(path: &Path) -> Result<(Vec<(f32, f32)>, u32, usize), String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open: {}", e))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("Probe failed: {}", e))?;
+
+    let mut format = probed.format;
+    let track = format.default_track().ok_or("No track")?;
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
+    let track_id = track.id;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("Decoder failed: {}", e))?;
+
+    let spp = PYRAMID_LEVELS[0];
+    let mut peaks: Vec<(f32, f32)> = Vec::new();
+    let mut current_peak = (0.0f32, 0.0f32);
+    let mut current_count: usize = 0;
+    let mut total_frames: usize = 0;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(_) => break,
+        };
+        if packet.track_id() != track_id { continue; }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let spec = *decoded.spec();
+        let num_frames = decoded.frames();
+        let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+        let samples = sample_buf.samples();
+
+        for chunk in samples.chunks(channels) {
+            let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+
+            if current_count == 0 {
+                current_peak = (mono, mono);
+            } else {
+                if mono < current_peak.0 { current_peak.0 = mono; }
+                if mono > current_peak.1 { current_peak.1 = mono; }
+            }
+            current_count += 1;
+            total_frames += 1;
+
+            if current_count >= spp {
+                peaks.push(current_peak);
+                current_count = 0;
+            }
+        }
+    }
+
+    // Push remaining partial peak
+    if current_count > 0 {
+        peaks.push(current_peak);
+    }
+
+    Ok((peaks, sample_rate, total_frames))
+}
+
+/// Downsample level N peaks to level N+1 (4:1 ratio).
+fn downsample_peaks(prev: &[(f32, f32)], ratio: usize) -> Vec<(f32, f32)> {
+    prev.chunks(ratio)
+        .map(|chunk| {
+            let min = chunk.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+            let max = chunk.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+            (min, max)
+        })
+        .collect()
+}
+
+/// Build and save peak pyramid for a file.
+fn build_and_save_pyramid(path: &Path) {
+    let t0 = Instant::now();
+    let file_hash = match peak_cache_key(path) {
+        Some(h) => h,
+        None => return,
+    };
+
+    // Check if pyramid already exists
+    if let Some(cache_path) = pyramid_cache_path(file_hash) {
+        if cache_path.exists() {
+            log::info!("[Pyramid] Cache already exists for {:?}", path.file_name().unwrap_or_default());
+            return;
+        }
+    }
+
+    log::info!("[Pyramid] Building for {:?}...", path.file_name().unwrap_or_default());
+
+    // Build level 0 — try WAV mmap first
+    let (level0, sample_rate, total_frames) = {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext.eq_ignore_ascii_case("wav") || ext.eq_ignore_ascii_case("wave") {
+            if let Ok(file) = File::open(path) {
+                if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                    if let Some(wav) = parse_wav_header(&mmap) {
+                        let frame_size = (wav.bits_per_sample / 8) as usize * wav.channels as usize;
+                        let data_end = (wav.data_offset + wav.data_size).min(mmap.len());
+                        let total = (data_end - wav.data_offset) / frame_size;
+                        let peaks = build_level0_wav_mmap(&mmap, &wav);
+                        (peaks, wav.sample_rate, total)
+                    } else {
+                        match build_level0_symphonia(path) {
+                            Ok(r) => r,
+                            Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
+                        }
+                    }
+                } else {
+                    match build_level0_symphonia(path) {
+                        Ok(r) => r,
+                        Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
+                    }
+                }
+            } else {
+                return;
+            }
+        } else {
+            match build_level0_symphonia(path) {
+                Ok(r) => r,
+                Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
+            }
+        }
+    };
+
+    log::info!("[Pyramid] Level 0: {} peaks ({} spp) in {:?}", level0.len(), PYRAMID_LEVELS[0], t0.elapsed());
+
+    // Build higher levels by downsampling
+    let mut levels: Vec<PyramidLevel> = Vec::new();
+    levels.push(PyramidLevel { samples_per_peak: PYRAMID_LEVELS[0], peaks: level0 });
+
+    for &spp in &PYRAMID_LEVELS[1..] {
+        let prev = &levels.last().unwrap().peaks;
+        let prev_spp = levels.last().unwrap().samples_per_peak;
+        let ratio = spp / prev_spp;
+        let downsampled = downsample_peaks(prev, ratio);
+        log::info!("[Pyramid] Level {}: {} peaks ({} spp)", levels.len(), downsampled.len(), spp);
+        levels.push(PyramidLevel { samples_per_peak: spp, peaks: downsampled });
+    }
+
+    // Save to cache
+    save_peak_pyramid(path, file_hash, sample_rate, total_frames, &levels);
+    log::info!("[Pyramid] Complete in {:?}", t0.elapsed());
+}
+
+/// Save peak pyramid to v2 cache file.
+fn save_peak_pyramid(
+    _path: &Path,
+    file_hash: u64,
+    sample_rate: u32,
+    total_frames: usize,
+    levels: &[PyramidLevel],
+) {
+    let cache_path = match pyramid_cache_path(file_hash) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Calculate total size
+    let total_peaks: usize = levels.iter().map(|l| l.peaks.len()).sum();
+    let header_size = 4 + 1 + 8 + 4 + 8 + 1 + levels.len() * 8; // magic + version + hash + sr + frames + nlevels + level_headers
+    let data_size = total_peaks * 2 * 4; // min/max f32 pairs
+    let mut buf = Vec::with_capacity(header_size + data_size);
+
+    // Header
+    buf.extend_from_slice(PYRAMID_MAGIC);
+    buf.push(PYRAMID_VERSION);
+    buf.extend_from_slice(&file_hash.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&(total_frames as u64).to_le_bytes());
+    buf.push(levels.len() as u8);
+
+    // Level headers
+    for level in levels {
+        buf.extend_from_slice(&(level.samples_per_peak as u32).to_le_bytes());
+        buf.extend_from_slice(&(level.peaks.len() as u32).to_le_bytes());
+    }
+
+    // Peak data
+    for level in levels {
+        for &(min, max) in &level.peaks {
+            buf.extend_from_slice(&min.to_le_bytes());
+            buf.extend_from_slice(&max.to_le_bytes());
+        }
+    }
+
+    if let Err(e) = File::create(&cache_path).and_then(|mut f| f.write_all(&buf)) {
+        log::warn!("[Pyramid] Failed to save {:?}: {}", cache_path, e);
+    } else {
+        log::info!("[Pyramid] Saved {:?} ({:.1}KB)", cache_path, buf.len() as f64 / 1024.0);
+    }
+}
+
+/// Load peak pyramid from cache. Returns (levels, sample_rate, total_frames).
+fn load_peak_pyramid(path: &Path) -> Option<(Vec<PyramidLevel>, u32, usize)> {
+    let file_hash = peak_cache_key(path)?;
+    let cache_path = pyramid_cache_path(file_hash)?;
+
+    let mut file = File::open(&cache_path).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+
+    // Validate header (min 26 bytes: magic+version+hash+sr+frames+nlevels)
+    if buf.len() < 26 { return None; }
+    if &buf[0..4] != PYRAMID_MAGIC { return None; }
+    if buf[4] != PYRAMID_VERSION { return None; }
+
+    let stored_hash = u64::from_le_bytes(buf[5..13].try_into().ok()?);
+    if stored_hash != file_hash { return None; }
+
+    let sample_rate = u32::from_le_bytes(buf[13..17].try_into().ok()?);
+    let total_frames = u64::from_le_bytes(buf[17..25].try_into().ok()?) as usize;
+    let num_levels = buf[25] as usize;
+
+    // Read level headers
+    let mut pos = 26;
+    let mut level_info: Vec<(usize, usize)> = Vec::new(); // (spp, peak_count)
+    for _ in 0..num_levels {
+        if pos + 8 > buf.len() { return None; }
+        let spp = u32::from_le_bytes(buf[pos..pos + 4].try_into().ok()?) as usize;
+        let count = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().ok()?) as usize;
+        level_info.push((spp, count));
+        pos += 8;
+    }
+
+    // Read peak data
+    let mut levels: Vec<PyramidLevel> = Vec::new();
+    for (spp, count) in level_info {
+        let data_bytes = count * 2 * 4;
+        if pos + data_bytes > buf.len() { return None; }
+        let mut peaks: Vec<(f32, f32)> = Vec::with_capacity(count);
+        for i in 0..count {
+            let offset = pos + i * 8;
+            let min = f32::from_le_bytes(buf[offset..offset + 4].try_into().ok()?);
+            let max = f32::from_le_bytes(buf[offset + 4..offset + 8].try_into().ok()?);
+            peaks.push((min, max));
+        }
+        levels.push(PyramidLevel { samples_per_peak: spp, peaks });
+        pos += data_bytes;
+    }
+
+    Some((levels, sample_rate, total_frames))
+}
+
+/// Get peak data for a time range at the best available LOD.
+/// Returns interleaved [min, max, min, max, ...] f32 pairs.
+fn get_peaks_for_range(
+    levels: &[PyramidLevel],
+    sample_rate: u32,
+    start_time: f64,
+    end_time: f64,
+    bucket_count: usize,
+) -> Vec<f32> {
+    let time_range = (end_time - start_time).max(0.001);
+    let samples_in_range = (time_range * sample_rate as f64) as usize;
+    let ideal_spp = samples_in_range / bucket_count.max(1);
+
+    // Find the best level: finest resolution that's coarser than ideal
+    let level = levels.iter()
+        .rev() // start from coarsest
+        .find(|l| l.samples_per_peak <= ideal_spp)
+        .unwrap_or_else(|| &levels[0]); // default to finest
+
+    let spp = level.samples_per_peak;
+    let start_peak = ((start_time * sample_rate as f64) as usize / spp).min(level.peaks.len().saturating_sub(1));
+    let end_peak = (((end_time * sample_rate as f64) as usize + spp - 1) / spp).min(level.peaks.len());
+    let source_count = end_peak - start_peak;
+
+    if source_count == 0 {
+        return vec![0.0; bucket_count * 2];
+    }
+
+    // Resample source peaks into requested bucket_count
+    let mut result: Vec<f32> = Vec::with_capacity(bucket_count * 2);
+    let ratio = source_count as f64 / bucket_count as f64;
+
+    for i in 0..bucket_count {
+        let src_start = start_peak + (i as f64 * ratio) as usize;
+        let src_end = (start_peak + ((i + 1) as f64 * ratio) as usize).min(end_peak);
+
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for j in src_start..src_end.max(src_start + 1) {
+            if j < level.peaks.len() {
+                if level.peaks[j].0 < min { min = level.peaks[j].0; }
+                if level.peaks[j].1 > max { max = level.peaks[j].1; }
+            }
+        }
+        if min == f32::INFINITY { min = 0.0; }
+        if max == f32::NEG_INFINITY { max = 0.0; }
+        result.push(min);
+        result.push(max);
+    }
+
+    result
+}
+
+#[tauri::command]
+pub fn get_peak_tile(
+    path: String,
+    start_time: f64,
+    end_time: f64,
+    bucket_count: usize,
+) -> Result<Vec<f32>, String> {
+    let path_ref = Path::new(&path);
+
+    // Try loading pyramid from cache
+    if let Some((levels, sample_rate, _total_frames)) = load_peak_pyramid(path_ref) {
+        return Ok(get_peaks_for_range(&levels, sample_rate, start_time, end_time, bucket_count));
+    }
+
+    Err("No peak pyramid available for this file".to_string())
 }
 
 #[tauri::command]
