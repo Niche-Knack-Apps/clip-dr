@@ -44,7 +44,7 @@ lazy_static::lazy_static! {
 }
 
 struct RecordingState {
-    samples: Vec<f32>,
+    sample_count: usize,
     sample_rate: u32,
     channels: u16,
     output_path: PathBuf,
@@ -61,7 +61,7 @@ fn stereo_to_mono(samples: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// Write samples to a new WAV file (used for mono rewrite after stereo recording)
+/// Write samples to a new WAV file (used for mono rewrite in system audio recording)
 fn write_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u16) -> Result<(), String> {
     let spec = WavSpec {
         channels,
@@ -80,6 +80,61 @@ fn write_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32, channels: u
     }
     writer.finalize()
         .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    Ok(())
+}
+
+/// Streaming stereo-to-mono WAV conversion (file-to-file, constant memory)
+fn stereo_wav_to_mono_streaming(path: &std::path::Path, sample_rate: u32) -> Result<(), String> {
+    let tmp_path = path.with_extension("mono.tmp.wav");
+
+    // Open the stereo WAV for reading
+    let reader = hound::WavReader::open(path)
+        .map_err(|e| format!("Failed to open stereo WAV for mono conversion: {}", e))?;
+
+    let mono_spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    let tmp_file = File::create(&tmp_path)
+        .map_err(|e| format!("Failed to create temp mono WAV: {}", e))?;
+    let buf_writer = BufWriter::new(tmp_file);
+    let mut writer = WavWriter::new(buf_writer, mono_spec)
+        .map_err(|e| format!("Failed to create mono WAV writer: {}", e))?;
+
+    // Read stereo samples in chunks, average pairs, write mono
+    let mut samples_iter = reader.into_samples::<f32>();
+    loop {
+        let left = match samples_iter.next() {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(format!("Error reading stereo sample: {}", e)),
+            None => break,
+        };
+        let right = match samples_iter.next() {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(format!("Error reading stereo sample: {}", e)),
+            None => {
+                // Odd number of samples — write the last one as-is
+                writer.write_sample(left)
+                    .map_err(|e| format!("Failed to write mono sample: {}", e))?;
+                break;
+            }
+        };
+        let mono = (left + right) * 0.5;
+        writer.write_sample(mono)
+            .map_err(|e| format!("Failed to write mono sample: {}", e))?;
+    }
+
+    writer.finalize()
+        .map_err(|e| format!("Failed to finalize mono WAV: {}", e))?;
+
+    // Rename temp file over original
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("Failed to rename mono WAV: {}", e))?;
+
+    log::info!("Converted stereo WAV to mono: {:?}", path);
     Ok(())
 }
 
@@ -303,7 +358,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     {
         let mut state = RECORDING_STATE.lock().unwrap();
         *state = Some(RecordingState {
-            samples: Vec::new(),
+            sample_count: 0,
             sample_rate,
             channels,
             output_path: output_path.clone(),
@@ -457,10 +512,10 @@ where
                     let level_int = (max_level * 1000.0) as u32;
                     CURRENT_LEVEL.store(level_int, Ordering::SeqCst);
 
-                    // Append to recording buffer AND write to disk incrementally
+                    // Write to disk incrementally and count samples
                     if let Ok(mut state) = RECORDING_STATE.lock() {
                         if let Some(ref mut s) = *state {
-                            s.samples.extend(samples.iter().copied());
+                            s.sample_count += samples.len();
 
                             // Write samples to WAV file incrementally for crash safety
                             if let Some(ref mut writer) = s.wav_writer {
@@ -502,12 +557,12 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
 
     let state = state.ok_or("Recording state not found")?;
 
-    if state.samples.is_empty() {
+    if state.sample_count == 0 {
         return Err("No audio recorded".to_string());
     }
 
     // Calculate duration
-    let total_samples = state.samples.len();
+    let total_samples = state.sample_count;
     let samples_per_channel = total_samples / state.channels as usize;
     let duration = samples_per_channel as f64 / state.sample_rate as f64;
 
@@ -519,12 +574,12 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
 
     // Finalize the WAV writer (or rewrite as mono if needed)
     let final_channels = if state.target_mono && state.channels == 2 {
-        // Drop the stereo writer and rewrite as mono
+        // Finalize stereo writer first, then convert to mono via streaming
         if let Some(writer) = state.wav_writer {
-            drop(writer);
+            writer.finalize()
+                .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
         }
-        let mono = stereo_to_mono(&state.samples);
-        write_wav_file(&state.output_path, &mono, state.sample_rate, 1)?;
+        stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
         1u16
     } else {
         // Finalize the existing incremental writer
@@ -1134,7 +1189,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         {
             let mut state = RECORDING_STATE.lock().unwrap();
             *state = Some(RecordingState {
-                samples: Vec::new(),
+                sample_count: 0,
                 sample_rate: 44100,
                 channels: 2,
                 output_path: output_path.clone(),
