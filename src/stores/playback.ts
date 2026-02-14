@@ -1,21 +1,13 @@
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
-import { useAudioStore } from './audio';
+import { invoke } from '@tauri-apps/api/core';
 import { useSelectionStore } from './selection';
 import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
 
-interface TrackPlaybackNode {
-  trackId: string;
-  clipId: string;
-  sourceNode: AudioBufferSourceNode;
-  gainNode: GainNode;
-}
-
 export const usePlaybackStore = defineStore('playback', () => {
-  const audioStore = useAudioStore();
   const selectionStore = useSelectionStore();
   const tracksStore = useTracksStore();
   const silenceStore = useSilenceStore();
@@ -35,17 +27,11 @@ export const usePlaybackStore = defineStore('playback', () => {
   const holdMode = ref<'none' | 'forward' | 'reverse'>('none');
   const holdStartPosition = ref(0);
 
-  // Multi-track playback nodes
-  let activeNodes: TrackPlaybackNode[] = [];
-  let masterGain: GainNode | null = null;
-  let startTime = 0;
-  let startOffset = 0;
-  let rafId: number | null = null;
+  // Position polling
+  let positionPollId: number | null = null;
 
-  // Reverse scrub state - plays short audio snippets as playhead moves backward
-  let reverseScrubInterval: number | null = null;
-  let scrubSource: AudioBufferSourceNode | null = null;
-  let scrubGainNode: GainNode | null = null;
+  // Track sync: hash of last synced track list to avoid redundant file reloads
+  let lastSyncedTrackHash = '';
 
   const playbackTime = computed(() => currentTime.value);
   const loopStart = computed(() => selectionStore.selection.start);
@@ -73,29 +59,6 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     // No solo - get all unmuted tracks
     return playable.filter(t => !t.muted);
-  }
-
-  // Get clips that are active at a specific time (handles both multi-clip and single-buffer tracks)
-  function getClipsAtTime(time: number): Array<{ track: Track; clipId: string; buffer: AudioBuffer; clipStart: number; duration: number }> {
-    const result: Array<{ track: Track; clipId: string; buffer: AudioBuffer; clipStart: number; duration: number }> = [];
-
-    for (const track of getActiveTracks()) {
-      const clips = tracksStore.getTrackClips(track.id);
-      for (const clip of clips) {
-        const clipEnd = clip.clipStart + clip.duration;
-        if (time >= clip.clipStart && time < clipEnd) {
-          result.push({
-            track,
-            clipId: clip.id,
-            buffer: clip.buffer,
-            clipStart: clip.clipStart,
-            duration: clip.duration,
-          });
-        }
-      }
-    }
-
-    return result;
   }
 
   // Get the active playback region (union of all active tracks)
@@ -147,66 +110,112 @@ export const usePlaybackStore = defineStore('playback', () => {
     }
   }
 
-  async function setLoopMode(mode: LoopMode): Promise<void> {
-    loopMode.value = mode;
+  // ── Rust engine sync ──
 
-    if (isPlaying.value) {
-      const time = currentTime.value;
-      pause();
-      currentTime.value = time;
-      await play();
-    }
+  // Get all tracks with sourcePath that can be loaded by Rust
+  function getPlayableTracks(): Track[] {
+    return tracksStore.tracks.filter(t =>
+      t.sourcePath && (!t.importStatus || t.importStatus === 'ready')
+    );
   }
 
-  // Stop all active playback nodes
-  function stopAllNodes(): void {
-    for (const node of activeNodes) {
-      try {
-        node.sourceNode.stop();
-        node.sourceNode.disconnect();
-        node.gainNode.disconnect();
-      } catch (e) {
-        // Ignore errors if already stopped
+  function computeTrackHash(): string {
+    return getPlayableTracks()
+      .map(t => `${t.id}:${t.sourcePath}`)
+      .sort()
+      .join('|');
+  }
+
+  async function syncTracksToRust(): Promise<void> {
+    const hash = computeTrackHash();
+    if (hash === lastSyncedTrackHash) return;
+
+    const playable = getPlayableTracks();
+    const trackConfigs = playable.map(t => ({
+      track_id: t.id,
+      source_path: t.sourcePath!,
+      track_start: t.trackStart,
+      duration: t.duration,
+      volume: t.volume,
+      muted: false, // mute handled via playback_set_track_muted
+    }));
+
+    await invoke('playback_set_tracks', { tracks: trackConfigs });
+    lastSyncedTrackHash = hash;
+
+    // Sync mute/solo state after loading tracks
+    await syncMuteSoloToRust();
+  }
+
+  async function syncMuteSoloToRust(): Promise<void> {
+    const allTracks = tracksStore.tracks;
+    const hasSolo = allTracks.some(t => t.solo && !t.muted);
+
+    for (const track of getPlayableTracks()) {
+      let muted = track.muted;
+      if (hasSolo) {
+        muted = !track.solo || track.muted;
       }
+      await invoke('playback_set_track_muted', {
+        trackId: track.id,
+        muted,
+      });
     }
-    activeNodes = [];
   }
 
-  // Create playback node for a clip (or single-buffer track)
-  function createClipNode(
-    track: Track,
-    clipId: string,
-    buffer: AudioBuffer,
-    offsetInClip: number,
-    ctx: AudioContext
-  ): TrackPlaybackNode | null {
-    if (!buffer) return null;
+  async function syncLoopToRust(): Promise<void> {
+    const region = loopEnabled.value ? getLoopRegion() : { start: 0, end: getEffectiveDuration() };
+    await invoke('playback_set_loop', {
+      enabled: loopEnabled.value,
+      start: region.start,
+      end: region.end,
+    });
+  }
 
-    const sourceNode = ctx.createBufferSource();
-    sourceNode.buffer = buffer;
+  // ── Position polling ──
 
-    const absSpeed = Math.abs(playbackSpeed.value) || 1;
-    sourceNode.playbackRate.value = absSpeed;
+  function startPositionPoll(): void {
+    stopPositionPoll();
 
-    const gainNode = ctx.createGain();
-    gainNode.gain.value = track.volume * volume.value;
+    const poll = async () => {
+      if (!isPlaying.value) return;
 
-    sourceNode.connect(gainNode);
-    if (masterGain) {
-      gainNode.connect(masterGain);
-    }
+      try {
+        let pos = await invoke<number>('playback_get_position');
 
-    // Start at the correct offset within the clip buffer
-    const safeOffset = Math.max(0, Math.min(offsetInClip, buffer.duration - 0.001));
-    sourceNode.start(0, safeOffset);
+        // Silence skipping
+        if (silenceStore.compressionEnabled) {
+          const skipFn = playbackSpeed.value > 0
+            ? silenceStore.getNextSpeechTime
+            : silenceStore.getPrevSpeechTime;
+          const skipTo = skipFn(pos);
+          if (skipTo !== pos) {
+            await invoke('playback_seek', { position: skipTo });
+            pos = skipTo;
+          }
+        }
 
-    return {
-      trackId: track.id,
-      clipId,
-      sourceNode,
-      gainNode,
+        currentTime.value = pos;
+      } catch (e) {
+        console.warn('[Playback] Position poll error:', e);
+      }
+
+      if (isPlaying.value) {
+        positionPollId = requestAnimationFrame(() => { poll(); });
+      }
     };
+
+    positionPollId = requestAnimationFrame(() => { poll(); });
   }
+
+  function stopPositionPoll(): void {
+    if (positionPollId !== null) {
+      cancelAnimationFrame(positionPollId);
+      positionPollId = null;
+    }
+  }
+
+  // ── Playback controls ──
 
   async function play(): Promise<void> {
     // Guard against double-calls (race condition when button + Space pressed quickly)
@@ -223,55 +232,29 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Set playing flag immediately to prevent race conditions
     isPlaying.value = true;
 
-    await audioStore.resumeAudioContext();
-    const ctx = audioStore.getAudioContext();
+    // Sync state to Rust engine (only reloads files if track list changed)
+    await syncTracksToRust();
+    await syncLoopToRust();
+    await invoke('playback_set_speed', { speed: playbackSpeed.value });
+    await invoke('playback_set_volume', { volume: volume.value });
 
-    if (ctx.state !== 'running') {
-      await ctx.resume();
-    }
-
-    // Stop any existing playback
-    stopAllNodes();
-
-    // Create master gain if needed
-    if (!masterGain) {
-      masterGain = ctx.createGain();
-      masterGain.connect(ctx.destination);
-    }
-    masterGain.gain.value = volume.value;
-
-    // Determine playback region
+    // Clamp position to active region
     const region = getActiveRegion();
     let playStart = currentTime.value;
-
-    // Clamp to region
     if (playStart < region.start || playStart >= region.end) {
       playStart = playbackSpeed.value >= 0 ? region.start : region.end;
       currentTime.value = playStart;
     }
 
-    // Start playback nodes for clips that are active at the current time
-    const clipsAtTime = getClipsAtTime(playStart);
+    await invoke('playback_seek', { position: playStart });
+    await invoke('playback_play');
 
-    for (const { track, clipId, buffer, clipStart } of clipsAtTime) {
-      const offsetInClip = playStart - clipStart;
-      const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
-      if (node) {
-        activeNodes.push(node);
-        console.log('[Playback] Started clip:', clipId, 'of track:', track.name, 'at offset:', offsetInClip);
-      }
-    }
-
-    startTime = ctx.currentTime;
-    startOffset = playStart;
-
-    startTimeUpdate();
+    startPositionPoll();
   }
 
   function pause(): void {
-    stopAllNodes();
-    stopReverseScrub();
-    stopTimeUpdate();
+    invoke('playback_pause').catch(e => console.warn('[Playback] pause error:', e));
+    stopPositionPoll();
     isPlaying.value = false;
   }
 
@@ -281,6 +264,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     currentTime.value = region.start;
     playbackSpeed.value = 1;
     playDirection.value = 1;
+    invoke('playback_stop').catch(e => console.warn('[Playback] stop error:', e));
   }
 
   async function togglePlay(): Promise<void> {
@@ -336,15 +320,6 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   async function speedUp(): Promise<void> {
-    const wasPlaying = isPlaying.value;
-
-    // Re-anchor timing before speed change to prevent playhead jump
-    if (wasPlaying) {
-      const ctx = audioStore.getAudioContext();
-      startOffset = currentTime.value;
-      startTime = ctx.currentTime;
-    }
-
     if (playbackSpeed.value < 0) {
       playbackSpeed.value = 1;
       playDirection.value = 1;
@@ -353,22 +328,12 @@ export const usePlaybackStore = defineStore('playback', () => {
       playDirection.value = 1;
     }
 
-    if (wasPlaying) {
-      pause();
-      await play();
+    if (isPlaying.value) {
+      await invoke('playback_set_speed', { speed: playbackSpeed.value });
     }
   }
 
-  function speedDown(): void {
-    const wasPlaying = isPlaying.value;
-
-    // Re-anchor timing before speed change to prevent playhead jump
-    if (wasPlaying) {
-      const ctx = audioStore.getAudioContext();
-      startOffset = currentTime.value;
-      startTime = ctx.currentTime;
-    }
-
+  async function speedDown(): Promise<void> {
     if (playbackSpeed.value > 0) {
       playbackSpeed.value = -1;
       playDirection.value = -1;
@@ -377,52 +342,38 @@ export const usePlaybackStore = defineStore('playback', () => {
       playDirection.value = -1;
     }
 
-    if (wasPlaying) {
-      pause();
+    if (isPlaying.value) {
+      // Just update speed — Rust engine handles negative speed natively
+      await invoke('playback_set_speed', { speed: playbackSpeed.value });
+    } else {
+      // Start playing in reverse
+      await play();
     }
-    startReversePlayback();
   }
 
   async function resetSpeed(): Promise<void> {
-    const wasPlaying = isPlaying.value;
-
-    // Re-anchor timing before speed change to prevent playhead jump
-    if (wasPlaying) {
-      const ctx = audioStore.getAudioContext();
-      startOffset = currentTime.value;
-      startTime = ctx.currentTime;
-    }
-
     playbackSpeed.value = 1;
     playDirection.value = 1;
-    if (wasPlaying) {
-      pause();
-      await play();
+
+    if (isPlaying.value) {
+      await invoke('playback_set_speed', { speed: 1.0 });
     }
   }
 
   function setVolume(newVolume: number): void {
     volume.value = Math.max(0, Math.min(1, newVolume));
-    if (masterGain) {
-      masterGain.gain.value = volume.value;
-    }
-    // Update individual track gains
-    for (const node of activeNodes) {
-      const track = tracksStore.tracks.find(t => t.id === node.trackId);
-      if (track) {
-        node.gainNode.gain.value = track.volume * volume.value;
-      }
-    }
+    invoke('playback_set_volume', { volume: volume.value })
+      .catch(e => console.warn('[Playback] volume error:', e));
   }
 
   async function setLoopEnabled(enabled: boolean): Promise<void> {
     loopEnabled.value = enabled;
-    if (isPlaying.value) {
-      const time = currentTime.value;
-      pause();
-      currentTime.value = time;
-      await play();
-    }
+    await syncLoopToRust();
+  }
+
+  async function setLoopMode(mode: LoopMode): Promise<void> {
+    loopMode.value = mode;
+    await syncLoopToRust();
   }
 
   function startScrubbing(): void {
@@ -438,208 +389,6 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   function endScrubbing(): void {
     isScrubbing.value = false;
-  }
-
-  function startTimeUpdate(): void {
-    const ctx = audioStore.getAudioContext();
-
-    const update = () => {
-      if (!isPlaying.value) return;
-
-      const region = loopEnabled.value ? getLoopRegion() : getActiveRegion();
-      const elapsed = ctx.currentTime - startTime;
-      const absSpeed = Math.abs(playbackSpeed.value) || 1;
-      let newTime = startOffset + (elapsed * absSpeed * Math.sign(playbackSpeed.value));
-      let needsRestart = false;
-
-      // Handle boundaries
-      if (playbackSpeed.value > 0) {
-        if (loopEnabled.value && newTime >= region.end) {
-          newTime = region.start;
-          needsRestart = true;
-        } else if (!loopEnabled.value && newTime >= region.end) {
-          newTime = region.end;
-          pause();
-        }
-      } else {
-        if (loopEnabled.value && newTime < region.start) {
-          newTime = region.end;
-          needsRestart = true;
-        } else if (!loopEnabled.value && newTime <= region.start) {
-          newTime = region.start;
-          pause();
-        }
-      }
-
-      // Skip silence regions when compression is enabled
-      if (silenceStore.compressionEnabled) {
-        if (playbackSpeed.value > 0) {
-          const skipTo = silenceStore.getNextSpeechTime(newTime);
-          if (skipTo !== newTime) {
-            newTime = skipTo;
-            needsRestart = true;
-            startTime = ctx.currentTime;
-            startOffset = newTime;
-          }
-        } else {
-          const skipTo = silenceStore.getPrevSpeechTime(newTime);
-          if (skipTo !== newTime) {
-            newTime = skipTo;
-            needsRestart = true;
-            startTime = ctx.currentTime;
-            startOffset = newTime;
-          }
-        }
-      }
-
-      currentTime.value = newTime;
-
-      // Only manage continuous clip playback for forward direction.
-      // Reverse playback uses scrub snippets instead (handled by startReverseScrub).
-      if (playbackSpeed.value > 0) {
-        // Check if clips have changed at current time
-        const clipsAtTime = getClipsAtTime(newTime);
-        const activeClipIds = new Set(activeNodes.map(n => n.clipId));
-        const targetClipIds = new Set(clipsAtTime.map(c => c.clipId));
-
-        // Start new clips that weren't playing
-        for (const { track, clipId, buffer, clipStart } of clipsAtTime) {
-          if (!activeClipIds.has(clipId)) {
-            const offsetInClip = newTime - clipStart;
-            const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
-            if (node) {
-              activeNodes.push(node);
-              console.log('[Playback] Started new clip:', clipId);
-            }
-          }
-        }
-
-        // Stop clips that ended
-        const nodesToRemove: TrackPlaybackNode[] = [];
-        for (const node of activeNodes) {
-          if (!targetClipIds.has(node.clipId)) {
-            try {
-              node.sourceNode.stop();
-              node.sourceNode.disconnect();
-              node.gainNode.disconnect();
-            } catch (e) {
-              // Ignore
-            }
-            nodesToRemove.push(node);
-          }
-        }
-        activeNodes = activeNodes.filter(n => !nodesToRemove.includes(n));
-
-        // Restart if we looped
-        if (needsRestart) {
-          startTime = ctx.currentTime;
-          startOffset = newTime;
-          // Restart all clips at new position
-          stopAllNodes();
-          const clipsAtNewTime = getClipsAtTime(newTime);
-          for (const { track, clipId, buffer, clipStart } of clipsAtNewTime) {
-            const offsetInClip = newTime - clipStart;
-            const node = createClipNode(track, clipId, buffer, offsetInClip, ctx);
-            if (node) {
-              activeNodes.push(node);
-            }
-          }
-        }
-      } else if (needsRestart) {
-        // For reverse looping, just reset timing
-        startTime = ctx.currentTime;
-        startOffset = newTime;
-      }
-
-      rafId = requestAnimationFrame(update);
-    };
-
-    rafId = requestAnimationFrame(update);
-  }
-
-  function startReversePlayback(): void {
-    isPlaying.value = true;
-    const ctx = audioStore.getAudioContext();
-    startTime = ctx.currentTime;
-    startOffset = currentTime.value;
-
-    // Ensure master gain exists for reverse scrub audio
-    if (!masterGain) {
-      masterGain = ctx.createGain();
-      masterGain.connect(ctx.destination);
-    }
-    masterGain.gain.value = volume.value;
-
-    startTimeUpdate();
-    startReverseScrub();
-  }
-
-  // Play short audio snippets as the playhead scrubs backward
-  function startReverseScrub(): void {
-    stopReverseScrub();
-
-    const SCRUB_INTERVAL = 80; // ms between snippets
-    const SNIPPET_DURATION = 0.08; // 80ms snippets
-
-    reverseScrubInterval = window.setInterval(() => {
-      if (!isPlaying.value || playbackSpeed.value >= 0) {
-        stopReverseScrub();
-        return;
-      }
-
-      // Stop previous snippet
-      if (scrubSource) {
-        try { scrubSource.stop(); scrubSource.disconnect(); } catch {}
-        scrubSource = null;
-      }
-      if (scrubGainNode) {
-        try { scrubGainNode.disconnect(); } catch {}
-        scrubGainNode = null;
-      }
-
-      // Play a short snippet from the current playhead position
-      const time = currentTime.value;
-      const clipsAtTime = getClipsAtTime(time);
-      if (clipsAtTime.length === 0) return;
-
-      const ctx = audioStore.getAudioContext();
-      const { track, buffer, clipStart } = clipsAtTime[0];
-      const offsetInClip = time - clipStart;
-      if (offsetInClip < 0 || offsetInClip >= buffer.duration) return;
-
-      scrubSource = ctx.createBufferSource();
-      scrubSource.buffer = buffer;
-
-      scrubGainNode = ctx.createGain();
-      scrubGainNode.gain.value = track.volume * volume.value;
-
-      scrubSource.connect(scrubGainNode);
-      if (masterGain) scrubGainNode.connect(masterGain);
-
-      scrubSource.start(0, offsetInClip, SNIPPET_DURATION);
-    }, SCRUB_INTERVAL);
-  }
-
-  function stopReverseScrub(): void {
-    if (reverseScrubInterval !== null) {
-      clearInterval(reverseScrubInterval);
-      reverseScrubInterval = null;
-    }
-    if (scrubSource) {
-      try { scrubSource.stop(); scrubSource.disconnect(); } catch {}
-      scrubSource = null;
-    }
-    if (scrubGainNode) {
-      try { scrubGainNode.disconnect(); } catch {}
-      scrubGainNode = null;
-    }
-  }
-
-  function stopTimeUpdate(): void {
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
-    }
   }
 
   // Hold-to-play functions
@@ -661,7 +410,8 @@ export const usePlaybackStore = defineStore('playback', () => {
     holdMode.value = 'reverse';
     holdStartPosition.value = currentTime.value;
     playbackSpeed.value = -1;
-    startReversePlayback();
+    playDirection.value = -1;
+    await play();
   }
 
   function stopHoldReverse(): void {
@@ -679,32 +429,14 @@ export const usePlaybackStore = defineStore('playback', () => {
       return;
     }
 
-    // Re-anchor timing BEFORE changing speed to prevent playhead jump.
-    // The RAF loop computes: startOffset + elapsed * speed
-    // If we change speed without re-anchoring, elapsed was accumulated at the old speed.
-    if (isPlaying.value) {
-      const ctx = audioStore.getAudioContext();
-      startOffset = currentTime.value;
-      startTime = ctx.currentTime;
-    }
-
     playbackSpeed.value = targetSpeed;
     playDirection.value = reverse ? -1 : 1;
 
-    if (reverse) {
-      if (isPlaying.value) {
-        pause();
-      }
-      startReversePlayback();
+    if (isPlaying.value) {
+      // Just update speed on the running engine
+      await invoke('playback_set_speed', { speed: targetSpeed });
     } else {
-      if (!isPlaying.value) {
-        await play();
-      } else {
-        // Update playback rate on existing sources
-        for (const node of activeNodes) {
-          node.sourceNode.playbackRate.value = Math.abs(targetSpeed);
-        }
-      }
+      await play();
     }
   }
 
@@ -774,15 +506,13 @@ export const usePlaybackStore = defineStore('playback', () => {
     });
   }
 
-  // Watch for track mute/solo changes during playback
-  // Uses a numeric key to avoid per-evaluation string allocation
+  // Watch for track mute/solo changes during playback — sync to Rust engine
   let lastTracksKey = 0;
   watch(
     () => {
       const tracks = tracksStore.tracks;
       let key = tracks.length;
       for (const t of tracks) {
-        // Hash track identity + mute/solo state; id.charCodeAt(0) differentiates tracks cheaply
         key = ((key << 5) - key + t.id.charCodeAt(0)) | 0;
         if (t.muted) key = (key * 31 + 1) | 0;
         if (t.solo) key = (key * 31 + 2) | 0;
@@ -793,10 +523,7 @@ export const usePlaybackStore = defineStore('playback', () => {
       if (newKey === lastTracksKey) return;
       lastTracksKey = newKey;
       if (isPlaying.value) {
-        const time = currentTime.value;
-        pause();
-        currentTime.value = time;
-        await play();
+        await syncMuteSoloToRust();
       }
     }
   );
