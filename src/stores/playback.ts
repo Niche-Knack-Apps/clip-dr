@@ -44,12 +44,12 @@ export const usePlaybackStore = defineStore('playback', () => {
     return tracksStore.timelineDuration;
   }
 
-  // Get all active tracks (respects mute/solo, excludes importing/large-file tracks)
+  // Get all active tracks (respects mute/solo, excludes still-importing tracks)
   function getActiveTracks(): Track[] {
     const tracks = tracksStore.tracks;
 
-    // Filter out tracks that are still importing or too large for browser playback
-    const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready');
+    // Filter out tracks that are still importing (large files are OK — Rust engine handles them)
+    const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file');
 
     // Check if any track is soloed
     const soloedTracks = playable.filter(t => t.solo && !t.muted);
@@ -115,7 +115,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Get all tracks with sourcePath that can be loaded by Rust
   function getPlayableTracks(): Track[] {
     return tracksStore.tracks.filter(t =>
-      t.sourcePath && (!t.importStatus || t.importStatus === 'ready')
+      t.sourcePath && (!t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file')
     );
   }
 

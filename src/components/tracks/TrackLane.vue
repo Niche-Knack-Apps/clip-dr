@@ -378,7 +378,7 @@ onUnmounted(() => {
             <span
               v-if="isLargeFile"
               class="ml-1 text-amber-400"
-              title="Large file — waveform and transcription available. Playback requires Rust engine (coming soon)."
+              title="Large file — playback, waveform, and transcription available. Export requires EDL engine (coming soon)."
             >LARGE</span>
           </div>
         </div>
