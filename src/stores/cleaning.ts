@@ -162,22 +162,34 @@ export const useCleaningStore = defineStore('cleaning', () => {
     try {
       console.log('[Clean] Starting clean for track:', sourceTrack.name);
 
-      // Get current buffer state (clips mixed together)
-      const mixedBuffer = mixTrackClipsToBuffer(sourceTrack.id);
-      if (!mixedBuffer) {
-        error.value = 'Cannot clean: no audio clips available';
-        loading.value = false;
-        return null;
+      let sourcePath: string;
+      let cleanDuration: number;
+
+      // For tracks with sourcePath but no AudioBuffer (large files),
+      // pass sourcePath directly to Rust — no need to encode to temp WAV
+      if (sourceTrack.sourcePath && !sourceTrack.audioData.buffer) {
+        sourcePath = sourceTrack.sourcePath;
+        cleanDuration = sourceTrack.duration;
+        console.log('[Clean] Using source path directly (large file):', sourcePath);
+      } else {
+        // Get current buffer state (clips mixed together)
+        const mixedBuffer = mixTrackClipsToBuffer(sourceTrack.id);
+        if (!mixedBuffer) {
+          error.value = 'Cannot clean: no audio clips available';
+          loading.value = false;
+          return null;
+        }
+
+        // Encode to WAV and write to temp file
+        const wavData = encodeWav(mixedBuffer);
+        const sourceFileName = `clean_source_${Date.now()}.wav`;
+        await writeFile(sourceFileName, wavData, { baseDir: BaseDirectory.Temp });
+        const tempDirPath = await tempDir();
+        sourcePath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${sourceFileName}`;
+        cleanDuration = mixedBuffer.duration;
+
+        console.log('[Clean] Using current buffer state, temp file:', sourcePath);
       }
-
-      // Encode to WAV and write to temp file
-      const wavData = encodeWav(mixedBuffer);
-      const sourceFileName = `clean_source_${Date.now()}.wav`;
-      await writeFile(sourceFileName, wavData, { baseDir: BaseDirectory.Temp });
-      const tempDirPath = await tempDir();
-      const sourcePath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${sourceFileName}`;
-
-      console.log('[Clean] Using current buffer state, temp file:', sourcePath);
 
       // Get temp path for output
       const outputPath = await invoke<string>('get_temp_audio_path');
@@ -208,12 +220,11 @@ export const useCleaningStore = defineStore('cleaning', () => {
       };
 
       console.log('[Clean] Calling backend clean_audio...');
-      // Call backend to clean audio (using mixed buffer duration)
       const result = await invoke<CleanResult>('clean_audio', {
         sourcePath,
         outputPath,
         startTime: 0,
-        endTime: mixedBuffer.duration,
+        endTime: cleanDuration,
         options: backendOptions,
         silenceSegments: silenceSegments.length > 0 ? silenceSegments : null,
       });
