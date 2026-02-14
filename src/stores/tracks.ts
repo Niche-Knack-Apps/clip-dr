@@ -725,6 +725,9 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find((t) => t.id === trackId);
     if (!track) return [];
 
+    // Large-file tracks have no AudioBuffer — no clips available
+    if (track.importStatus === 'large-file') return [];
+
     if (track.clips && track.clips.length > 0) {
       return track.clips;
     }
@@ -1452,6 +1455,21 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
+  // Mark a track as too large for browser decode (waveform still works)
+  function setImportLargeFile(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+
+    tracks.value[idx] = {
+      ...track,
+      importStatus: 'large-file' as ImportStatus,
+      importProgress: undefined,
+      importDecodeProgress: undefined,
+    };
+    tracks.value = [...tracks.value];
+  }
+
   /** Add a timemark to any track (not just during recording) */
   function addTimemark(trackId: string, time: number, label: string, source: 'manual' | 'auto' = 'manual'): void {
     const track = tracks.value.find(t => t.id === trackId);
@@ -1543,5 +1561,6 @@ export const useTracksStore = defineStore('tracks', () => {
     finalizeImportWaveform,
     updateImportDecodeProgress,
     setImportBuffer,
+    setImportLargeFile,
   };
 });

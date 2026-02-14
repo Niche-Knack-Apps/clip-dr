@@ -46,7 +46,7 @@ export const useExportStore = defineStore('export', () => {
   const progress = ref(0);
   const lastExportResult = ref<string | null>(null);
 
-  // Get active (non-muted) tracks, excluding tracks still importing
+  // Get active (non-muted) tracks, excluding tracks still importing or too large
   const activeTracks = computed(() => {
     const tracks = tracksStore.tracks.filter(t => !t.importStatus || t.importStatus === 'ready');
     const hasSolo = tracks.some(t => t.solo);

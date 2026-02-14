@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { AudioLoadResult, ImportStartResult, WaveformChunkEvent, ImportCompleteEvent } from '@/shared/types';
-import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+import { WAVEFORM_BUCKET_COUNT, LARGE_FILE_PCM_THRESHOLD } from '@/shared/constants';
 import { getFileName } from '@/shared/utils';
 import { useTracksStore } from './tracks';
 import { useHistoryStore } from './history';
@@ -88,6 +88,13 @@ export const useAudioStore = defineStore('audio', () => {
       tracksStore.selectTrack(trackId);
       lastImportedPath.value = path;
 
+      // Check if file is too large for browser decode
+      const estimatedPcm = metadata.duration * metadata.sampleRate * metadata.channels * 4;
+      const isLargeFile = estimatedPcm > LARGE_FILE_PCM_THRESHOLD;
+      if (isLargeFile) {
+        console.warn(`[Audio] [${ms()}] File too large for browser decode: ${(estimatedPcm / 1024 / 1024).toFixed(0)}MB estimated PCM (threshold: ${(LARGE_FILE_PCM_THRESHOLD / 1024 / 1024).toFixed(0)}MB)`);
+      }
+
       // ── Waveform completion tracking ──
       let waveformSettled = false;
 
@@ -150,66 +157,73 @@ export const useAudioStore = defineStore('audio', () => {
       }
 
       // Phase 3: Browser decodes audio via asset protocol (concurrent with Phase 2)
-      // Uses streaming fetch to report download progress to the UI
+      // Skipped for large files to avoid WebView OOM crashes
       let audioBuffer: AudioBuffer | null = null;
-      try {
-        const assetUrl = convertFileSrc(path);
-        console.log(`[Audio] [${ms()}] Phase 3 started: fetching via asset protocol`);
-        const response = await fetch(assetUrl);
-        const contentLength = Number(response.headers.get('content-length') || 0);
-        console.log(`[Audio] [${ms()}] Phase 3 response: status=${response.status}, content-length=${contentLength > 0 ? (contentLength / 1024 / 1024).toFixed(1) + 'MB' : 'unknown'}`);
+      if (isLargeFile) {
+        // Skip browser decode entirely — mark track as large-file
+        tracksStore.setImportLargeFile(trackId);
+        console.log(`[Audio] [${ms()}] Phase 3 skipped: file too large for browser decode`);
+      } else {
+        // Uses streaming fetch to report download progress to the UI
+        try {
+          const assetUrl = convertFileSrc(path);
+          console.log(`[Audio] [${ms()}] Phase 3 started: fetching via asset protocol`);
+          const response = await fetch(assetUrl);
+          const contentLength = Number(response.headers.get('content-length') || 0);
+          console.log(`[Audio] [${ms()}] Phase 3 response: status=${response.status}, content-length=${contentLength > 0 ? (contentLength / 1024 / 1024).toFixed(1) + 'MB' : 'unknown'}`);
 
-        let arrayBuffer: ArrayBuffer;
-        if (contentLength > 0 && response.body) {
-          // Stream the response to track download progress
-          const reader = response.body.getReader();
-          const chunks: Uint8Array[] = [];
-          let received = 0;
-          let lastReportedProgress = 0;
-          let progressRafId: number | null = null;
+          let arrayBuffer: ArrayBuffer;
+          if (contentLength > 0 && response.body) {
+            // Stream the response to track download progress
+            const reader = response.body.getReader();
+            const chunks: Uint8Array[] = [];
+            let received = 0;
+            let lastReportedProgress = 0;
+            let progressRafId: number | null = null;
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            received += value.length;
-            // Report fetch progress (0-0.8 of decode phase, 0.8-1.0 reserved for decodeAudioData)
-            lastReportedProgress = Math.min(received / contentLength, 1) * 0.8;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              received += value.length;
+              // Report fetch progress (0-0.8 of decode phase, 0.8-1.0 reserved for decodeAudioData)
+              lastReportedProgress = Math.min(received / contentLength, 1) * 0.8;
 
-            // Throttle progress updates to one per animation frame
-            if (progressRafId === null) {
-              progressRafId = requestAnimationFrame(() => {
-                progressRafId = null;
-                tracksStore.updateImportDecodeProgress(trackId, lastReportedProgress);
-              });
+              // Throttle progress updates to one per animation frame
+              if (progressRafId === null) {
+                progressRafId = requestAnimationFrame(() => {
+                  progressRafId = null;
+                  tracksStore.updateImportDecodeProgress(trackId, lastReportedProgress);
+                });
+              }
             }
-          }
-          // Ensure final fetch progress is reported
-          if (progressRafId !== null) cancelAnimationFrame(progressRafId);
+            // Ensure final fetch progress is reported
+            if (progressRafId !== null) cancelAnimationFrame(progressRafId);
 
-          console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(received / 1024 / 1024).toFixed(1)}MB streamed`);
+            console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(received / 1024 / 1024).toFixed(1)}MB streamed`);
 
-          // Concatenate chunks into single ArrayBuffer
-          const full = new Uint8Array(received);
-          let offset = 0;
-          for (const chunk of chunks) {
-            full.set(chunk, offset);
-            offset += chunk.length;
+            // Concatenate chunks into single ArrayBuffer
+            const full = new Uint8Array(received);
+            let offset = 0;
+            for (const chunk of chunks) {
+              full.set(chunk, offset);
+              offset += chunk.length;
+            }
+            arrayBuffer = full.buffer;
+          } else {
+            // No content-length (or no body stream) — fall back to simple fetch
+            arrayBuffer = await response.arrayBuffer();
+            console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB (non-streamed)`);
           }
-          arrayBuffer = full.buffer;
-        } else {
-          // No content-length (or no body stream) — fall back to simple fetch
-          arrayBuffer = await response.arrayBuffer();
-          console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB (non-streamed)`);
+
+          tracksStore.updateImportDecodeProgress(trackId, 0.85);
+          console.log(`[Audio] [${ms()}] Phase 3 decoding audio buffer...`);
+          audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+          tracksStore.updateImportDecodeProgress(trackId, 1.0);
+          console.log(`[Audio] [${ms()}] Phase 3 complete: browser decode done (${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.numberOfChannels}ch, ${audioBuffer.sampleRate}Hz)`);
+        } catch (e) {
+          console.warn(`[Audio] [${ms()}] Phase 3 failed (browser decode):`, e);
         }
-
-        tracksStore.updateImportDecodeProgress(trackId, 0.85);
-        console.log(`[Audio] [${ms()}] Phase 3 decoding audio buffer...`);
-        audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        tracksStore.updateImportDecodeProgress(trackId, 1.0);
-        console.log(`[Audio] [${ms()}] Phase 3 complete: browser decode done (${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.numberOfChannels}ch, ${audioBuffer.sampleRate}Hz)`);
-      } catch (e) {
-        console.warn(`[Audio] [${ms()}] Phase 3 failed (browser decode):`, e);
       }
 
       // Check track still exists (may have been deleted during decode)
@@ -235,7 +249,7 @@ export const useAudioStore = defineStore('audio', () => {
         // Update selection to cover full timeline with actual buffer duration
         selectionStore.setSelection(0, tracksStore.timelineDuration);
         console.log(`[Audio] [${ms()}] Buffer set — playback enabled, playhead at ${trackStart.toFixed(1)}s`);
-      } else {
+      } else if (!isLargeFile) {
         // Fallback: browser couldn't decode (e.g. WMA) — use legacy monolithic load
         console.warn(`[Audio] [${ms()}] Falling back to legacy load_audio_complete...`);
         await importFileLegacy(path, trackId, ctx);

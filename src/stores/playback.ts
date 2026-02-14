@@ -58,11 +58,11 @@ export const usePlaybackStore = defineStore('playback', () => {
     return tracksStore.timelineDuration;
   }
 
-  // Get all active tracks (respects mute/solo, excludes importing tracks)
+  // Get all active tracks (respects mute/solo, excludes importing/large-file tracks)
   function getActiveTracks(): Track[] {
     const tracks = tracksStore.tracks;
 
-    // Filter out tracks that are still importing (no audio buffer yet)
+    // Filter out tracks that are still importing or too large for browser playback
     const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready');
 
     // Check if any track is soloed
