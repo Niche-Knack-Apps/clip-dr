@@ -59,6 +59,8 @@ pub struct RecordingResult {
     pub duration: f64,
     pub sample_rate: u32,
     pub channels: u16,
+    /// Additional segment paths when recording was split (excludes `path` which is segment 1)
+    pub extra_segments: Vec<String>,
 }
 
 // Global recording state
@@ -72,7 +74,7 @@ lazy_static::lazy_static! {
     static ref DEBUG_CALLBACK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     // For streaming system audio - track sample count (no accumulation)
     static ref SYSTEM_AUDIO_SAMPLE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    static ref SYSTEM_WAV_WRITER: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>> = Arc::new(Mutex::new(None));
+    static ref SYSTEM_WAV_WRITER: Arc<Mutex<Option<AudioWriter>>> = Arc::new(Mutex::new(None));
     // System audio segment tracking (for WAV auto-split)
     static ref SYSTEM_SEGMENT_BASE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
     static ref SYSTEM_COMPLETED_SEGMENTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -93,9 +95,11 @@ struct RecordingState {
     output_path: PathBuf,
     use_system_buffer: bool,
     target_mono: bool,
+    /// "split-tracks" (default) or "rf64" for single-file >4GB recording
+    large_file_format: String,
     // Ring buffer + writer thread (mic recording only; system audio uses SYSTEM_WAV_WRITER)
     ring_buffer: Option<Arc<RecordingRingBuffer>>,
-    writer_handle: Option<JoinHandle<(WavWriter<BufWriter<File>>, usize, Vec<PathBuf>)>>,
+    writer_handle: Option<JoinHandle<(AudioWriter, usize, Vec<PathBuf>)>>,
 }
 
 // ── Lock-free ring buffer for realtime-safe recording ──
@@ -162,21 +166,218 @@ fn segment_path(base: &Path, index: usize) -> PathBuf {
     }
 }
 
-/// Spawn a dedicated writer thread that drains the ring buffer to a WavWriter.
-/// Returns a JoinHandle that yields (WavWriter, total_sample_count, completed_segments) on join.
-/// Supports automatic WAV segment splitting when approaching the 4GB limit.
+// ── RF64 Writer ──
+// Starts as a RIFF/WAV file with a JUNK chunk reserving space for ds64.
+// At ~4GB, the JUNK is converted to ds64 and the file becomes RF64.
+//
+// Header layout (80 bytes):
+//   0  "RIFF" (or "RF64" after upgrade)
+//   4  u32 riff_size placeholder
+//   8  "WAVE"
+//  12  "JUNK"
+//  16  u32 28  (JUNK payload size = space for ds64 fields)
+//  20  [28 bytes of 0x00]
+//  48  "fmt "
+//  52  u32 16
+//  56  u16 3 (IEEE_FLOAT), u16 channels
+//  60  u32 sample_rate, u32 byte_rate
+//  68  u16 block_align, u16 32 (bits_per_sample)
+//  72  "data"
+//  76  u32 data_size placeholder
+//  80  ... PCM data ...
+
+struct Rf64Writer {
+    file: BufWriter<File>,
+    path: PathBuf,
+    channels: u16,
+    #[allow(dead_code)]
+    sample_rate: u32,
+    data_bytes_written: u64,
+    sample_count: u64,
+    is_rf64: bool,
+    last_header_patch: std::time::Instant,
+}
+
+impl Rf64Writer {
+    fn new(path: PathBuf, sample_rate: u32, channels: u16) -> std::io::Result<Self> {
+        let file = File::create(&path)?;
+        let mut writer = BufWriter::with_capacity(65536, file);
+
+        let byte_rate = sample_rate * channels as u32 * 4; // f32 = 4 bytes
+        let block_align = channels * 4;
+
+        // Write 80-byte header with JUNK reservation
+        writer.write_all(b"RIFF")?;
+        writer.write_all(&0u32.to_le_bytes())?; // placeholder riff_size
+        writer.write_all(b"WAVE")?;
+
+        // JUNK chunk (will become ds64 at upgrade)
+        writer.write_all(b"JUNK")?;
+        writer.write_all(&28u32.to_le_bytes())?; // payload size = 28
+        writer.write_all(&[0u8; 28])?; // zero-fill ds64 reservation
+
+        // fmt chunk
+        writer.write_all(b"fmt ")?;
+        writer.write_all(&16u32.to_le_bytes())?;
+        writer.write_all(&3u16.to_le_bytes())?; // IEEE_FLOAT
+        writer.write_all(&channels.to_le_bytes())?;
+        writer.write_all(&sample_rate.to_le_bytes())?;
+        writer.write_all(&byte_rate.to_le_bytes())?;
+        writer.write_all(&block_align.to_le_bytes())?;
+        writer.write_all(&32u16.to_le_bytes())?; // bits_per_sample
+
+        // data chunk header
+        writer.write_all(b"data")?;
+        writer.write_all(&0u32.to_le_bytes())?; // placeholder data_size
+
+        Ok(Self {
+            file: writer,
+            path,
+            channels,
+            sample_rate,
+            data_bytes_written: 0,
+            sample_count: 0,
+            is_rf64: false,
+            last_header_patch: std::time::Instant::now(),
+        })
+    }
+
+    fn write_sample(&mut self, sample: f32) -> std::io::Result<()> {
+        self.file.write_all(&sample.to_le_bytes())?;
+        self.data_bytes_written += 4;
+        self.sample_count += 1;
+
+        // Check if upgrade to RF64 needed (at ~4GB - 256 bytes of headroom)
+        if !self.is_rf64 && self.data_bytes_written >= 0xFFFF_F000 {
+            self.upgrade_to_rf64()?;
+        }
+
+        // Periodic header patch (every ~2 seconds)
+        if self.last_header_patch.elapsed().as_secs() >= 2 {
+            self.patch_header()?;
+        }
+
+        Ok(())
+    }
+
+    fn upgrade_to_rf64(&mut self) -> std::io::Result<()> {
+        let inner = self.file.get_mut();
+        let current_pos = inner.seek(SeekFrom::Current(0))?;
+
+        let riff_size = self.data_bytes_written + 72; // 80 - 8 (RIFF header)
+        let data_size = self.data_bytes_written;
+        let interleaved_sample_count = self.sample_count / self.channels as u64;
+
+        // "RF64" magic
+        inner.seek(SeekFrom::Start(0))?;
+        inner.write_all(b"RF64")?;
+        // RIFF size = 0xFFFFFFFF for RF64
+        inner.write_all(&u32::MAX.to_le_bytes())?;
+
+        // Convert JUNK → ds64
+        inner.seek(SeekFrom::Start(12))?;
+        inner.write_all(b"ds64")?;
+        inner.write_all(&28u32.to_le_bytes())?; // ds64 payload size
+        inner.write_all(&riff_size.to_le_bytes())?;       // u64 riff_size
+        inner.write_all(&data_size.to_le_bytes())?;        // u64 data_size
+        inner.write_all(&interleaved_sample_count.to_le_bytes())?; // u64 sample_count
+        inner.write_all(&0u32.to_le_bytes())?;             // u32 table_length = 0
+
+        // data chunk size = 0xFFFFFFFF for RF64
+        inner.seek(SeekFrom::Start(76))?;
+        inner.write_all(&u32::MAX.to_le_bytes())?;
+
+        // Seek back to where we were
+        inner.seek(SeekFrom::Start(current_pos))?;
+
+        self.is_rf64 = true;
+        log::info!("RF64 upgrade: file is now RF64 at {:.2}GB", self.data_bytes_written as f64 / 1e9);
+        Ok(())
+    }
+
+    fn patch_header(&mut self) -> std::io::Result<()> {
+        let inner = self.file.get_mut();
+        let current_pos = inner.seek(SeekFrom::Current(0))?;
+
+        if self.is_rf64 {
+            let riff_size = self.data_bytes_written + 72;
+            let data_size = self.data_bytes_written;
+            let interleaved_sample_count = self.sample_count / self.channels as u64;
+
+            // Patch ds64 fields
+            inner.seek(SeekFrom::Start(20))?;
+            inner.write_all(&riff_size.to_le_bytes())?;
+            inner.write_all(&data_size.to_le_bytes())?;
+            inner.write_all(&interleaved_sample_count.to_le_bytes())?;
+        } else {
+            let riff_size = (self.data_bytes_written + 72).min(u32::MAX as u64) as u32;
+            let data_size = self.data_bytes_written.min(u32::MAX as u64) as u32;
+
+            inner.seek(SeekFrom::Start(4))?;
+            inner.write_all(&riff_size.to_le_bytes())?;
+            inner.seek(SeekFrom::Start(76))?;
+            inner.write_all(&data_size.to_le_bytes())?;
+        }
+
+        inner.seek(SeekFrom::Start(current_pos))?;
+        self.last_header_patch = std::time::Instant::now();
+        Ok(())
+    }
+
+    fn finalize(mut self) -> std::io::Result<PathBuf> {
+        self.patch_header()?;
+        self.file.flush()?;
+        let inner = self.file.into_inner().map_err(|e| e.into_error())?;
+        inner.sync_all()?;
+        Ok(self.path)
+    }
+
+}
+
+/// Abstraction over hound::WavWriter and Rf64Writer for use in recording threads
+enum AudioWriter {
+    Hound(WavWriter<BufWriter<File>>),
+    Rf64(Rf64Writer),
+}
+
+impl AudioWriter {
+    fn write_sample(&mut self, s: f32) -> Result<(), String> {
+        match self {
+            AudioWriter::Hound(w) => w.write_sample(s)
+                .map_err(|e| format!("WAV write error: {}", e)),
+            AudioWriter::Rf64(w) => w.write_sample(s)
+                .map_err(|e| format!("RF64 write error: {}", e)),
+        }
+    }
+
+    fn finalize(self) -> Result<(), String> {
+        match self {
+            AudioWriter::Hound(w) => w.finalize()
+                .map_err(|e| format!("WAV finalize error: {}", e)),
+            AudioWriter::Rf64(w) => {
+                w.finalize().map_err(|e| format!("RF64 finalize error: {}", e))?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Spawn a dedicated writer thread that drains the ring buffer to an AudioWriter.
+/// Returns a JoinHandle that yields (AudioWriter, total_sample_count, completed_segments) on join.
+/// Supports automatic WAV segment splitting (split-tracks mode) or RF64 single-file mode.
 fn spawn_wav_writer_thread(
     ring: Arc<RecordingRingBuffer>,
-    wav_writer: WavWriter<BufWriter<File>>,
+    audio_writer: AudioWriter,
     channels: u16,
     _target_mono: bool,
     base_path: PathBuf,
     wav_spec: WavSpec,
-) -> JoinHandle<(WavWriter<BufWriter<File>>, usize, Vec<PathBuf>)> {
+    use_rf64: bool,
+) -> JoinHandle<(AudioWriter, usize, Vec<PathBuf>)> {
     std::thread::Builder::new()
         .name("wav-writer".into())
         .spawn(move || {
-            let mut writer = wav_writer;
+            let mut writer = audio_writer;
             let mut total_written: usize = 0;
             let mut bad_channel_checked = false;
             let mut segment_data_bytes: usize = 0;
@@ -230,8 +431,8 @@ fn spawn_wav_writer_thread(
                 };
                 let write_bytes = samples_to_write * 4;
 
-                // Check if segment split is needed before writing
-                if segment_data_bytes + write_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
+                // Check if segment split is needed (only in split-tracks mode, not RF64)
+                if !use_rf64 && segment_data_bytes + write_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
                     let current_seg = segment_path(&base_path, segment_index);
                     match writer.finalize() {
                         Ok(()) => {
@@ -244,12 +445,12 @@ fn spawn_wav_writer_thread(
                     segment_data_bytes = 0;
                     let new_path = segment_path(&base_path, segment_index);
                     let f = File::create(&new_path).expect("Failed to create segment file");
-                    writer = WavWriter::new(BufWriter::new(f), wav_spec)
-                        .expect("Failed to create segment writer");
+                    writer = AudioWriter::Hound(WavWriter::new(BufWriter::new(f), wav_spec)
+                        .expect("Failed to create segment writer"));
                     log::info!("Mic recording: started new segment {:?}", new_path);
                 }
 
-                // Drain available samples to WAV
+                // Drain available samples to writer
                 let new_rp;
                 if channels == 2 && bad_ch > 0 {
                     // Write with bad-channel fixup (replace bad channel with good one)
@@ -309,9 +510,9 @@ fn spawn_wav_writer_thread(
             let overruns = ring.overrun_count.load(Ordering::Relaxed);
             let max_fill = ring.max_fill_level.load(Ordering::Relaxed);
             log::info!(
-                "WAV writer thread finished: {} total samples, {} segments. \
+                "WAV writer thread finished: {} total samples, {} segments, rf64={}. \
                  Ring telemetry: overrun_count={}, max_fill={}/{} ({:.1}%)",
-                total_written, segment_index,
+                total_written, segment_index, use_rf64,
                 overruns, max_fill, ring.capacity,
                 max_fill as f64 / ring.capacity as f64 * 100.0
             );
@@ -454,62 +655,6 @@ fn patch_wav_header_if_needed(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Concatenate multiple WAV segments into one file.
-/// Opens the first segment for append, streams PCM data from subsequent segments
-/// (skipping their WAV headers via find_wav_data_offset), deletes extras, patches header.
-fn concatenate_wav_segments(segments: &[PathBuf]) -> Result<(), String> {
-    if segments.len() <= 1 {
-        return Ok(()); // Nothing to concatenate
-    }
-
-    log::info!("Concatenating {} WAV segments into {:?}", segments.len(), segments[0]);
-
-    // Open first segment for appending
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .append(true)
-        .open(&segments[0])
-        .map_err(|e| format!("Failed to open first segment for append: {}", e))?;
-
-    // Stream-copy PCM data from segments 2..N (64KB chunks)
-    for seg_path in &segments[1..] {
-        // Read header to find data offset
-        let mut header_buf = [0u8; 4096];
-        let mut seg_file = File::open(seg_path)
-            .map_err(|e| format!("Failed to open segment {:?}: {}", seg_path, e))?;
-        let header_len = seg_file.read(&mut header_buf)
-            .map_err(|e| format!("Failed to read segment header: {}", e))?;
-
-        let data_offset = super::playback::find_wav_data_offset(&header_buf[..header_len])
-            .ok_or_else(|| format!("No data chunk found in segment {:?}", seg_path))?;
-
-        // Seek to data start
-        seg_file.seek(SeekFrom::Start(data_offset as u64))
-            .map_err(|e| format!("Failed to seek in segment: {}", e))?;
-
-        // Stream copy in 64KB chunks
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = seg_file.read(&mut buf)
-                .map_err(|e| format!("Failed to read segment data: {}", e))?;
-            if n == 0 { break; }
-            file.write_all(&buf[..n])
-                .map_err(|e| format!("Failed to append segment data: {}", e))?;
-        }
-
-        log::info!("Appended segment {:?}, deleting", seg_path);
-        let _ = std::fs::remove_file(seg_path);
-    }
-
-    drop(file);
-
-    // Patch the combined file's header
-    patch_wav_header_if_needed(&segments[0])?;
-
-    log::info!("Segment concatenation complete: {:?}", segments[0]);
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
     let host = cpal::default_host();
@@ -602,7 +747,7 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
 }
 
 #[tauri::command]
-pub async fn start_recording(device_id: Option<String>, output_dir: String, channel_mode: Option<String>) -> Result<String, String> {
+pub async fn start_recording(device_id: Option<String>, output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>) -> Result<String, String> {
     // Auto-reset any stuck state from previous failed recordings
     if RECORDING_ACTIVE.load(Ordering::SeqCst) {
         log::warn!("Recording state was stuck, auto-resetting...");
@@ -712,19 +857,26 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     let output_path = output_dir_path.join(&filename);
 
     let target_mono = channel_mode.as_deref() == Some("mono");
+    let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
+    let use_rf64 = lff == "rf64";
 
-    // Create WAV writer for incremental crash-safe recording
+    // Create WAV/RF64 writer for incremental crash-safe recording
     let spec = WavSpec {
         channels,
         sample_rate,
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let file = File::create(&output_path)
-        .map_err(|e| format!("Failed to create output file: {}", e))?;
-    let buf_writer = BufWriter::new(file);
-    let wav_writer = WavWriter::new(buf_writer, spec)
-        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+
+    let audio_writer = if use_rf64 {
+        AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+            .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+    } else {
+        let file = File::create(&output_path)
+            .map_err(|e| format!("Failed to create output file: {}", e))?;
+        AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
+            .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+    };
 
     // Initialize recording state (writer_handle and ring_buffer set after spawn below)
     {
@@ -736,6 +888,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
             output_path: output_path.clone(),
             use_system_buffer: false,
             target_mono,
+            large_file_format: lff,
             ring_buffer: None,
             writer_handle: None,
         });
@@ -749,11 +902,11 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         sample_rate as usize * channels as usize * 10, // 10 seconds of headroom
     ).with_channels(channels));
 
-    // Spawn the WAV writer thread (drains ring buffer → disk)
+    // Spawn the writer thread (drains ring buffer → disk)
     let writer_ring = ring.clone();
     let writer_handle = spawn_wav_writer_thread(
-        writer_ring, wav_writer, channels, target_mono,
-        output_path.clone(), spec,
+        writer_ring, audio_writer, channels, target_mono,
+        output_path.clone(), spec, use_rf64,
     );
 
     // Store writer handle for stop_recording() to join
@@ -882,7 +1035,7 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
 
     let state = state.ok_or("Recording state not found")?;
 
-    // Signal ring buffer to stop and join writer thread to get WAV writer back
+    // Signal ring buffer to stop and join writer thread to get writer back
     let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) = (state.ring_buffer, state.writer_handle) {
         // Log telemetry before joining
         let overruns = ring.overrun_count.load(Ordering::Relaxed);
@@ -921,38 +1074,61 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         duration
     );
 
-    // Finalize the WAV writer and patch header
+    // Finalize the writer
     if let Some(w) = writer {
         w.finalize()
-            .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+            .map_err(|e| format!("Failed to finalize recording: {}", e))?;
     }
 
-    // Patch the last segment's header (safety net for hound u32 overflow)
+    // Patch the last segment's header (safety net for hound u32 overflow — only for split-tracks mode)
+    let use_rf64 = state.large_file_format == "rf64";
     let last_seg_path = segment_path(&state.output_path, completed_segments.len() + 1);
-    let _ = patch_wav_header_if_needed(&last_seg_path);
-
-    // Concatenate segments if auto-split occurred
-    if !completed_segments.is_empty() {
-        let mut all_segments = completed_segments;
-        all_segments.push(last_seg_path);
-        concatenate_wav_segments(&all_segments)?;
+    if !use_rf64 {
+        let _ = patch_wav_header_if_needed(&last_seg_path);
     }
 
-    // Convert to mono if needed
-    let final_channels = if state.target_mono && state.channels == 2 {
+    // fsync the last segment to ensure data is on disk before import
+    if let Ok(f) = File::open(&last_seg_path) {
+        let _ = f.sync_all();
+    }
+
+    // Build extra_segments list (no concatenation — keep them as separate tracks)
+    let extra_segments: Vec<String> = if !completed_segments.is_empty() {
+        // completed_segments are segments 1..N-1, last_seg_path is segment N
+        // Patch headers of completed segments too
+        for seg in &completed_segments {
+            if !use_rf64 {
+                let _ = patch_wav_header_if_needed(seg);
+            }
+        }
+        // First segment = state.output_path (already in `path` field)
+        // Extra segments = completed[1..] + last_seg_path
+        let mut extras: Vec<String> = completed_segments.iter()
+            .skip(1)
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        extras.push(last_seg_path.to_string_lossy().to_string());
+        extras
+    } else {
+        Vec::new()
+    };
+
+    // Convert to mono if needed (only for single-segment or first segment)
+    let final_channels = if state.target_mono && state.channels == 2 && extra_segments.is_empty() {
         stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
         1u16
     } else {
         state.channels
     };
 
-    log::info!("Saved recording to: {:?}", state.output_path);
+    log::info!("Saved recording to: {:?} ({} extra segments)", state.output_path, extra_segments.len());
 
     Ok(RecordingResult {
         path: state.output_path.to_string_lossy().to_string(),
         duration,
         sample_rate: state.sample_rate,
         channels: final_channels,
+        extra_segments,
     })
 }
 
@@ -1294,9 +1470,10 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                     let sample_bytes = samples.len() * 4;
 
                     if let Ok(mut writer_guard) = SYSTEM_WAV_WRITER.lock() {
-                        // Check if segment split is needed
+                        // Check if segment split is needed (only for split-tracks mode, not RF64)
+                        let is_rf64 = matches!(&*writer_guard, Some(AudioWriter::Rf64(_)));
                         let current_data_bytes = SYSTEM_SEGMENT_DATA_BYTES.load(Ordering::Relaxed);
-                        if current_data_bytes + sample_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
+                        if !is_rf64 && current_data_bytes + sample_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
                             // Finalize current segment, patch header, create new one
                             if let Some(old_writer) = writer_guard.take() {
                                 let _ = old_writer.finalize();
@@ -1322,7 +1499,7 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                                         };
                                         if let Ok(f) = File::create(&new_path) {
                                             if let Ok(new_writer) = WavWriter::new(BufWriter::new(f), sys_spec) {
-                                                *writer_guard = Some(new_writer);
+                                                *writer_guard = Some(AudioWriter::Hound(new_writer));
                                                 log::info!("System audio: started new segment {:?}", new_path);
                                             }
                                         }
@@ -1566,7 +1743,7 @@ pub fn check_input_muted() -> Result<bool, String> {
 /// Reuses the monitoring capture process — does NOT spawn a new process.
 /// The monitor reader thread accumulates samples when RECORDING_ACTIVE is set.
 #[tauri::command]
-pub async fn start_system_audio_recording(output_dir: String, channel_mode: Option<String>) -> Result<String, String> {
+pub async fn start_system_audio_recording(output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         // Auto-reset any stuck state from previous failed recordings
@@ -1609,23 +1786,29 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         }
 
         let target_mono = channel_mode.as_deref() == Some("mono");
+        let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
+        let use_rf64 = lff == "rf64";
 
-        // Create WAV writer for incremental crash-safe recording
-        let sys_spec = WavSpec {
-            channels: 2,
-            sample_rate: 44100,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
+        // Create WAV/RF64 writer for incremental crash-safe recording
+        let sys_writer = if use_rf64 {
+            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), 44100, 2)
+                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+        } else {
+            let sys_spec = WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+            let sys_file = File::create(&output_path)
+                .map_err(|e| format!("Failed to create output file: {}", e))?;
+            AudioWriter::Hound(WavWriter::new(BufWriter::new(sys_file), sys_spec)
+                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
         };
-        let sys_file = File::create(&output_path)
-            .map_err(|e| format!("Failed to create output file: {}", e))?;
-        let sys_buf = BufWriter::new(sys_file);
-        let sys_wav_writer = WavWriter::new(sys_buf, sys_spec)
-            .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
 
         {
             let mut wg = SYSTEM_WAV_WRITER.lock().unwrap();
-            *wg = Some(sys_wav_writer);
+            *wg = Some(sys_writer);
         }
 
         // Store recording state
@@ -1638,6 +1821,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
                 output_path: output_path.clone(),
                 use_system_buffer: true,
                 target_mono,
+                large_file_format: lff,
                 ring_buffer: None,
                 writer_handle: None,
             });
@@ -1769,41 +1953,67 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
         // Compute duration from sample count
         let duration = sample_count as f64 / state.channels as f64 / state.sample_rate as f64;
 
-        // Finalize the WAV writer
+        // Finalize the writer
         if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
             if let Some(writer) = wg.take() {
                 writer.finalize()
-                    .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+                    .map_err(|e| format!("Failed to finalize recording: {}", e))?;
             }
         }
 
-        // Patch header of the last segment (safety net for hound u32 overflow)
+        let use_rf64 = state.large_file_format == "rf64";
+
+        // Patch header of the last segment (safety net for hound u32 overflow — only for split-tracks)
         let seg_idx = SYSTEM_SEGMENT_INDEX.load(Ordering::Relaxed);
         let last_seg_path = segment_path(&state.output_path, seg_idx);
-        let _ = patch_wav_header_if_needed(&last_seg_path);
+        if !use_rf64 {
+            let _ = patch_wav_header_if_needed(&last_seg_path);
+        }
 
-        // Concatenate segments if auto-split occurred
+        // fsync the last segment to ensure data is on disk before import
+        if let Ok(f) = File::open(&last_seg_path) {
+            let _ = f.sync_all();
+        }
+
+        // Build extra_segments list (no concatenation — keep as separate tracks)
         let completed = if let Ok(mut guard) = SYSTEM_COMPLETED_SEGMENTS.lock() {
             guard.drain(..).collect::<Vec<_>>()
         } else {
             Vec::new()
         };
-        if !completed.is_empty() {
-            let mut all_segments = completed;
-            all_segments.push(last_seg_path);
-            concatenate_wav_segments(&all_segments)?;
-        }
 
-        // Convert to mono if needed
-        let final_channels = if state.target_mono && state.channels == 2 {
+        let extra_segments: Vec<String> = if !completed.is_empty() {
+            // Patch headers of completed segments too
+            for seg in &completed {
+                if !use_rf64 {
+                    let _ = patch_wav_header_if_needed(seg);
+                }
+                if let Ok(f) = File::open(seg) {
+                    let _ = f.sync_all();
+                }
+            }
+            // First segment = state.output_path (already in `path` field)
+            // Extra segments = completed[1..] + last_seg_path
+            let mut extras: Vec<String> = completed.iter()
+                .skip(1)
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            extras.push(last_seg_path.to_string_lossy().to_string());
+            extras
+        } else {
+            Vec::new()
+        };
+
+        // Convert to mono if needed (only for single-segment)
+        let final_channels = if state.target_mono && state.channels == 2 && extra_segments.is_empty() {
             stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
             1u16
         } else {
             state.channels
         };
 
-        log::info!("System audio recording complete: {:?}, {:.2}s, {} callbacks",
-            state.output_path, duration, DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst));
+        log::info!("System audio recording complete: {:?}, {:.2}s, {} callbacks, {} extra segments",
+            state.output_path, duration, DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst), extra_segments.len());
 
         // Don't reset CURRENT_LEVEL — monitoring is still running and will keep updating it
 
@@ -1812,6 +2022,7 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
             duration,
             sample_rate: state.sample_rate,
             channels: final_channels,
+            extra_segments,
         })
     }
 

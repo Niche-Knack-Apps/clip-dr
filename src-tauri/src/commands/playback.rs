@@ -301,41 +301,131 @@ impl PlaybackEngine {
 
 // ── Audio source loading ──
 
-/// Try to mmap a WAV file for zero-copy PCM access
+/// Try to mmap a WAV/RF64 file for zero-copy PCM access
 pub(crate) fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
     let file = File::open(path)
         .map_err(|e| format!("Failed to open WAV: {}", e))?;
     let mmap = unsafe { Mmap::map(&file) }
         .map_err(|e| format!("Failed to mmap WAV: {}", e))?;
 
-    // Parse WAV header to find data offset and format
-    let reader = WavReader::new(std::io::Cursor::new(&mmap[..]))
-        .map_err(|e| format!("Failed to parse WAV header: {}", e))?;
-
-    let spec = reader.spec();
-
-    // Only support 32-bit float WAV for mmap (our recording format)
-    if spec.sample_format != hound::SampleFormat::Float || spec.bits_per_sample != 32 {
-        return Err("WAV is not 32-bit float, falling back to decode".to_string());
+    if mmap.len() < 12 {
+        return Err("File too small to be WAV/RF64".to_string());
     }
 
-    let sample_rate = spec.sample_rate;
-    let channels = spec.channels;
+    let is_rf64 = &mmap[0..4] == b"RF64";
 
-    // Find data chunk offset by searching for 'data' marker
-    let data_offset = find_wav_data_offset(&mmap)
-        .ok_or_else(|| "Could not find WAV data chunk".to_string())?;
+    if is_rf64 {
+        // Parse RF64 header directly from mmap
+        let (sample_rate, channels, data_offset, sample_count) = parse_rf64_header(&mmap)?;
+        Ok((PcmData::Mmap { mmap, data_offset, sample_count }, sample_rate, channels))
+    } else {
+        // Standard WAV: parse with hound
+        let reader = WavReader::new(std::io::Cursor::new(&mmap[..]))
+            .map_err(|e| format!("Failed to parse WAV header: {}", e))?;
 
-    let data_bytes = mmap.len() - data_offset;
-    let sample_count = data_bytes / 4; // f32 = 4 bytes
+        let spec = reader.spec();
 
-    Ok((PcmData::Mmap { mmap, data_offset, sample_count }, sample_rate, channels))
+        // Only support 32-bit float WAV for mmap (our recording format)
+        if spec.sample_format != hound::SampleFormat::Float || spec.bits_per_sample != 32 {
+            return Err("WAV is not 32-bit float, falling back to decode".to_string());
+        }
+
+        let sample_rate = spec.sample_rate;
+        let channels = spec.channels;
+
+        // Find data chunk offset by searching for 'data' marker
+        let data_offset = find_wav_data_offset(&mmap)
+            .ok_or_else(|| "Could not find WAV data chunk".to_string())?;
+
+        let data_bytes = mmap.len() - data_offset;
+        let sample_count = data_bytes / 4; // f32 = 4 bytes
+
+        Ok((PcmData::Mmap { mmap, data_offset, sample_count }, sample_rate, channels))
+    }
 }
 
-/// Find the byte offset of WAV PCM data by walking RIFF chunks structurally
+/// Parse an RF64/WAVE header to extract format info and data location.
+/// RF64 stores true 64-bit sizes in a ds64 chunk right after "WAVE".
+fn parse_rf64_header(mmap: &[u8]) -> Result<(u32, u16, usize, usize), String> {
+    if mmap.len() < 12 || &mmap[0..4] != b"RF64" || &mmap[8..12] != b"WAVE" {
+        return Err("Not an RF64 file".to_string());
+    }
+
+    let mut sample_rate: u32 = 44100;
+    let mut channels: u16 = 2;
+    let mut bits_per_sample: u16 = 32;
+    let mut data_size_64: u64 = 0;
+    let mut found_ds64 = false;
+    let mut found_fmt = false;
+
+    // Walk chunks
+    let mut pos = 12;
+    while pos + 8 <= mmap.len() {
+        let chunk_id = &mmap[pos..pos + 4];
+        let chunk_size_u32 = u32::from_le_bytes(
+            mmap[pos + 4..pos + 8].try_into().map_err(|_| "Bad chunk header")?
+        );
+
+        if chunk_id == b"ds64" {
+            // ds64 payload: u64 riff_size, u64 data_size, u64 sample_count, u32 table_length
+            if pos + 8 + 28 <= mmap.len() {
+                // Skip riff_size (8 bytes), read data_size
+                data_size_64 = u64::from_le_bytes(
+                    mmap[pos + 16..pos + 24].try_into().map_err(|_| "Bad ds64 data_size")?
+                );
+                found_ds64 = true;
+            }
+            let advance = chunk_size_u32 as usize;
+            pos += 8 + advance + (advance % 2);
+        } else if chunk_id == b"fmt " {
+            if pos + 8 + 16 <= mmap.len() {
+                let fmt_start = pos + 8;
+                // audio_format at +0 (u16), channels at +2 (u16), sample_rate at +4 (u32)
+                // bits_per_sample at +14 (u16)
+                channels = u16::from_le_bytes(
+                    mmap[fmt_start + 2..fmt_start + 4].try_into().map_err(|_| "Bad fmt channels")?
+                );
+                sample_rate = u32::from_le_bytes(
+                    mmap[fmt_start + 4..fmt_start + 8].try_into().map_err(|_| "Bad fmt sample_rate")?
+                );
+                bits_per_sample = u16::from_le_bytes(
+                    mmap[fmt_start + 14..fmt_start + 16].try_into().map_err(|_| "Bad fmt bits")?
+                );
+                found_fmt = true;
+            }
+            let advance = chunk_size_u32 as usize;
+            pos += 8 + advance + (advance % 2);
+        } else if chunk_id == b"data" {
+            let data_offset = pos + 8;
+            if !found_fmt {
+                return Err("RF64: found data before fmt chunk".to_string());
+            }
+            if bits_per_sample != 32 {
+                return Err(format!("RF64 is {}-bit, need 32-bit float for mmap", bits_per_sample));
+            }
+            // Use ds64 data_size if available, otherwise compute from file size
+            let data_bytes = if found_ds64 && data_size_64 > 0 {
+                (data_size_64 as usize).min(mmap.len() - data_offset)
+            } else {
+                mmap.len() - data_offset
+            };
+            let sample_count = data_bytes / 4; // f32 = 4 bytes
+            return Ok((sample_rate, channels, data_offset, sample_count));
+        } else {
+            // Unknown chunk — skip
+            let advance = if chunk_size_u32 == 0xFFFFFFFF { 0 } else { chunk_size_u32 as usize };
+            pos += 8 + advance + (advance % 2);
+        }
+    }
+
+    Err("RF64: no data chunk found".to_string())
+}
+
+/// Find the byte offset of WAV/RF64 PCM data by walking RIFF chunks structurally
 pub(crate) fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
     if data.len() < 12 { return None; }
-    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+    let magic = &data[0..4];
+    if (magic != b"RIFF" && magic != b"RF64") || &data[8..12] != b"WAVE" { return None; }
 
     let mut pos = 12;
     while pos + 8 <= data.len() {
@@ -344,8 +434,11 @@ pub(crate) fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
         if chunk_id == b"data" {
             return Some(pos + 8);
         }
-        pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 { pos += 1; } // RIFF word alignment padding
+        // For RF64 ds64 chunk or u32::MAX data size, use the declared chunk_size
+        // but cap traversal to avoid infinite loops on corrupt files
+        let advance = if chunk_size == 0xFFFFFFFF { 0 } else { chunk_size };
+        pos += 8 + advance;
+        if advance % 2 != 0 { pos += 1; } // RIFF word alignment padding
     }
     None
 }
