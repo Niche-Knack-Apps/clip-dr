@@ -46,6 +46,7 @@ export const useExportStore = defineStore('export', () => {
   const error = ref<string | null>(null);
   const progress = ref(0);
   const lastExportResult = ref<string | null>(null);
+  const currentExportPath = ref<string | null>(null);
 
   // Get active (non-muted) tracks, excluding tracks still importing
   const activeTracks = computed(() => {
@@ -189,6 +190,7 @@ export const useExportStore = defineStore('export', () => {
     error.value = null;
     progress.value = 10;
     lastExportResult.value = null;
+    currentExportPath.value = outputPath;
 
     try {
       const tracks = activeTracks.value;
@@ -255,6 +257,7 @@ export const useExportStore = defineStore('export', () => {
       return outputPath;
     } finally {
       loading.value = false;
+      currentExportPath.value = null;
     }
   }
 
@@ -297,6 +300,7 @@ export const useExportStore = defineStore('export', () => {
       loading.value = true;
       error.value = null;
       progress.value = 10;
+      currentExportPath.value = outputPath;
 
       // Use EDL path for tracks with source paths (required for large files)
       if (track.sourcePath) {
@@ -357,6 +361,7 @@ export const useExportStore = defineStore('export', () => {
       return null;
     } finally {
       loading.value = false;
+      currentExportPath.value = null;
     }
   }
 
@@ -642,6 +647,7 @@ export const useExportStore = defineStore('export', () => {
     canExport,
     canQuickReExport,
     lastExportResult,
+    currentExportPath,
     exportActiveTracks,
     exportMixedTracks,
     exportTrack,

@@ -4,6 +4,7 @@ import FullWaveform from '@/components/waveform/FullWaveform.vue';
 import ZoomedWaveform from '@/components/waveform/ZoomedWaveform.vue';
 import WordTimeline from '@/components/transcription/WordTimeline.vue';
 import TrackList from '@/components/tracks/TrackList.vue';
+import ProgressModal from '@/components/ui/ProgressModal.vue';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
 import { useTracksStore } from '@/stores/tracks';
@@ -154,16 +155,92 @@ function stopZoomedResize() {
   document.body.style.userSelect = '';
 }
 
-// Clean up document-level event listeners on unmount
+// Clean up document-level event listeners and timers on unmount
 onUnmounted(() => {
   document.removeEventListener('mousemove', handleWaveformResize);
   document.removeEventListener('mouseup', stopWaveformResize);
   document.removeEventListener('mousemove', handleZoomedResize);
   document.removeEventListener('mouseup', stopZoomedResize);
+  if (exportModalTimer) { clearTimeout(exportModalTimer); exportModalTimer = null; }
+  if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
 });
 
 // Keyboard shortcuts modal
 const showShortcutsModal = ref(false);
+
+// --- Export progress modal with 5s delay ---
+const showExportModal = ref(false);
+let exportModalTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(() => exportStore.loading, (isLoading) => {
+  if (isLoading) {
+    exportModalTimer = setTimeout(() => { showExportModal.value = true; }, 5000);
+  } else {
+    if (exportModalTimer) { clearTimeout(exportModalTimer); exportModalTimer = null; }
+    showExportModal.value = false;
+  }
+});
+
+// --- Large-file import/caching (polling for non-reactive importDecodeProgress) ---
+const showImportModal = ref(false);
+const importProgress = ref(0);
+const importSubtitle = ref('');
+let importPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function pollCachingProgress() {
+  const track = tracksStore.tracks.find(t => t.importStatus === 'caching');
+  if (track) {
+    importProgress.value = Math.round((track.importDecodeProgress ?? 0) * 100);
+    importSubtitle.value = track.name;
+  } else {
+    showImportModal.value = false;
+    importProgress.value = 0;
+    importSubtitle.value = '';
+    if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
+  }
+}
+
+watch(
+  () => tracksStore.tracks,
+  (tracks) => {
+    const caching = tracks.find(t => t.importStatus === 'caching');
+    if (caching && !showImportModal.value) {
+      showImportModal.value = true;
+      importSubtitle.value = caching.name;
+      importProgress.value = Math.round((caching.importDecodeProgress ?? 0) * 100);
+      if (!importPollTimer) {
+        importPollTimer = setInterval(pollCachingProgress, 250);
+      }
+    } else if (!caching && showImportModal.value) {
+      showImportModal.value = false;
+      importProgress.value = 0;
+      importSubtitle.value = '';
+      if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
+    }
+  },
+  { immediate: true }
+);
+
+// --- Unified progress modal state (export takes priority) ---
+const showProgressModal = computed(() => showExportModal.value || showImportModal.value);
+
+const progressModalTitle = computed(() => {
+  if (showExportModal.value) return 'Exporting...';
+  return 'Importing large file...';
+});
+
+const progressModalProgress = computed(() => {
+  if (showExportModal.value) return exportStore.progress;
+  return importProgress.value;
+});
+
+const progressModalSubtitle = computed(() => {
+  if (showExportModal.value) {
+    const p = exportStore.currentExportPath;
+    return p ? p.split(/[/\\]/).pop() ?? '' : '';
+  }
+  return importSubtitle.value;
+});
 
 // Dynamic bottom bar hints
 const activeHints = computed(() => {
@@ -332,6 +409,14 @@ useKeyboardShortcuts({
       </span>
       <span v-if="playbackStore.playbackSpeed !== 1" class="text-cyan-400">{{ playbackStore.playbackSpeed > 0 ? '' : '-' }}{{ Math.abs(playbackStore.playbackSpeed) }}x</span>
     </div>
+
+    <!-- Progress modal (export / large-file import) -->
+    <ProgressModal
+      :visible="showProgressModal"
+      :title="progressModalTitle"
+      :progress="progressModalProgress"
+      :subtitle="progressModalSubtitle"
+    />
 
     <!-- Keyboard shortcuts modal -->
     <Teleport to="body">
