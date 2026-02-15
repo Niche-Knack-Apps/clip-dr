@@ -166,9 +166,31 @@ impl StreamBuffer {
 static PLAYBACK_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
 
 /// Wrapper to make cpal::Stream storable in a Mutex (it's !Send but we only
-/// access from the main thread during setup/teardown)
-struct StreamHolder(cpal::Stream);
+/// access from the main thread during setup/teardown).
+/// Includes thread affinity guard: logs a warning if dropped on a different thread.
+struct StreamHolder {
+    stream: cpal::Stream,
+    creator_thread: std::thread::ThreadId,
+}
 unsafe impl Send for StreamHolder {}
+
+impl StreamHolder {
+    fn new(stream: cpal::Stream) -> Self {
+        Self { stream, creator_thread: std::thread::current().id() }
+    }
+}
+
+impl Drop for StreamHolder {
+    fn drop(&mut self) {
+        if std::thread::current().id() != self.creator_thread {
+            log::warn!(
+                "StreamHolder dropped on different thread than created \
+                 (created: {:?}, dropping: {:?})",
+                self.creator_thread, std::thread::current().id()
+            );
+        }
+    }
+}
 
 pub struct PlaybackEngine {
     inner: Arc<Mutex<EngineInner>>,
@@ -919,7 +941,7 @@ pub async fn playback_set_tracks(
                 inner.output_channels = channels;
                 inner.stream_started = true;
                 if let Ok(mut guard) = PLAYBACK_STREAM.lock() {
-                    *guard = Some(StreamHolder(stream));
+                    *guard = Some(StreamHolder::new(stream));
                 }
                 log::info!("Output stream started: {}Hz {}ch", sample_rate, channels);
             }

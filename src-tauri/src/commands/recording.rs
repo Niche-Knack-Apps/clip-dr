@@ -3,9 +3,9 @@ use cpal::{Sample, SampleFormat};
 use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read, Write, Seek, SeekFrom};
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,9 +13,31 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Wrapper to make cpal::Stream storable in a Mutex (it's !Send but we only
-/// access from the main thread during setup/teardown)
-struct StreamHolder(cpal::Stream);
+/// access from the main thread during setup/teardown).
+/// Includes thread affinity guard: logs a warning if dropped on a different thread.
+struct StreamHolder {
+    stream: cpal::Stream,
+    creator_thread: std::thread::ThreadId,
+}
 unsafe impl Send for StreamHolder {}
+
+impl StreamHolder {
+    fn new(stream: cpal::Stream) -> Self {
+        Self { stream, creator_thread: std::thread::current().id() }
+    }
+}
+
+impl Drop for StreamHolder {
+    fn drop(&mut self) {
+        if std::thread::current().id() != self.creator_thread {
+            log::warn!(
+                "StreamHolder dropped on different thread than created \
+                 (created: {:?}, dropping: {:?})",
+                self.creator_thread, std::thread::current().id()
+            );
+        }
+    }
+}
 
 /// Properly hold recording and monitor streams so they can be dropped
 static RECORDING_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
@@ -51,7 +73,18 @@ lazy_static::lazy_static! {
     // For streaming system audio - track sample count (no accumulation)
     static ref SYSTEM_AUDIO_SAMPLE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static ref SYSTEM_WAV_WRITER: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>> = Arc::new(Mutex::new(None));
+    // System audio segment tracking (for WAV auto-split)
+    static ref SYSTEM_SEGMENT_BASE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static ref SYSTEM_COMPLETED_SEGMENTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 }
+
+/// Maximum PCM data bytes per WAV segment (~3.63 GB, safely below u32::MAX = 4,294,967,295)
+const WAV_SEGMENT_MAX_DATA_BYTES: usize = 3_900_000_000;
+
+/// Track bytes written to current system audio WAV segment
+static SYSTEM_SEGMENT_DATA_BYTES: AtomicUsize = AtomicUsize::new(0);
+/// Current system audio segment index (1-based)
+static SYSTEM_SEGMENT_INDEX: AtomicUsize = AtomicUsize::new(1);
 
 struct RecordingState {
     sample_count: usize,
@@ -62,7 +95,7 @@ struct RecordingState {
     target_mono: bool,
     // Ring buffer + writer thread (mic recording only; system audio uses SYSTEM_WAV_WRITER)
     ring_buffer: Option<Arc<RecordingRingBuffer>>,
-    writer_handle: Option<JoinHandle<(WavWriter<BufWriter<File>>, usize)>>,
+    writer_handle: Option<JoinHandle<(WavWriter<BufWriter<File>>, usize, Vec<PathBuf>)>>,
 }
 
 // ── Lock-free ring buffer for realtime-safe recording ──
@@ -84,6 +117,10 @@ struct RecordingRingBuffer {
     channels: u16,
     /// Bad channel detected: 0=none, 1=ch0 bad, 2=ch1 bad
     bad_channel: AtomicUsize,
+    /// Number of times the audio callback dropped a batch due to full buffer
+    overrun_count: AtomicUsize,
+    /// High-water mark of ring buffer usage (samples)
+    max_fill_level: AtomicUsize,
 }
 
 unsafe impl Send for RecordingRingBuffer {}
@@ -102,6 +139,8 @@ impl RecordingRingBuffer {
             active: AtomicBool::new(true),
             channels: 2,
             bad_channel: AtomicUsize::new(0),
+            overrun_count: AtomicUsize::new(0),
+            max_fill_level: AtomicUsize::new(0),
         }
     }
 
@@ -111,20 +150,38 @@ impl RecordingRingBuffer {
     }
 }
 
+/// Compute a segment file path from a base path and segment index.
+/// Segment 1 uses the base path unchanged; segment 2+ appends `_002`, `_003`, etc.
+fn segment_path(base: &Path, index: usize) -> PathBuf {
+    if index <= 1 {
+        base.to_path_buf()
+    } else {
+        let stem = base.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = base.extension().unwrap_or_default().to_string_lossy();
+        base.with_file_name(format!("{}_{:03}.{}", stem, index, ext))
+    }
+}
+
 /// Spawn a dedicated writer thread that drains the ring buffer to a WavWriter.
-/// Returns a JoinHandle that yields (WavWriter, total_sample_count) on join.
+/// Returns a JoinHandle that yields (WavWriter, total_sample_count, completed_segments) on join.
+/// Supports automatic WAV segment splitting when approaching the 4GB limit.
 fn spawn_wav_writer_thread(
     ring: Arc<RecordingRingBuffer>,
     wav_writer: WavWriter<BufWriter<File>>,
     channels: u16,
     _target_mono: bool,
-) -> JoinHandle<(WavWriter<BufWriter<File>>, usize)> {
+    base_path: PathBuf,
+    wav_spec: WavSpec,
+) -> JoinHandle<(WavWriter<BufWriter<File>>, usize, Vec<PathBuf>)> {
     std::thread::Builder::new()
         .name("wav-writer".into())
         .spawn(move || {
             let mut writer = wav_writer;
             let mut total_written: usize = 0;
             let mut bad_channel_checked = false;
+            let mut segment_data_bytes: usize = 0;
+            let mut segment_index: usize = 1;
+            let mut completed_segments: Vec<PathBuf> = Vec::new();
 
             loop {
                 let wp = ring.write_pos.load(Ordering::Acquire);
@@ -135,7 +192,8 @@ fn spawn_wav_writer_thread(
                     if !ring.active.load(Ordering::Acquire) {
                         break; // No more data and signaled to stop
                     }
-                    std::thread::sleep(Duration::from_millis(15));
+                    // Adaptive sleep: short sleep when idle
+                    std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
 
@@ -164,7 +222,35 @@ fn spawn_wav_writer_thread(
 
                 let bad_ch = ring.bad_channel.load(Ordering::Relaxed);
 
+                // Calculate how many samples we'll write and their byte count
+                let samples_to_write = if channels == 2 && bad_ch > 0 {
+                    (available / 2) * 2
+                } else {
+                    available
+                };
+                let write_bytes = samples_to_write * 4;
+
+                // Check if segment split is needed before writing
+                if segment_data_bytes + write_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
+                    let current_seg = segment_path(&base_path, segment_index);
+                    match writer.finalize() {
+                        Ok(()) => {
+                            let _ = patch_wav_header_if_needed(&current_seg);
+                            completed_segments.push(current_seg);
+                        }
+                        Err(e) => log::error!("Failed to finalize segment: {}", e),
+                    }
+                    segment_index += 1;
+                    segment_data_bytes = 0;
+                    let new_path = segment_path(&base_path, segment_index);
+                    let f = File::create(&new_path).expect("Failed to create segment file");
+                    writer = WavWriter::new(BufWriter::new(f), wav_spec)
+                        .expect("Failed to create segment writer");
+                    log::info!("Mic recording: started new segment {:?}", new_path);
+                }
+
                 // Drain available samples to WAV
+                let new_rp;
                 if channels == 2 && bad_ch > 0 {
                     // Write with bad-channel fixup (replace bad channel with good one)
                     let pairs = available / 2;
@@ -174,18 +260,18 @@ fn spawn_wav_writer_thread(
                         let s0 = unsafe { *ring.data_ptr.add(idx0) };
                         let s1 = unsafe { *ring.data_ptr.add(idx1) };
                         if bad_ch == 1 {
-                            // Channel 0 is bad, duplicate channel 1
                             let _ = writer.write_sample(s1);
                             let _ = writer.write_sample(s1);
                         } else {
-                            // Channel 1 is bad, duplicate channel 0
                             let _ = writer.write_sample(s0);
                             let _ = writer.write_sample(s0);
                         }
                     }
                     let consumed = pairs * 2;
-                    ring.read_pos.store(rp + consumed, Ordering::Release);
+                    new_rp = rp + consumed;
+                    ring.read_pos.store(new_rp, Ordering::Release);
                     total_written += consumed;
+                    segment_data_bytes += consumed * 4;
                 } else {
                     // Normal path: write all samples directly
                     for i in 0..available {
@@ -193,9 +279,19 @@ fn spawn_wav_writer_thread(
                         let sample = unsafe { *ring.data_ptr.add(idx) };
                         let _ = writer.write_sample(sample);
                     }
-                    ring.read_pos.store(rp + available, Ordering::Release);
+                    new_rp = rp + available;
+                    ring.read_pos.store(new_rp, Ordering::Release);
                     total_written += available;
+                    segment_data_bytes += available * 4;
                 }
+
+                // Adaptive sleep: if buffer pressure is high, drain again immediately
+                let post_drain_fill = ring.write_pos.load(Ordering::Acquire).wrapping_sub(new_rp);
+                let low_water = ring.capacity / 4; // 25% = comfortable
+                if post_drain_fill > low_water {
+                    continue; // Skip sleep, drain more
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
 
             // Final drain after active=false (in case more samples arrived)
@@ -209,8 +305,21 @@ fn spawn_wav_writer_thread(
             }
             total_written += remaining;
 
-            log::info!("WAV writer thread finished: {} total samples written", total_written);
-            (writer, total_written)
+            // Log telemetry
+            let overruns = ring.overrun_count.load(Ordering::Relaxed);
+            let max_fill = ring.max_fill_level.load(Ordering::Relaxed);
+            log::info!(
+                "WAV writer thread finished: {} total samples, {} segments. \
+                 Ring telemetry: overrun_count={}, max_fill={}/{} ({:.1}%)",
+                total_written, segment_index,
+                overruns, max_fill, ring.capacity,
+                max_fill as f64 / ring.capacity as f64 * 100.0
+            );
+            if overruns > 0 {
+                log::warn!("Recording had {} ring buffer overruns — potential audio gaps", overruns);
+            }
+
+            (writer, total_written, completed_segments)
         })
         .expect("Failed to spawn wav-writer thread")
 }
@@ -262,11 +371,142 @@ fn stereo_wav_to_mono_streaming(path: &std::path::Path, sample_rate: u32) -> Res
     writer.finalize()
         .map_err(|e| format!("Failed to finalize mono WAV: {}", e))?;
 
+    // Safety net: patch header if hound's u32 counter overflowed
+    patch_wav_header_if_needed(&tmp_path)?;
+
     // Rename temp file over original
     std::fs::rename(&tmp_path, path)
         .map_err(|e| format!("Failed to rename mono WAV: {}", e))?;
 
     log::info!("Converted stereo WAV to mono: {:?}", path);
+    Ok(())
+}
+
+/// Safety-net header patch: if hound's internal u32 counter overflowed (producing
+/// 0 or incorrect sizes in RIFF/data fields), this fixes them from the actual file size.
+fn patch_wav_header_if_needed(path: &Path) -> Result<(), String> {
+    let file_size = std::fs::metadata(path)
+        .map_err(|e| format!("Cannot stat WAV file: {}", e))?.len();
+
+    if file_size < 44 {
+        return Ok(()); // Too small to be a valid WAV
+    }
+
+    // Read enough of the header to find the data chunk
+    let header_len = 4096usize.min(file_size as usize);
+    let mut header = vec![0u8; header_len];
+    {
+        let mut f = File::open(path)
+            .map_err(|e| format!("Failed to open WAV for header check: {}", e))?;
+        f.read_exact(&mut header)
+            .map_err(|e| format!("Failed to read WAV header: {}", e))?;
+    }
+
+    // Verify RIFF/WAVE signature
+    if header.len() < 12 || &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Ok(()); // Not a WAV file
+    }
+
+    let data_offset = super::playback::find_wav_data_offset(&header)
+        .ok_or_else(|| "Could not find WAV data chunk for header patch".to_string())?;
+
+    // Expected sizes based on actual file size
+    let actual_data_size = file_size - data_offset as u64;
+    let actual_riff_size = file_size - 8;
+
+    // Cap at u32::MAX for files >4GB
+    let expected_riff_u32 = if actual_riff_size > u32::MAX as u64 { u32::MAX } else { actual_riff_size as u32 };
+    let expected_data_u32 = if actual_data_size > u32::MAX as u64 { u32::MAX } else { actual_data_size as u32 };
+
+    // Read current header values
+    let current_riff_u32 = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let data_size_offset = data_offset - 4;
+    let current_data_u32 = u32::from_le_bytes(
+        header[data_size_offset..data_size_offset + 4].try_into().unwrap()
+    );
+
+    if current_riff_u32 == expected_riff_u32 && current_data_u32 == expected_data_u32 {
+        return Ok(()); // Headers are already correct
+    }
+
+    log::warn!(
+        "WAV header mismatch in {:?}: RIFF size {} (expected {}), data size {} (expected {}). Patching...",
+        path, current_riff_u32, expected_riff_u32, current_data_u32, expected_data_u32
+    );
+
+    // Open for write and patch both size fields
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("Failed to open WAV for patching: {}", e))?;
+
+    f.seek(SeekFrom::Start(4))
+        .map_err(|e| format!("Failed to seek for RIFF size patch: {}", e))?;
+    f.write_all(&expected_riff_u32.to_le_bytes())
+        .map_err(|e| format!("Failed to write RIFF size: {}", e))?;
+
+    f.seek(SeekFrom::Start(data_size_offset as u64))
+        .map_err(|e| format!("Failed to seek for data size patch: {}", e))?;
+    f.write_all(&expected_data_u32.to_le_bytes())
+        .map_err(|e| format!("Failed to write data size: {}", e))?;
+
+    log::info!("WAV header patched successfully: {:?}", path);
+    Ok(())
+}
+
+/// Concatenate multiple WAV segments into one file.
+/// Opens the first segment for append, streams PCM data from subsequent segments
+/// (skipping their WAV headers via find_wav_data_offset), deletes extras, patches header.
+fn concatenate_wav_segments(segments: &[PathBuf]) -> Result<(), String> {
+    if segments.len() <= 1 {
+        return Ok(()); // Nothing to concatenate
+    }
+
+    log::info!("Concatenating {} WAV segments into {:?}", segments.len(), segments[0]);
+
+    // Open first segment for appending
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(&segments[0])
+        .map_err(|e| format!("Failed to open first segment for append: {}", e))?;
+
+    // Stream-copy PCM data from segments 2..N (64KB chunks)
+    for seg_path in &segments[1..] {
+        // Read header to find data offset
+        let mut header_buf = [0u8; 4096];
+        let mut seg_file = File::open(seg_path)
+            .map_err(|e| format!("Failed to open segment {:?}: {}", seg_path, e))?;
+        let header_len = seg_file.read(&mut header_buf)
+            .map_err(|e| format!("Failed to read segment header: {}", e))?;
+
+        let data_offset = super::playback::find_wav_data_offset(&header_buf[..header_len])
+            .ok_or_else(|| format!("No data chunk found in segment {:?}", seg_path))?;
+
+        // Seek to data start
+        seg_file.seek(SeekFrom::Start(data_offset as u64))
+            .map_err(|e| format!("Failed to seek in segment: {}", e))?;
+
+        // Stream copy in 64KB chunks
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = seg_file.read(&mut buf)
+                .map_err(|e| format!("Failed to read segment data: {}", e))?;
+            if n == 0 { break; }
+            file.write_all(&buf[..n])
+                .map_err(|e| format!("Failed to append segment data: {}", e))?;
+        }
+
+        log::info!("Appended segment {:?}, deleting", seg_path);
+        let _ = std::fs::remove_file(seg_path);
+    }
+
+    drop(file);
+
+    // Patch the combined file's header
+    patch_wav_header_if_needed(&segments[0])?;
+
+    log::info!("Segment concatenation complete: {:?}", segments[0]);
     Ok(())
 }
 
@@ -511,7 +751,10 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
 
     // Spawn the WAV writer thread (drains ring buffer → disk)
     let writer_ring = ring.clone();
-    let writer_handle = spawn_wav_writer_thread(writer_ring, wav_writer, channels, target_mono);
+    let writer_handle = spawn_wav_writer_thread(
+        writer_ring, wav_writer, channels, target_mono,
+        output_path.clone(), spec,
+    );
 
     // Store writer handle for stop_recording() to join
     {
@@ -537,7 +780,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
 
     // Store stream properly (dropped on stop/cancel to release OS audio resources)
     if let Ok(mut guard) = RECORDING_STREAM.lock() {
-        *guard = Some(StreamHolder(stream));
+        *guard = Some(StreamHolder::new(stream));
     }
 
     Ok(output_path.to_string_lossy().to_string())
@@ -572,7 +815,9 @@ where
                     // Check if ring buffer has enough space (drop samples if full)
                     let used = wp.wrapping_sub(rp);
                     if used + data.len() > cap {
-                        // Buffer full — writer thread can't keep up. Drop this callback.
+                        // Buffer full — writer thread can't keep up. Drop this callback batch.
+                        ring.overrun_count.fetch_add(1, Ordering::Relaxed);
+                        let _ = ring.max_fill_level.fetch_max(cap, Ordering::Relaxed);
                         return;
                     }
 
@@ -586,6 +831,9 @@ where
                         if abs > max_level { max_level = abs; }
                     }
                     ring.write_pos.store(wp + data.len(), Ordering::Release);
+
+                    // Update telemetry: high-water mark of ring usage
+                    let _ = ring.max_fill_level.fetch_max(used + data.len(), Ordering::Relaxed);
 
                     // Update level meter (atomic, no alloc)
                     CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
@@ -635,10 +883,20 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
     let state = state.ok_or("Recording state not found")?;
 
     // Signal ring buffer to stop and join writer thread to get WAV writer back
-    let (writer, sample_count) = if let (Some(ring), Some(handle)) = (state.ring_buffer, state.writer_handle) {
+    let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) = (state.ring_buffer, state.writer_handle) {
+        // Log telemetry before joining
+        let overruns = ring.overrun_count.load(Ordering::Relaxed);
+        let max_fill = ring.max_fill_level.load(Ordering::Relaxed);
+        if overruns > 0 {
+            log::warn!(
+                "Ring buffer had {} overruns during recording (max fill: {}/{})",
+                overruns, max_fill, ring.capacity
+            );
+        }
+
         ring.active.store(false, Ordering::Release);
         match handle.join() {
-            Ok((w, count)) => (Some(w), count),
+            Ok((w, count, segments)) => (Some(w), count, segments),
             Err(_) => {
                 log::error!("Writer thread panicked");
                 return Err("Writer thread panicked".to_string());
@@ -646,7 +904,7 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         }
     } else {
         // System audio recording path (no ring buffer)
-        (None, state.sample_count)
+        (None, state.sample_count, Vec::new())
     };
 
     if sample_count == 0 {
@@ -663,19 +921,28 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         duration
     );
 
-    // Finalize the WAV writer (or rewrite as mono if needed)
+    // Finalize the WAV writer and patch header
+    if let Some(w) = writer {
+        w.finalize()
+            .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    }
+
+    // Patch the last segment's header (safety net for hound u32 overflow)
+    let last_seg_path = segment_path(&state.output_path, completed_segments.len() + 1);
+    let _ = patch_wav_header_if_needed(&last_seg_path);
+
+    // Concatenate segments if auto-split occurred
+    if !completed_segments.is_empty() {
+        let mut all_segments = completed_segments;
+        all_segments.push(last_seg_path);
+        concatenate_wav_segments(&all_segments)?;
+    }
+
+    // Convert to mono if needed
     let final_channels = if state.target_mono && state.channels == 2 {
-        if let Some(w) = writer {
-            w.finalize()
-                .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-        }
         stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
         1u16
     } else {
-        if let Some(w) = writer {
-            w.finalize()
-                .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-        }
         state.channels
     };
 
@@ -713,7 +980,7 @@ pub async fn cancel_recording() -> Result<(), String> {
         *guard = None;
     }
 
-    // Clear the recording state and clean up incomplete file
+    // Clear the recording state and clean up incomplete file(s)
     if let Ok(mut state_guard) = RECORDING_STATE.lock() {
         if let Some(s) = state_guard.take() {
             let output_path = s.output_path.clone();
@@ -722,9 +989,24 @@ pub async fn cancel_recording() -> Result<(), String> {
                 ring.active.store(false, Ordering::Release);
             }
             if let Some(handle) = s.writer_handle {
-                let _ = handle.join(); // Don't care about result — file gets deleted
+                match handle.join() {
+                    Ok((_writer, _count, completed)) => {
+                        // Delete completed segment files
+                        for seg in &completed {
+                            let _ = std::fs::remove_file(seg);
+                        }
+                    }
+                    Err(_) => {} // Thread panicked, nothing extra to clean up
+                }
             }
             let _ = std::fs::remove_file(&output_path);
+
+            // Clean up system audio segments if any
+            if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+                for seg in completed.drain(..) {
+                    let _ = std::fs::remove_file(&seg);
+                }
+            }
         }
     }
 
@@ -782,7 +1064,7 @@ pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
 
     // Store stream properly (dropped on stop to release OS audio resources)
     if let Ok(mut guard) = MONITOR_STREAM.lock() {
-        *guard = Some(StreamHolder(stream));
+        *guard = Some(StreamHolder::new(stream));
     }
 
     Ok(())
@@ -1009,9 +1291,48 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                 // When recording is active, write to disk and count samples
                 if RECORDING_ACTIVE.load(Ordering::SeqCst) {
                     SYSTEM_AUDIO_SAMPLE_COUNT.fetch_add(samples.len(), Ordering::SeqCst);
+                    let sample_bytes = samples.len() * 4;
 
-                    // Write samples to WAV file incrementally for crash safety
                     if let Ok(mut writer_guard) = SYSTEM_WAV_WRITER.lock() {
+                        // Check if segment split is needed
+                        let current_data_bytes = SYSTEM_SEGMENT_DATA_BYTES.load(Ordering::Relaxed);
+                        if current_data_bytes + sample_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
+                            // Finalize current segment, patch header, create new one
+                            if let Some(old_writer) = writer_guard.take() {
+                                let _ = old_writer.finalize();
+                                let seg_idx = SYSTEM_SEGMENT_INDEX.load(Ordering::Relaxed);
+                                if let Ok(base_guard) = SYSTEM_SEGMENT_BASE_PATH.lock() {
+                                    if let Some(ref base) = *base_guard {
+                                        let current_seg = segment_path(base, seg_idx);
+                                        let _ = patch_wav_header_if_needed(&current_seg);
+                                        if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+                                            completed.push(current_seg);
+                                        }
+
+                                        let new_idx = seg_idx + 1;
+                                        SYSTEM_SEGMENT_INDEX.store(new_idx, Ordering::Relaxed);
+                                        SYSTEM_SEGMENT_DATA_BYTES.store(0, Ordering::Relaxed);
+
+                                        let new_path = segment_path(base, new_idx);
+                                        let sys_spec = WavSpec {
+                                            channels: 2,
+                                            sample_rate: 44100,
+                                            bits_per_sample: 32,
+                                            sample_format: hound::SampleFormat::Float,
+                                        };
+                                        if let Ok(f) = File::create(&new_path) {
+                                            if let Ok(new_writer) = WavWriter::new(BufWriter::new(f), sys_spec) {
+                                                *writer_guard = Some(new_writer);
+                                                log::info!("System audio: started new segment {:?}", new_path);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Write samples to current segment
+                        SYSTEM_SEGMENT_DATA_BYTES.fetch_add(sample_bytes, Ordering::Relaxed);
                         if let Some(ref mut writer) = *writer_guard {
                             for &sample in &samples {
                                 let _ = writer.write_sample(sample);
@@ -1052,6 +1373,11 @@ pub fn reset_recording_state() {
             }
         }
     }
+    // Clean up system audio segment statics
+    SYSTEM_SEGMENT_DATA_BYTES.store(0, Ordering::Relaxed);
+    SYSTEM_SEGMENT_INDEX.store(1, Ordering::Relaxed);
+    if let Ok(mut base) = SYSTEM_SEGMENT_BASE_PATH.lock() { *base = None; }
+    if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() { completed.clear(); }
 }
 
 /// Test if a device can actually capture audio - returns info about working configs
@@ -1271,8 +1597,16 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
 
         log::info!("Starting system audio recording to: {:?}", output_path);
 
-        // Reset sample counter
+        // Reset sample counter and segment tracking
         SYSTEM_AUDIO_SAMPLE_COUNT.store(0, Ordering::SeqCst);
+        SYSTEM_SEGMENT_DATA_BYTES.store(0, Ordering::Relaxed);
+        SYSTEM_SEGMENT_INDEX.store(1, Ordering::Relaxed);
+        if let Ok(mut base) = SYSTEM_SEGMENT_BASE_PATH.lock() {
+            *base = Some(output_path.clone());
+        }
+        if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+            completed.clear();
+        }
 
         let target_mono = channel_mode.as_deref() == Some("mono");
 
@@ -1435,25 +1769,36 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
         // Compute duration from sample count
         let duration = sample_count as f64 / state.channels as f64 / state.sample_rate as f64;
 
-        // Finalize the WAV writer (or rewrite as mono if needed)
-        let final_channels = if state.target_mono && state.channels == 2 {
-            // Finalize the stereo writer first, then convert to mono via streaming
-            if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
-                if let Some(writer) = wg.take() {
-                    writer.finalize()
-                        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-                }
+        // Finalize the WAV writer
+        if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
+            if let Some(writer) = wg.take() {
+                writer.finalize()
+                    .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
             }
+        }
+
+        // Patch header of the last segment (safety net for hound u32 overflow)
+        let seg_idx = SYSTEM_SEGMENT_INDEX.load(Ordering::Relaxed);
+        let last_seg_path = segment_path(&state.output_path, seg_idx);
+        let _ = patch_wav_header_if_needed(&last_seg_path);
+
+        // Concatenate segments if auto-split occurred
+        let completed = if let Ok(mut guard) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+            guard.drain(..).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !completed.is_empty() {
+            let mut all_segments = completed;
+            all_segments.push(last_seg_path);
+            concatenate_wav_segments(&all_segments)?;
+        }
+
+        // Convert to mono if needed
+        let final_channels = if state.target_mono && state.channels == 2 {
             stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
             1u16
         } else {
-            // Finalize the existing incremental writer
-            if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
-                if let Some(writer) = wg.take() {
-                    writer.finalize()
-                        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-                }
-            }
             state.channels
         };
 

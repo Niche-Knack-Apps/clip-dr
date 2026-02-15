@@ -87,6 +87,17 @@ pub async fn get_audio_metadata(path: String) -> Result<AudioMetadata, String> {
 pub async fn load_audio_buffer(path: String) -> Result<Vec<f32>, String> {
     let path = Path::new(&path);
 
+    // Guard: refuse full-file decode for large files
+    let file_size = std::fs::metadata(path)
+        .map_err(|e| format!("Cannot stat file: {}", e))?.len();
+    const LARGE_FILE_BYTE_THRESHOLD: u64 = 200 * 1024 * 1024; // 200MB compressed
+    if file_size > LARGE_FILE_BYTE_THRESHOLD {
+        return Err(format!(
+            "File too large ({:.0}MB) for full decode. Use the streaming pipeline instead.",
+            file_size as f64 / 1024.0 / 1024.0
+        ));
+    }
+
     let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -154,6 +165,17 @@ pub async fn load_audio_buffer(path: String) -> Result<Vec<f32>, String> {
 #[tauri::command]
 pub async fn load_audio_complete(path: String, bucket_count: usize) -> Result<AudioLoadResult, String> {
     let path_ref = Path::new(&path);
+
+    // Guard: refuse full-file decode for large files
+    let file_size = std::fs::metadata(path_ref)
+        .map_err(|e| format!("Cannot stat file: {}", e))?.len();
+    const LARGE_FILE_BYTE_THRESHOLD: u64 = 200 * 1024 * 1024; // 200MB compressed
+    if file_size > LARGE_FILE_BYTE_THRESHOLD {
+        return Err(format!(
+            "File too large ({:.0}MB) for full decode. Use the streaming pipeline instead.",
+            file_size as f64 / 1024.0 / 1024.0
+        ));
+    }
 
     let file = File::open(path_ref).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());

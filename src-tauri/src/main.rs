@@ -31,6 +31,10 @@ fn main() {
         .setup(|app| {
             let app_handle = app.handle().clone();
             services::path_service::init(&app_handle)?;
+            // Clean up old/orphaned decode cache files
+            if let Err(e) = services::path_service::cleanup_decode_cache() {
+                log::warn!("Cache GC failed: {}", e);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
