@@ -21,6 +21,8 @@ export interface RecordingResult {
   duration: number;
   sample_rate: number;
   channels: number;
+  /** Additional segment paths when recording was split (excludes `path` which is segment 1) */
+  extra_segments: string[];
 }
 
 export type RecordingSource = 'microphone' | 'system';
@@ -260,6 +262,7 @@ export const useRecordingStore = defineStore('recording', () => {
         recordingPath.value = await invoke<string>('start_system_audio_recording', {
           outputDir,
           channelMode: settingsStore.settings.recordingChannelMode,
+          largeFileFormat: settingsStore.settings.recordingLargeFileFormat,
         });
         console.log('[Recording] Started system audio recording, output:', recordingPath.value);
       } else {
@@ -267,6 +270,7 @@ export const useRecordingStore = defineStore('recording', () => {
           deviceId: selectedDeviceId.value,
           outputDir,
           channelMode: settingsStore.settings.recordingChannelMode,
+          largeFileFormat: settingsStore.settings.recordingLargeFileFormat,
         });
         console.log('[Recording] Started, output:', recordingPath.value);
       }
@@ -335,11 +339,14 @@ export const useRecordingStore = defineStore('recording', () => {
       isLocked.value = false;
       currentLevel.value = 0;
 
-      console.log(`[Recording] Stopped: path=${result.path}, duration=${result.duration?.toFixed(1)}s, rate=${result.sample_rate}, ch=${result.channels}`);
+      console.log(`[Recording] Stopped: path=${result.path}, duration=${result.duration?.toFixed(1)}s, rate=${result.sample_rate}, ch=${result.channels}, extra_segments=${result.extra_segments?.length ?? 0}`);
 
-      // Create a new track from the recorded audio
+      // Brief delay to let OS flush file writes
+      await new Promise(r => setTimeout(r, 200));
+
+      // Create track(s) from the recorded audio
       if (result.path) {
-        await createTrackFromRecording(result.path, result.duration);
+        await createTrackFromRecording(result);
       }
 
       return result;
@@ -352,37 +359,45 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
-  // Create a track from recorded audio file using the progressive import pipeline
-  async function createTrackFromRecording(path: string, _duration: number): Promise<void> {
+  // Create track(s) from recorded audio file(s) using the progressive import pipeline
+  async function createTrackFromRecording(result: RecordingResult): Promise<void> {
     try {
-      console.log('[Recording] Importing recorded audio via progressive pipeline...');
-
-      // Capture track count before import to identify the new track afterwards
-      const trackCountBefore = tracksStore.tracks.length;
+      const allPaths = [result.path, ...(result.extra_segments || [])];
+      const segmentCount = allPaths.length;
       const savedTimemarks = timemarks.value.length > 0 ? [...timemarks.value] : null;
+      const recordingNumber = tracksStore.tracks.length + 1;
 
-      // Use the progressive import pipeline (3-phase: metadata, waveform, browser decode)
-      await audioStore.importFile(path);
+      console.log(`[Recording] Importing ${segmentCount} segment(s) via progressive pipeline...`);
 
-      // Find the newly created track (last track added)
-      if (tracksStore.tracks.length > trackCountBefore) {
-        const newTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
-        const recordingNumber = tracksStore.tracks.length;
-        tracksStore.renameTrack(newTrack.id, `Recording ${recordingNumber}`);
+      for (let i = 0; i < allPaths.length; i++) {
+        const segPath = allPaths[i];
+        const trackCountBefore = tracksStore.tracks.length;
 
-        // Transfer timemarks to the new track
-        if (savedTimemarks) {
-          newTrack.timemarks = savedTimemarks;
-          console.log('[Recording] Transferred', savedTimemarks.length, 'timemarks to track');
+        // Use the progressive import pipeline (3-phase: metadata, waveform, browser decode)
+        await audioStore.importFile(segPath);
+
+        // Find the newly created track (last track added)
+        if (tracksStore.tracks.length > trackCountBefore) {
+          const newTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
+          const name = segmentCount > 1
+            ? `Recording ${recordingNumber} (${i + 1}/${segmentCount})`
+            : `Recording ${recordingNumber}`;
+          tracksStore.renameTrack(newTrack.id, name);
+
+          // Transfer timemarks to the first segment's track
+          if (i === 0 && savedTimemarks) {
+            newTrack.timemarks = savedTimemarks;
+            console.log('[Recording] Transferred', savedTimemarks.length, 'timemarks to track');
+          }
+
+          // Register trigger phrases for post-transcription auto-marks (first segment only)
+          if (i === 0 && triggerPhrases.value.length > 0) {
+            const transcriptionStore = useTranscriptionStore();
+            transcriptionStore.registerPendingTriggerPhrases(newTrack.id, [...triggerPhrases.value]);
+          }
+
+          console.log(`[Recording] Created track via import: ${newTrack.name} id: ${newTrack.id}`);
         }
-
-        // Register trigger phrases for post-transcription auto-marks
-        if (triggerPhrases.value.length > 0) {
-          const transcriptionStore = useTranscriptionStore();
-          transcriptionStore.registerPendingTriggerPhrases(newTrack.id, [...triggerPhrases.value]);
-        }
-
-        console.log('[Recording] Created track via import:', newTrack.name, 'id:', newTrack.id);
       }
     } catch (e) {
       console.error('[Recording] Failed to create track:', e);
