@@ -1416,7 +1416,9 @@ export const useTracksStore = defineStore('tracks', () => {
       audioData: { ...track.audioData, waveformData: finalWaveform },
       duration: actualDuration,
       // If buffer already set (status 'ready'), keep it — don't regress to 'decoding'
-      importStatus: track.importStatus === 'ready' ? 'ready' : 'decoding' as ImportStatus,
+      importStatus: (['ready', 'large-file', 'caching'] as ImportStatus[]).includes(track.importStatus!)
+        ? track.importStatus!
+        : 'decoding' as ImportStatus,
       importProgress: 1,
       importSessionId: undefined, // waveform session done
     };
