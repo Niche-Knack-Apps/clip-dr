@@ -189,6 +189,7 @@ export interface SearchResult {
 export type ASRModel = 'whisper-tiny' | 'whisper-base' | 'vosk';
 
 export type RecordingSource = 'microphone' | 'system';
+export type RecordingLargeFileFormat = 'split-tracks' | 'rf64';
 export type Mp3Bitrate = number;
 
 export interface Settings {
@@ -221,6 +222,8 @@ export interface Settings {
   lastExportPath: string;
   // Recording channel mode
   recordingChannelMode: 'mono' | 'stereo';
+  // Recording large file format (>4GB)
+  recordingLargeFileFormat: RecordingLargeFileFormat;
   // Bottom bar shortcut hints
   shortcutHints: string[];
 }

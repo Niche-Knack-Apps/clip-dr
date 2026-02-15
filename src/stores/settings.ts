@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appLocalDataDir } from '@tauri-apps/api/path';
-import type { Settings, ASRModel, RecordingSource, Mp3Bitrate, ExportFormat, ExportProfile } from '@/shared/types';
+import type { Settings, ASRModel, RecordingSource, RecordingLargeFileFormat, Mp3Bitrate, ExportFormat, ExportProfile } from '@/shared/types';
 import { DEFAULT_SETTINGS, DEFAULT_EXPORT_PROFILES } from '@/shared/constants';
 
 const STORAGE_KEY = 'clip-doctor-settings';
@@ -215,6 +215,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setRecordingLargeFileFormat(format: RecordingLargeFileFormat): void {
+    settings.value.recordingLargeFileFormat = format;
+    saveSettings();
+  }
+
   function setShortcutHints(hints: string[]): void {
     settings.value.shortcutHints = hints;
     saveSettings();
@@ -311,6 +316,8 @@ export const useSettingsStore = defineStore('settings', () => {
     setLastExportPath,
     // Recording channel mode
     setRecordingChannelMode,
+    // Recording large file format
+    setRecordingLargeFileFormat,
     // Bottom bar shortcut hints
     setShortcutHints,
   };
