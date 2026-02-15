@@ -15,6 +15,7 @@ MAX_DATA_BYTES = 3_900_000_000  # 3.9GB per output file
 
 def find_data_offset(f):
     """Walk RIFF chunks to find data chunk start."""
+    f.seek(0)
     header = f.read(12)
     magic = header[:4]
     if magic not in (b'RIFF', b'RF64'):
@@ -29,6 +30,9 @@ def find_data_offset(f):
         chunk_size = struct.unpack('<I', chunk[4:8])[0]
         if chunk_id == b'data':
             return pos + 8
+        # Skip chunk (handle u32::MAX from truncated headers)
+        if chunk_size == 0xFFFFFFFF:
+            raise ValueError(f"Chunk '{chunk_id.decode()}' has size 0xFFFFFFFF before data chunk")
         pos += 8 + chunk_size + (chunk_size % 2)
 
 
