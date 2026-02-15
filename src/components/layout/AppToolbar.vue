@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue';
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import Button from '@/components/ui/Button.vue';
@@ -96,6 +96,16 @@ function handleSystemClick() {
   showRecordingPanel.value = true;
   recordingStore.quickStart('system');
 }
+
+// Close recording panel on window blur when not actively recording
+function handleWindowBlur() {
+  if (showRecordingPanel.value && !recordingStore.isRecording && !recordingStore.isPreparing) {
+    showRecordingPanel.value = false;
+  }
+}
+
+onMounted(() => window.addEventListener('blur', handleWindowBlur));
+onUnmounted(() => window.removeEventListener('blur', handleWindowBlur));
 
 // Compute recording panel max-width when it opens so it doesn't overflow viewport
 watch(showRecordingPanel, (show) => {
