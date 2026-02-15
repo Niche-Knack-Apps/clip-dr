@@ -11,6 +11,7 @@ Clip Dr. -- Audio editing app with transcription, cleaning, silence detection, a
 - src/services/ -- keyboard-shortcuts, debug-logger, audio-buffer, waveform-extractor
 - src-tauri/src/commands/ -- audio, transcribe, recording, waveform, export, clean, vad
 - src-tauri/src/audio_clean/ -- Rust cleaning pipeline (filters, spectral, neural, expander)
+- scripts/ -- utility scripts (recover-wav.py for oversized WAV recovery)
 
 ## Commands
 - Dev: `npm run dev`
@@ -35,9 +36,19 @@ After changes, run in order:
 - Releases output to ../_shared/releases/clip-dr/
 - Arch/AUR packages built via Podman (see _shared/builders/arch/) or arch-build VM (builder:builder)
 - Windows builds run on win11-build VM (user: builder, pass: builder) -- project shared via Samba on Z:\
+- Recording segments stay as separate tracks -- NEVER concatenate WAV segments (causes >4GB header corruption)
+- Recording uses AudioWriter enum (hound::WavWriter for split-tracks, Rf64Writer for rf64 mode)
+- Rf64Writer starts as RIFF/WAV with JUNK reservation, upgrades JUNK→ds64 at ~4GB boundary
+- RecordingResult includes extra_segments: Vec<String> for multi-segment recordings
+- Playback supports both WAV and RF64 files via mmap (find_wav_data_offset accepts both magics)
+- importStatus in finalizeImportWaveform must preserve 'ready', 'large-file', AND 'caching' statuses
+- After recording finalize: fsync the file, then 200ms delay before frontend import
+- Recording large file format setting: 'split-tracks' (default, separate ~3.9GB WAVs) or 'rf64' (single file)
 
 ## Don't
 - Don't clone AudioBuffers in history snapshots -- share references to save memory
 - Don't use require() -- use ES imports (this project's TS config doesn't support require)
 - Don't capture history state during drag -- capture once at dragStart, not per-move
 - Don't worry about pre-existing TS6133 (unused variable) warnings -- they are known
+- Don't concatenate WAV segments after recording -- this was the root cause of the 4GB header corruption bug
+- Don't regress importStatus in finalizeImportWaveform -- must check all playable statuses, not just 'ready'
