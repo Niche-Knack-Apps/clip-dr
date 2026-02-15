@@ -38,9 +38,9 @@ pub(crate) struct TrackSource {
 pub(crate) enum PcmData {
     /// Memory-mapped WAV file — zero-copy access to PCM samples
     Mmap {
-        _mmap: Mmap,
-        /// Pointer to the first f32 sample in the mmap (after WAV header)
-        samples_ptr: *const f32,
+        mmap: Mmap,
+        /// Byte offset to the first f32 sample (after WAV header)
+        data_offset: usize,
         sample_count: usize,
     },
     /// Decoded PCM held in a Vec (for compressed formats)
@@ -49,16 +49,13 @@ pub(crate) enum PcmData {
     Stream(Arc<StreamBuffer>),
 }
 
-// Safety: Mmap data is read-only and the pointer is valid for the lifetime of the Mmap
-unsafe impl Send for PcmData {}
-unsafe impl Sync for PcmData {}
-
 impl PcmData {
     pub(crate) fn samples(&self) -> &[f32] {
         match self {
-            PcmData::Mmap { samples_ptr, sample_count, .. } => {
-                // Safety: pointer is valid for sample_count f32s, mmap is alive
-                unsafe { std::slice::from_raw_parts(*samples_ptr, *sample_count) }
+            PcmData::Mmap { mmap, data_offset, sample_count } => {
+                // Safety: data_offset + sample_count*4 <= mmap.len(), alignment checked at load
+                let ptr = mmap[*data_offset..].as_ptr() as *const f32;
+                unsafe { std::slice::from_raw_parts(ptr, *sample_count) }
             }
             PcmData::Vec(v) => v.as_slice(),
             PcmData::Stream(_) => {
@@ -72,9 +69,7 @@ impl PcmData {
         match self {
             PcmData::Mmap { sample_count, .. } => *sample_count,
             PcmData::Vec(v) => v.len(),
-            PcmData::Stream(buf) => {
-                buf.base_offset.load(Ordering::Acquire) + buf.valid.load(Ordering::Acquire)
-            }
+            PcmData::Stream(buf) => buf.write_head.load(Ordering::Acquire),
         }
     }
 
@@ -85,18 +80,32 @@ impl PcmData {
 
 // ── StreamBuffer — lock-free shared buffer for streaming decode ──
 
-/// Lock-free buffer shared between decode thread (writer) and cpal callback (reader).
-/// Writer appends sequentially and updates `valid` with Release ordering.
-/// Reader reads up to `valid` with Acquire ordering. No overlap possible.
+/// Lock-free sliding-window ring buffer shared between decode thread (writer)
+/// and cpal callback (reader). The writer appends samples and reclaims space
+/// based on the reader's `read_cursor`. The reader uses a seqlock `epoch` to
+/// detect concurrent seek resets.
 pub(crate) struct StreamBuffer {
     #[allow(dead_code)] // Keeps allocation alive; data_ptr points into it
     data: Box<[f32]>,
     data_ptr: *mut f32,
     capacity: usize,
-    /// Absolute interleaved sample offset that data[0] corresponds to
+
+    /// Absolute interleaved sample index of data[0] — the "window start".
+    /// Moves forward when the decode thread reclaims space.
     pub(crate) base_offset: AtomicUsize,
-    /// Number of valid samples written (writer updates with Release)
-    pub(crate) valid: AtomicUsize,
+
+    /// Absolute interleaved sample index one past the last valid sample written.
+    /// write_head - base_offset = number of valid samples in the buffer.
+    pub(crate) write_head: AtomicUsize,
+
+    /// Highest absolute sample index the callback has read (feedback from reader → writer).
+    /// Updated by the callback via compare-and-swap after each frame batch.
+    pub(crate) read_cursor: AtomicUsize,
+
+    /// Seek epoch — even = stable, odd = reset in progress.
+    /// Double-increment seqlock pattern prevents TOCTOU races on seek.
+    pub(crate) epoch: AtomicUsize,
+
     /// Decode thread checks this to know when to stop
     pub(crate) stop: AtomicBool,
     /// Seek request: f64 seconds stored as u64 bits, u64::MAX = no request
@@ -105,6 +114,9 @@ pub(crate) struct StreamBuffer {
     pub(crate) ready: AtomicBool,
 }
 
+// Safety: `data_ptr` points into `data` (Box<[f32]>).
+// Only the decode thread writes (single writer), cpal callback reads.
+// Synchronization is via write_head (Release/Acquire) and epoch (seqlock).
 unsafe impl Send for StreamBuffer {}
 unsafe impl Sync for StreamBuffer {}
 
@@ -117,45 +129,89 @@ impl StreamBuffer {
             data_ptr,
             capacity,
             base_offset: AtomicUsize::new(0),
-            valid: AtomicUsize::new(0),
+            write_head: AtomicUsize::new(0),
+            read_cursor: AtomicUsize::new(0),
+            epoch: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
             seek_request: AtomicU64::new(u64::MAX),
             ready: AtomicBool::new(false),
         }
     }
 
-    /// Called by cpal callback — lock-free read
+    /// Called by cpal callback — lock-free read with epoch guard
     fn read_sample(&self, absolute_idx: usize) -> Option<f32> {
+        // Seqlock: if epoch is odd, a reset is in progress — return silence
+        let epoch_before = self.epoch.load(Ordering::Acquire);
+        if epoch_before & 1 != 0 { return None; }
+
         let base = self.base_offset.load(Ordering::Acquire);
-        let count = self.valid.load(Ordering::Acquire);
-        if absolute_idx < base {
+        let wh = self.write_head.load(Ordering::Acquire);
+
+        // Verify epoch hasn't changed (no concurrent reset between reads)
+        let epoch_after = self.epoch.load(Ordering::Acquire);
+        if epoch_after != epoch_before { return None; }
+
+        if absolute_idx < base || absolute_idx >= wh {
             return None;
         }
-        let local = absolute_idx - base;
-        if local >= count || local >= self.capacity {
-            return None;
-        }
-        // Safety: local < count <= capacity, data_ptr valid for capacity f32s
+
+        let local = (absolute_idx - base) % self.capacity;
+        // Safety: local < capacity, data_ptr valid for capacity f32s
         Some(unsafe { *self.data_ptr.add(local) })
     }
 
-    /// Called by decode thread — write a sample at the next position
+    /// Called by decode thread — write a sample, reclaiming space from read_cursor if full
     fn write_sample(&self, value: f32) -> bool {
-        let count = self.valid.load(Ordering::Relaxed);
-        if count >= self.capacity {
-            return false; // Buffer full
+        let wh = self.write_head.load(Ordering::Relaxed);
+        let base = self.base_offset.load(Ordering::Relaxed);
+        let used = wh - base;
+
+        if used >= self.capacity {
+            // Buffer full — try to reclaim space based on read_cursor
+            let rc = self.read_cursor.load(Ordering::Acquire);
+            if rc > base {
+                // Advance base_offset to reclaim space the callback has consumed
+                self.base_offset.store(rc, Ordering::Release);
+                let new_used = wh - rc;
+                if new_used >= self.capacity {
+                    return false; // Still full even after reclaim
+                }
+            } else {
+                return false; // Reader hasn't advanced, truly full
+            }
         }
-        // Safety: count < capacity, only one writer thread
-        unsafe { *self.data_ptr.add(count) = value; }
-        self.valid.store(count + 1, Ordering::Release);
+
+        let local = (wh - self.base_offset.load(Ordering::Relaxed)) % self.capacity;
+        // Safety: local < capacity, only one writer thread
+        unsafe { *self.data_ptr.add(local) = value; }
+        self.write_head.store(wh + 1, Ordering::Release);
         true
     }
 
-    /// Reset buffer for a seek operation
+    /// Reset buffer for a seek operation — uses epoch seqlock to signal readers
     fn reset(&self, new_base_offset: usize) {
-        self.valid.store(0, Ordering::Release);
+        // Odd epoch signals "reset in progress" — callback returns silence
+        self.epoch.fetch_add(1, Ordering::Release);     // even → odd
+
+        self.write_head.store(new_base_offset, Ordering::Release);
         self.base_offset.store(new_base_offset, Ordering::Release);
+        self.read_cursor.store(new_base_offset, Ordering::Release);
         self.ready.store(false, Ordering::Release);
+
+        self.epoch.fetch_add(1, Ordering::Release);     // odd → even (stable)
+    }
+}
+
+/// Update read_cursor via compare-and-swap loop (monotonically increasing)
+fn update_read_cursor(buf: &StreamBuffer, new_val: usize) {
+    let mut current = buf.read_cursor.load(Ordering::Relaxed);
+    while new_val > current {
+        match buf.read_cursor.compare_exchange_weak(
+            current, new_val, Ordering::Release, Ordering::Relaxed
+        ) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
     }
 }
 
@@ -273,9 +329,7 @@ pub(crate) fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
     let data_bytes = mmap.len() - data_offset;
     let sample_count = data_bytes / 4; // f32 = 4 bytes
 
-    let samples_ptr = unsafe { mmap.as_ptr().add(data_offset) as *const f32 };
-
-    Ok((PcmData::Mmap { _mmap: mmap, samples_ptr, sample_count }, sample_rate, channels))
+    Ok((PcmData::Mmap { mmap, data_offset, sample_count }, sample_rate, channels))
 }
 
 /// Find the byte offset of WAV PCM data by walking RIFF chunks structurally
@@ -385,6 +439,8 @@ fn start_streaming_decode(
 
     let base_offset = (start_seconds * sample_rate as f64 * channels as f64) as usize;
     stream_buf.base_offset.store(base_offset, Ordering::Release);
+    stream_buf.write_head.store(base_offset, Ordering::Release);
+    stream_buf.read_cursor.store(base_offset, Ordering::Release);
 
     let path = path.to_string();
     let initial_fill_samples = (0.5 * sample_rate as f64 * channels as f64) as usize;
@@ -463,14 +519,6 @@ fn start_streaming_decode(
                     log::info!("[Stream] Seek buffer refill started in {:.0}ms", seek_start.elapsed().as_millis());
                 }
 
-                // Check if buffer is full
-                let current_valid = buf_ref.valid.load(Ordering::Relaxed);
-                if current_valid >= buf_ref.capacity {
-                    // Buffer full — sleep and check for stop/seek
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    continue;
-                }
-
                 // Decode next packet
                 let packet = match format.next_packet() {
                     Ok(p) => p,
@@ -502,17 +550,27 @@ fn start_streaming_decode(
                 let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
                 sample_buf.copy_interleaved_ref(decoded);
 
-                for &s in sample_buf.samples() {
-                    if !buf_ref.write_sample(s) {
-                        break; // Buffer full
+                let samples = sample_buf.samples();
+                let mut i = 0;
+                while i < samples.len() {
+                    if buf_ref.stop.load(Ordering::Acquire) { return; }
+                    let seek_bits = buf_ref.seek_request.load(Ordering::Acquire);
+                    if seek_bits != u64::MAX { break; } // Let outer loop handle seek
+
+                    if buf_ref.write_sample(samples[i]) {
+                        i += 1;
+                    } else {
+                        // Buffer full and reader hasn't consumed — brief sleep, retry
+                        std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                 }
 
                 // Check if initial fill is complete
                 if !buf_ref.ready.load(Ordering::Relaxed) {
-                    let valid = buf_ref.valid.load(Ordering::Relaxed);
-                    if valid >= initial_fill_samples {
-                        let fill_secs = valid as f64 / (sample_rate as f64 * channels as f64);
+                    let filled = buf_ref.write_head.load(Ordering::Relaxed)
+                        - buf_ref.base_offset.load(Ordering::Relaxed);
+                    if filled >= initial_fill_samples {
+                        let fill_secs = filled as f64 / (sample_rate as f64 * channels as f64);
                         log::info!("[Stream] Initial fill: {:.1}s decoded in {:.0}ms", fill_secs, start_time.elapsed().as_millis());
                         buf_ref.ready.store(true, Ordering::Release);
                     }
@@ -714,8 +772,9 @@ pub(crate) fn load_compressed(path: &str) -> Result<(PcmData, u32, u16), String>
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
-    let valid = stream_buf.valid.load(Ordering::Acquire);
-    let buf_secs = valid as f64 / (sample_rate as f64 * channels as f64);
+    let filled = stream_buf.write_head.load(Ordering::Acquire)
+        - stream_buf.base_offset.load(Ordering::Acquire);
+    let buf_secs = filled as f64 / (sample_rate as f64 * channels as f64);
     log::info!("[Playback] Stream buffer ready ({:.1}s audio) in {:.0}ms", buf_secs, load_start.elapsed().as_secs_f64() * 1000.0);
 
     Ok((PcmData::Stream(stream_buf), sample_rate, channels))
@@ -877,6 +936,20 @@ fn build_output_stream(
 
                 // Advance position
                 pos += direction * abs_speed as f64 / out_rate;
+            }
+
+            // Update read cursors for stream tracks so decode threads can reclaim space
+            for track_src in &inner.tracks {
+                if let PcmData::Stream(buf) = &track_src.pcm {
+                    let rel_pos = pos - track_src.config.track_start;
+                    if rel_pos > 0.0 {
+                        let src_rate = track_src.sample_rate as f64;
+                        let src_ch = track_src.channels as usize;
+                        let sample_idx = (rel_pos * src_rate) as usize;
+                        let idx = sample_idx * src_ch;
+                        update_read_cursor(buf, idx);
+                    }
+                }
             }
 
             position_ref.store(pos.to_bits(), Ordering::Relaxed);

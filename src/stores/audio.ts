@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { AudioLoadResult, ImportStartResult, WaveformChunkEvent, ImportCompleteEvent } from '@/shared/types';
+import type { ImportStartResult, WaveformChunkEvent, ImportCompleteEvent } from '@/shared/types';
 import { WAVEFORM_BUCKET_COUNT, LARGE_FILE_PCM_THRESHOLD } from '@/shared/constants';
 import { getFileName } from '@/shared/utils';
 import { useTracksStore } from './tracks';
@@ -295,9 +295,36 @@ export const useAudioStore = defineStore('audio', () => {
         selectionStore.setSelection(0, tracksStore.timelineDuration);
         console.log(`[Audio] [${ms()}] Large file ready for Rust playback, playhead at ${trackStart.toFixed(1)}s`);
       } else {
-        // Fallback: browser couldn't decode (e.g. WMA) — use legacy monolithic load
-        console.warn(`[Audio] [${ms()}] Falling back to legacy load_audio_complete...`);
-        await importFileLegacy(path, trackId, ctx);
+        // Browser couldn't decode (e.g. WMA) — use Rust streaming pipeline
+        console.warn(`[Audio] [${ms()}] Browser decode failed, using Rust streaming pipeline`);
+
+        // Set up cache listeners if not already done (they were only set up for isLargeFile)
+        if (!unlistenCacheProgress) {
+          unlistenCacheProgress = await listen<{ trackId: string; progress: number }>('audio-cache-progress', (event) => {
+            if (event.payload.trackId !== trackId) return;
+            tracksStore.updateImportDecodeProgress(trackId, event.payload.progress);
+          });
+        }
+        if (!unlistenCacheReady) {
+          unlistenCacheReady = await listen<{ trackId: string; cachedPath: string }>('audio-cache-ready', (event) => {
+            if (event.payload.trackId !== trackId) return;
+            console.log(`[Audio] [${ms()}] Cache ready for ${trackId}: ${event.payload.cachedPath}`);
+            tracksStore.setCachedAudioPath(trackId, event.payload.cachedPath);
+            invoke('playback_swap_to_cache', { trackId, cachedPath: event.payload.cachedPath })
+              .catch(e => console.warn('[Audio] swap_to_cache:', e));
+            unlistenCacheProgress?.();
+            unlistenCacheReady?.();
+          });
+        }
+
+        tracksStore.setImportLargeFile(trackId);
+        tracksStore.setImportCaching(trackId);
+        invoke('prepare_audio_cache', { path, trackId })
+          .catch(e => console.error('[Audio] prepare_audio_cache failed:', e));
+
+        const { usePlaybackStore } = await import('./playback');
+        usePlaybackStore().seek(trackStart);
+        selectionStore.setSelection(0, tracksStore.timelineDuration);
       }
 
       // Wait for waveform to also complete before considering import "done"
@@ -321,54 +348,6 @@ export const useAudioStore = defineStore('audio', () => {
       loading.value = false;
       historyStore.endBatch();
     }
-  }
-
-  // Legacy fallback: monolithic load via Rust IPC (for formats browser can't decode)
-  async function importFileLegacy(path: string, trackId: string, ctx: AudioContext): Promise<void> {
-    const tracksStore = useTracksStore();
-
-    console.log('[Audio] Legacy loading audio (single-pass)...');
-    const startTime = performance.now();
-
-    const result = await invoke<AudioLoadResult>('load_audio_complete', {
-      path,
-      bucketCount: WAVEFORM_BUCKET_COUNT,
-    });
-
-    const loadTime = performance.now() - startTime;
-    console.log(`[Audio] Legacy load in ${(loadTime / 1000).toFixed(2)}s`);
-
-    const { metadata, waveform: waveformData, channels } = result;
-
-    if (!metadata.sampleRate || !metadata.channels || metadata.sampleRate <= 0 || metadata.channels <= 0) {
-      throw new Error('Invalid audio metadata');
-    }
-
-    if (channels.length === 0 || channels[0].length === 0) {
-      throw new Error('No audio data loaded');
-    }
-
-    const samplesPerChannel = channels[0].length;
-
-    const buffer = ctx.createBuffer(
-      metadata.channels,
-      samplesPerChannel,
-      metadata.sampleRate
-    );
-
-    for (let channel = 0; channel < metadata.channels; channel++) {
-      const channelData = buffer.getChannelData(channel);
-      const sourceData = channels[channel];
-      if (!sourceData || sourceData.length === 0) continue;
-      const float32Data = sourceData instanceof Float32Array
-        ? sourceData
-        : new Float32Array(sourceData);
-      channelData.set(float32Data);
-    }
-
-    // Update the track with the final waveform and buffer
-    tracksStore.finalizeImportWaveform(trackId, waveformData, buffer.duration);
-    tracksStore.setImportBuffer(trackId, buffer);
   }
 
   function unloadAll(): void {
