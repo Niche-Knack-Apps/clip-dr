@@ -9,7 +9,7 @@ import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
 import { listen } from '@tauri-apps/api/event';
-import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track } from '@/shared/types';
+import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip } from '@/shared/types';
 
 const FORMAT_LABELS: Record<string, string> = {
   mp3: 'MP3 Audio',
@@ -398,7 +398,11 @@ export const useExportStore = defineStore('export', () => {
     let timelineEnd = 0;
     let sampleRate = 44100;
 
-    for (const clip of clips) {
+    // Filter to clips with AudioBuffers (large-file tracks have null buffers)
+    const bufferedClips = clips.filter((c): c is TrackClip & { buffer: AudioBuffer } => c.buffer !== null);
+    if (bufferedClips.length === 0) return null;
+
+    for (const clip of bufferedClips) {
       timelineStart = Math.min(timelineStart, clip.clipStart);
       timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
       sampleRate = clip.buffer.sampleRate;
@@ -406,10 +410,10 @@ export const useExportStore = defineStore('export', () => {
 
     const totalDuration = timelineEnd - timelineStart;
     const totalSamples = Math.ceil(totalDuration * sampleRate);
-    const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
+    const numChannels = Math.max(...bufferedClips.map(c => c.buffer.numberOfChannels));
     const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
 
-    for (const clip of clips) {
+    for (const clip of bufferedClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = mixedBuffer.getChannelData(ch);
@@ -521,6 +525,7 @@ export const useExportStore = defineStore('export', () => {
     for (const track of tracks) {
       const clips = tracksStore.getTrackClips(track.id);
       for (const clip of clips) {
+        if (!clip.buffer) continue; // Skip large-file clips without buffers
         timelineStart = Math.min(timelineStart, clip.clipStart);
         timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
         sampleRate = clip.buffer.sampleRate;

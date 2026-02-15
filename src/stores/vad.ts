@@ -3,7 +3,7 @@ import { ref, shallowRef, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import type { VadResult, VadOptions } from '@/shared/types';
+import type { VadResult, VadOptions, TrackClip } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 
@@ -147,7 +147,11 @@ export const useVadStore = defineStore('vad', () => {
     let timelineEnd = 0;
     let sampleRate = 44100;
 
-    for (const clip of clips) {
+    // Filter to clips with AudioBuffers (large-file tracks have null buffers)
+    const bufferedClips = clips.filter((c): c is TrackClip & { buffer: AudioBuffer } => c.buffer !== null);
+    if (bufferedClips.length === 0) return null;
+
+    for (const clip of bufferedClips) {
       timelineStart = Math.min(timelineStart, clip.clipStart);
       timelineEnd = Math.max(timelineEnd, clip.clipStart + clip.duration);
       sampleRate = clip.buffer.sampleRate;
@@ -155,10 +159,10 @@ export const useVadStore = defineStore('vad', () => {
 
     const totalDuration = timelineEnd - timelineStart;
     const totalSamples = Math.ceil(totalDuration * sampleRate);
-    const numChannels = Math.max(...clips.map(c => c.buffer.numberOfChannels));
+    const numChannels = Math.max(...bufferedClips.map(c => c.buffer.numberOfChannels));
     const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
 
-    for (const clip of clips) {
+    for (const clip of bufferedClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = mixedBuffer.getChannelData(ch);

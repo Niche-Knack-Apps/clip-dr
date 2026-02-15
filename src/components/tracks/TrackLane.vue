@@ -67,7 +67,8 @@ const panelWidth = computed(() => uiStore.trackPanelWidth);
 const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH + 40);
 
 // Import state
-const isImporting = computed(() => !!props.track.importStatus && props.track.importStatus !== 'ready' && props.track.importStatus !== 'large-file');
+const isImporting = computed(() => props.track.importStatus === 'importing' || props.track.importStatus === 'decoding');
+const isCaching = computed(() => props.track.importStatus === 'caching');
 const isLargeFile = computed(() => props.track.importStatus === 'large-file');
 
 // Density check: skip import waveform when zoomed out too far
@@ -489,7 +490,7 @@ onUnmounted(() => {
 
       <!-- Import progress — thin line creeping toward playable -->
       <div
-        v-if="isImporting"
+        v-if="isImporting || isCaching"
         class="absolute bottom-0 left-0 h-0.5 bg-emerald-400 transition-[width] duration-200 ease-out pointer-events-none z-10"
         :style="{ width: `${(track.importDecodeProgress || 0) * 100}%` }"
       />

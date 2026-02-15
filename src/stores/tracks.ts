@@ -600,6 +600,7 @@ export const useTracksStore = defineStore('tracks', () => {
       }
 
       const buf = clip.buffer;
+      if (!buf) continue; // Skip large-file clips without buffers
       sampleRate = buf.sampleRate;
       maxChannels = Math.max(maxChannels, buf.numberOfChannels);
 
@@ -725,15 +726,17 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find((t) => t.id === trackId);
     if (!track) return [];
 
-    // Large-file / caching tracks have no AudioBuffer — no clips available
-    if (track.importStatus === 'large-file' || track.importStatus === 'caching') return [];
-
     if (track.clips && track.clips.length > 0) {
       return track.clips;
     }
 
-    // Empty track (null buffer) — no clips to render
-    if (!track.audioData.buffer) return [];
+    // During initial import phases, don't return a clip — the import waveform canvas handles rendering
+    if (track.importStatus === 'importing' || track.importStatus === 'decoding') return [];
+
+    // Need either a buffer OR waveform data with valid duration to render a clip
+    const hasRenderableData = !!track.audioData.buffer
+      || (track.audioData.waveformData.length > 0 && track.duration > 0);
+    if (!hasRenderableData) return [];
 
     // Convert single audioData to a clip for uniform handling
     // Use activeDrag position if this track is being dragged, so clip moves visually
@@ -743,7 +746,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     return [{
       id: track.id + '-main',
-      buffer: track.audioData.buffer,
+      buffer: track.audioData.buffer,  // null for large files
       waveformData: track.audioData.waveformData,
       clipStart,
       duration: track.duration,
@@ -1200,6 +1203,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     const relSplit = splitTime - clip.clipStart;
     const buffer = clip.buffer;
+    if (!buffer) return null; // Can't split large-file clips without buffers
     const sampleRate = buffer.sampleRate;
     const channels = buffer.numberOfChannels;
     const splitSample = Math.floor(relSplit * sampleRate);
@@ -1410,7 +1414,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (idx === -1) return;
     const track = tracks.value[idx];
 
-    console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, statusKept=${track.importStatus === 'ready'}`);
+    console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, statusKept=${(['ready', 'large-file', 'caching'] as ImportStatus[]).includes(track.importStatus!)}`);
     tracks.value[idx] = {
       ...track,
       audioData: { ...track.audioData, waveformData: finalWaveform },

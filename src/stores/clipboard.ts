@@ -153,7 +153,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const { trackId, clip } = selClip;
       const ctx = audioStore.getAudioContext();
 
-      // Copy clip audio to clipboard
+      // Copy clip audio to clipboard (requires buffer — large-file clips can't be cut this way)
+      if (!clip.buffer) return false;
       const clonedBuffer = ctx.createBuffer(
         clip.buffer.numberOfChannels,
         clip.buffer.length,

@@ -61,8 +61,8 @@ export interface TrackAudioData {
 /** A clip segment within a track (for multi-clip tracks) */
 export interface TrackClip {
   id: string;
-  /** Audio buffer for this clip */
-  buffer: AudioBuffer;
+  /** Audio buffer for this clip (null for large-file tracks with no browser decode) */
+  buffer: AudioBuffer | null;
   /** Waveform data for this clip */
   waveformData: number[];
   /** Position on the timeline where this clip starts (in seconds) */
