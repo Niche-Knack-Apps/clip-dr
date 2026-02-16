@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useMeterStore } from '@/stores/meter';
-import { TRACK_HEIGHT } from '@/shared/constants';
-
 interface Props {
   trackId: string;
 }
@@ -10,7 +8,7 @@ interface Props {
 const props = defineProps<Props>();
 const meterStore = useMeterStore();
 
-const meterHeight = TRACK_HEIGHT - 4; // Leave 2px padding top/bottom
+const meterHeight = 16;
 
 // Convert linear level to pixel height using dB scale (-60dB to 0dB)
 function levelToHeight(linear: number): number {
@@ -49,7 +47,7 @@ function handleClipClick() {
 <template>
   <div
     class="flex gap-px items-end shrink-0"
-    :style="{ height: `${TRACK_HEIGHT}px`, width: '14px' }"
+    :style="{ height: '20px', width: '14px' }"
   >
     <!-- Clip indicator dot -->
     <div

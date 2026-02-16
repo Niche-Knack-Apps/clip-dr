@@ -4,7 +4,7 @@ import { useMeterStore } from '@/stores/meter';
 
 const meterStore = useMeterStore();
 
-const meterHeight = 40; // Compact height for toolbar area
+const meterHeight = 22; // Compact height for toolbar area
 
 function levelToHeight(linear: number): number {
   if (linear <= 0.001) return 0;
