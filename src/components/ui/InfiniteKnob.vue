@@ -37,6 +37,18 @@ const displayValue = computed(() => {
   return props.modelValue.toFixed(1);
 });
 
+// Position of thumb indicator within the track (0-100%)
+const positionPercent = computed(() => {
+  if (props.logarithmic) {
+    const logMin = Math.log(Math.max(props.min, 1e-10));
+    const logMax = Math.log(props.max);
+    const logVal = Math.log(Math.max(props.modelValue, props.min));
+    return Math.max(0, Math.min(100, ((logVal - logMin) / (logMax - logMin)) * 100));
+  }
+  if (props.max === props.min) return 0;
+  return Math.max(0, Math.min(100, ((props.modelValue - props.min) / (props.max - props.min)) * 100));
+});
+
 function clamp(value: number): number {
   const stepped = Math.round(value / props.step) * props.step;
   return Math.max(props.min, Math.min(props.max, stepped));
@@ -106,17 +118,38 @@ onUnmounted(() => {
 
 <template>
   <div
-    class="inline-flex flex-col items-center select-none"
+    class="flex items-center gap-1.5 select-none"
     :class="isDragging ? 'cursor-grabbing' : 'cursor-ew-resize'"
     @mousedown="handleMouseDown"
     @dblclick="handleDoubleClick"
   >
-    <span v-if="label" class="text-[8px] text-gray-500 leading-none mb-0.5">{{ label }}</span>
+    <span v-if="label" class="text-[8px] text-gray-500 leading-none shrink-0">{{ label }}</span>
+    <!-- Trim slider track with fill, thumb, and grip ridges -->
     <div
-      class="px-2 py-0.5 rounded-full text-[10px] font-mono text-gray-300 bg-gray-700/80 hover:bg-gray-600/80 transition-colors whitespace-nowrap min-w-[3rem] text-center"
-      :class="{ 'bg-cyan-900/60 ring-1 ring-cyan-500/50': isDragging }"
+      class="relative h-3.5 flex-1 min-w-[40px] bg-gray-800 rounded-sm overflow-hidden border transition-colors"
+      :class="isDragging ? 'border-cyan-500/60' : 'border-gray-600/40'"
     >
-      {{ displayValue }}
+      <!-- Fill bar showing current position -->
+      <div
+        class="absolute inset-y-0 left-0 bg-cyan-600/25"
+        :style="{ width: `${positionPercent}%` }"
+      />
+      <!-- Thumb indicator line -->
+      <div
+        class="absolute top-0 bottom-0 w-0.5 bg-cyan-400"
+        :style="{ left: `${positionPercent}%` }"
+      />
+      <!-- Grip ridges for drag affordance -->
+      <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div class="flex gap-[3px]">
+          <div class="w-px h-2 bg-gray-400/30" />
+          <div class="w-px h-2 bg-gray-400/30" />
+          <div class="w-px h-2 bg-gray-400/30" />
+          <div class="w-px h-2 bg-gray-400/30" />
+          <div class="w-px h-2 bg-gray-400/30" />
+        </div>
+      </div>
     </div>
+    <span class="text-[10px] font-mono text-gray-300 whitespace-nowrap shrink-0">{{ displayValue }}</span>
   </div>
 </template>
