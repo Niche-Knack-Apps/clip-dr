@@ -5,6 +5,7 @@ import { writeTextFile } from '@tauri-apps/plugin-fs';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Slider from '@/components/ui/Slider.vue';
+import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
 import SearchBar from '@/components/search/SearchBar.vue';
 import CleaningPanel from '@/components/cleaning/CleaningPanel.vue';
 import RecordingPanel from '@/components/recording/RecordingPanel.vue';
@@ -396,13 +397,15 @@ defineExpose({ focusSearch });
       </div>
 
       <!-- Volume + Master Meter -->
-      <div class="flex items-center gap-1.5 w-28">
+      <div class="flex items-center gap-1.5">
         <MasterMeter />
-        <Slider
+        <InfiniteKnob
           :model-value="volume"
           :min="0"
           :max="1"
           :step="0.01"
+          :default-value="0.8"
+          :format-value="(v: number) => `${Math.round(v * 100)}%`"
           @update:model-value="setVolume"
         />
       </div>
