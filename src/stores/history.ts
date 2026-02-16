@@ -60,6 +60,7 @@ function cloneTrack(track: Track): Track {
       channels: track.audioData.channels,
     },
     clips: track.clips ? track.clips.map(cloneClip) : undefined,
+    timemarks: track.timemarks ? track.timemarks.map(m => ({ ...m })) : undefined,
   };
 }
 
