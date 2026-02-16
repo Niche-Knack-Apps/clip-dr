@@ -370,7 +370,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   function setVolume(newVolume: number): void {
-    volume.value = Math.max(0, Math.min(1, newVolume));
+    volume.value = Math.max(0, Math.min(3, newVolume));
     invoke('playback_set_volume', { volume: volume.value })
       .catch(e => console.warn('[Playback] volume error:', e));
   }

@@ -402,7 +402,7 @@ defineExpose({ focusSearch });
         <InfiniteKnob
           :model-value="volume"
           :min="0"
-          :max="1"
+          :max="3"
           :step="0.01"
           :default-value="0.8"
           :format-value="(v: number) => `${Math.round(v * 100)}%`"
