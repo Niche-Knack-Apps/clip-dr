@@ -183,6 +183,12 @@ export const useClipboardStore = defineStore('clipboard', () => {
       // Remove the clip but keep the track (clip was selected, not the track)
       tracksStore.removeClipKeepTrack(trackId, clip.id);
 
+      // Adjust timemarks before sliding (uses pre-slide positions)
+      const gapEnd = gapStart + gapDuration;
+      for (const track of tracksStore.tracks) {
+        tracksStore.adjustTimemarksForCut(track.id, gapStart, gapEnd);
+      }
+
       // Slide remaining clips left to close the gap
       tracksStore.slideTracksLeft(gapStart, gapDuration);
 
@@ -245,6 +251,13 @@ export const useClipboardStore = defineStore('clipboard', () => {
       if (!copied) return false;
 
       tracksStore.clearTrackAudio(selectedTrack.id);
+
+      // Adjust timemarks before sliding (uses pre-slide positions)
+      const cutEnd = trackStart + trackDuration;
+      for (const track of tracksStore.tracks) {
+        tracksStore.adjustTimemarksForCut(track.id, trackStart, cutEnd);
+      }
+
       tracksStore.slideTracksLeft(trackStart, trackDuration);
       playbackStore.seek(Math.max(0, trackStart - 0.5));
       console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, kept empty, slid remaining tracks left`);
@@ -356,6 +369,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
         // Adjust transcription: remove words in deleted region (no shift)
         for (const trackId of trackIds) {
           transcriptionStore.adjustForDelete(trackId, inPoint, outPoint);
+        }
+        // Adjust timemarks: remove marks in deleted region (no shift)
+        for (const trackId of trackIds) {
+          tracksStore.adjustTimemarksForDelete(trackId, inPoint, outPoint);
         }
         selectionStore.clearInOutPoints();
         console.log(`[Clipboard] deleteSelected: removed segment from ${cutCount} track(s)`);
