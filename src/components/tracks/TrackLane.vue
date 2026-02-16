@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import ClipRegion from './ClipRegion.vue';
+import VolumeEnvelope from './VolumeEnvelope.vue';
 import Playhead from '@/components/waveform/Playhead.vue';
 import Slider from '@/components/ui/Slider.vue';
 import type { Track } from '@/shared/types';
@@ -515,6 +516,14 @@ onUnmounted(() => {
         :dragging-clip-id="draggingClipId"
         :is-selected="clip.id === tracksStore.selectedClipId"
         @drag-start="handleClipDragStart"
+      />
+
+      <!-- Volume automation envelope overlay -->
+      <VolumeEnvelope
+        v-if="!isImporting && containerWidth > 0"
+        :track="track"
+        :container-width="containerWidth"
+        :duration="duration"
       />
 
       <!-- Timemark indicators -->
