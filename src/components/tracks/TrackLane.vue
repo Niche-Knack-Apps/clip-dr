@@ -471,6 +471,7 @@ onUnmounted(() => {
           :step="0.5"
           :default-value="0"
           :format-value="() => volumeDbLabel"
+          class="flex-1"
           @update:model-value="handleVolumeDbChange"
         />
       </div>
