@@ -21,8 +21,19 @@ const dbRange = MAX_VOLUME_DB - MIN_VOLUME_DB; // 84dB total range
 
 // Drag state
 const draggingPointId = ref<string | null>(null);
+const dragTooltipPosition = ref<{ x: number; y: number } | null>(null);
 let dragRafId: number | null = null;
 let pendingDragEvent: MouseEvent | null = null;
+
+// dB tooltip while dragging
+const dragTooltipText = computed(() => {
+  if (!dragTooltipPosition.value) return '';
+  const value = yToValue(dragTooltipPosition.value.y);
+  if (value <= 0) return '-inf dB';
+  const db = linearToDb(value);
+  if (db > 0) return `+${db.toFixed(1)} dB`;
+  return `${db.toFixed(1)} dB`;
+});
 
 // Convert a linear gain value to Y pixel coordinate
 function valueToY(value: number): number {
@@ -112,11 +123,12 @@ const keyframeCircles = computed(() => {
   }));
 });
 
-// Click on the envelope background — add a new point
+// Click on the wide hit polyline — add a new point
 function handleBackgroundClick(event: MouseEvent) {
   if (draggingPointId.value) return;
-  const svg = event.currentTarget as SVGElement;
-  const rect = svg.getBoundingClientRect();
+  const svgEl = document.querySelector(`[data-envelope-track="${props.track.id}"]`);
+  if (!svgEl) return;
+  const rect = svgEl.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
   const time = xToTime(x);
@@ -153,8 +165,11 @@ function flushDrag() {
   const y = pendingDragEvent.clientY - rect.top;
   pendingDragEvent = null;
 
+  const clampedY = Math.max(0, Math.min(svgHeight, y));
   const time = xToTime(x);
-  const value = yToValue(Math.max(0, Math.min(svgHeight, y)));
+  const value = yToValue(clampedY);
+
+  dragTooltipPosition.value = { x, y: clampedY };
   tracksStore.updateVolumePoint(props.track.id, draggingPointId.value, time, value);
 }
 
@@ -165,6 +180,7 @@ function handlePointMouseUp() {
   }
   pendingDragEvent = null;
   draggingPointId.value = null;
+  dragTooltipPosition.value = null;
   document.removeEventListener('mousemove', handlePointMouseMove);
   document.removeEventListener('mouseup', handlePointMouseUp);
 }
@@ -190,7 +206,6 @@ onUnmounted(() => {
     :width="containerWidth"
     :height="svgHeight"
     style="pointer-events: none"
-    @click.stop="handleBackgroundClick"
   >
     <!-- Semi-transparent fill below the curve -->
     <polygon
@@ -212,32 +227,64 @@ onUnmounted(() => {
       style="pointer-events: none"
     />
 
-    <!-- Envelope line -->
+    <!-- Invisible wide hit polyline (~6px each side) for easier clicking -->
+    <polyline
+      :points="polylinePoints"
+      fill="none"
+      stroke="transparent"
+      stroke-width="12"
+      stroke-linejoin="round"
+      style="pointer-events: stroke; cursor: crosshair"
+      @click.stop="handleBackgroundClick"
+    />
+
+    <!-- Visible envelope line -->
     <polyline
       :points="polylinePoints"
       fill="none"
       :stroke="track.color + 'cc'"
       stroke-width="1.5"
       stroke-linejoin="round"
-      style="pointer-events: all; cursor: crosshair"
-      @click.stop="handleBackgroundClick"
+      style="pointer-events: none"
     />
 
-    <!-- Keyframe circles -->
+    <!-- Visible keyframe circles -->
     <circle
       v-for="kf in keyframeCircles"
       :key="kf.id"
       :cx="kf.cx"
       :cy="kf.cy"
-      r="4"
+      r="5"
       :fill="track.color"
       stroke="white"
       :stroke-width="draggingPointId === kf.id ? 2 : 1"
-      class="cursor-grab hover:r-[5] transition-all"
+      style="pointer-events: none"
+    />
+
+    <!-- Invisible larger grab targets for keyframes -->
+    <circle
+      v-for="kf in keyframeCircles"
+      :key="'hit-' + kf.id"
+      :cx="kf.cx"
+      :cy="kf.cy"
+      r="10"
+      fill="transparent"
+      class="cursor-grab"
       :class="{ 'cursor-grabbing': draggingPointId === kf.id }"
       style="pointer-events: all"
       @mousedown.stop="handlePointMouseDown(kf.id, $event)"
       @contextmenu.stop="handlePointContextMenu(kf.id, $event)"
     />
+
+    <!-- dB tooltip while dragging -->
+    <text
+      v-if="draggingPointId && dragTooltipPosition"
+      :x="dragTooltipPosition.x + 14"
+      :y="dragTooltipPosition.y - 10"
+      fill="white"
+      font-size="10"
+      font-family="monospace"
+      style="pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,0.8)"
+    >{{ dragTooltipText }}</text>
   </svg>
 </template>
