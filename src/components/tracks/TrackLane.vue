@@ -4,7 +4,7 @@ import ClipRegion from './ClipRegion.vue';
 import VolumeEnvelope from './VolumeEnvelope.vue';
 import TrackMeter from './TrackMeter.vue';
 import Playhead from '@/components/waveform/Playhead.vue';
-import Slider from '@/components/ui/Slider.vue';
+import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
 import type { Track } from '@/shared/types';
 import { usePlaybackStore } from '@/stores/playback';
 import { useTracksStore } from '@/stores/tracks';
@@ -463,16 +463,16 @@ onUnmounted(() => {
         @mousedown.stop
         @dragstart.prevent
       >
-        <TrackMeter :track-id="track.id" class="shrink-0" />
-        <Slider
+        <TrackMeter v-if="!track.muted" :track-id="track.id" class="shrink-0" />
+        <InfiniteKnob
           :model-value="volumeDb"
           :min="MIN_VOLUME_DB"
           :max="MAX_VOLUME_DB"
           :step="0.5"
-          class="flex-1"
+          :default-value="0"
+          :format-value="() => volumeDbLabel"
           @update:model-value="handleVolumeDbChange"
         />
-        <span class="text-[9px] text-gray-500 w-10 text-right" :title="`${volumeDbLabel} dB`">{{ volumeDbLabel }}</span>
       </div>
     </div>
 
