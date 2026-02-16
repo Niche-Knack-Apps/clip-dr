@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::Emitter;
@@ -261,6 +261,8 @@ pub struct PlaybackEngine {
     /// Lock-free position (f64 bits stored as u64)
     position: Arc<AtomicU64>,
     playing: Arc<AtomicBool>,
+    /// Lock-free meter data (written by audio thread, read by polling command)
+    meter: Arc<MeterData>,
 }
 
 struct EngineInner {
@@ -279,6 +281,85 @@ struct EngineInner {
     loop_start: f64,
     loop_end: f64,
     stream_started: bool,
+}
+
+// ── Metering ──
+
+/// Lock-free meter data shared between audio thread (writer) and polling command (reader).
+/// Uses fixed-size arrays to avoid resize issues. All values stored as f32 bits in AtomicU32.
+const MAX_METER_TRACKS: usize = 64;
+
+pub struct MeterData {
+    /// Per-track peak levels (L/R), indexed by track position
+    track_peak_l: [AtomicU32; MAX_METER_TRACKS],
+    track_peak_r: [AtomicU32; MAX_METER_TRACKS],
+    track_rms_l: [AtomicU32; MAX_METER_TRACKS],
+    track_rms_r: [AtomicU32; MAX_METER_TRACKS],
+    /// Master bus levels
+    master_peak_l: AtomicU32,
+    master_peak_r: AtomicU32,
+    master_rms_l: AtomicU32,
+    master_rms_r: AtomicU32,
+    /// Track IDs in order — protected by Mutex since only changed on set_tracks
+    track_ids: Mutex<Vec<String>>,
+    /// Number of active tracks (for bounds checking)
+    track_count: AtomicUsize,
+}
+
+impl MeterData {
+    fn new() -> Self {
+        const ZERO: AtomicU32 = AtomicU32::new(0);
+        Self {
+            track_peak_l: [ZERO; MAX_METER_TRACKS],
+            track_peak_r: [ZERO; MAX_METER_TRACKS],
+            track_rms_l: [ZERO; MAX_METER_TRACKS],
+            track_rms_r: [ZERO; MAX_METER_TRACKS],
+            master_peak_l: AtomicU32::new(0),
+            master_peak_r: AtomicU32::new(0),
+            master_rms_l: AtomicU32::new(0),
+            master_rms_r: AtomicU32::new(0),
+            track_ids: Mutex::new(Vec::new()),
+            track_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn set_tracks(&self, count: usize, ids: Vec<String>) {
+        // Zero out all track meters
+        for i in 0..MAX_METER_TRACKS {
+            self.track_peak_l[i].store(0, Ordering::Relaxed);
+            self.track_peak_r[i].store(0, Ordering::Relaxed);
+            self.track_rms_l[i].store(0, Ordering::Relaxed);
+            self.track_rms_r[i].store(0, Ordering::Relaxed);
+        }
+        self.track_count.store(count.min(MAX_METER_TRACKS), Ordering::Release);
+        *self.track_ids.lock().unwrap() = ids;
+    }
+
+    fn store_f32(atom: &AtomicU32, val: f32) {
+        atom.store(val.to_bits(), Ordering::Relaxed);
+    }
+
+    fn load_f32(atom: &AtomicU32) -> f32 {
+        f32::from_bits(atom.load(Ordering::Relaxed))
+    }
+}
+
+#[derive(Serialize)]
+pub struct TrackMeterLevel {
+    pub track_id: String,
+    pub peak_l: f32,
+    pub peak_r: f32,
+    pub rms_l: f32,
+    pub rms_r: f32,
+}
+
+#[derive(Serialize)]
+pub struct MeterLevels {
+    pub tracks: Vec<TrackMeterLevel>,
+    pub master_peak_l: f32,
+    pub master_peak_r: f32,
+    pub master_rms_l: f32,
+    pub master_rms_r: f32,
 }
 
 /// Evaluate a volume envelope at a given time using a walking-pointer optimization.
@@ -327,6 +408,7 @@ impl PlaybackEngine {
             })),
             position: Arc::new(AtomicU64::new(0)),
             playing: Arc::new(AtomicBool::new(false)),
+            meter: Arc::new(MeterData::new()),
         }
     }
 
@@ -940,6 +1022,7 @@ fn build_output_stream(
     engine: &Arc<Mutex<EngineInner>>,
     position: &Arc<AtomicU64>,
     playing: &Arc<AtomicBool>,
+    meter: &Arc<MeterData>,
 ) -> Result<(cpal::Stream, u32, u16), String> {
     let host = cpal::default_host();
     let device = host.default_output_device()
@@ -955,6 +1038,7 @@ fn build_output_stream(
     let engine_ref = engine.clone();
     let position_ref = position.clone();
     let playing_ref = playing.clone();
+    let meter_ref = meter.clone();
 
     let stream = device.build_output_stream(
         &config,
@@ -981,6 +1065,18 @@ fn build_output_stream(
 
             // Process output frames
             let frame_count = data.len() / out_ch;
+            let track_count = inner.tracks.len();
+
+            // Metering accumulators
+            let mut track_peak_l = vec![0.0f32; track_count];
+            let mut track_peak_r = vec![0.0f32; track_count];
+            let mut track_sum_sq_l = vec![0.0f32; track_count];
+            let mut track_sum_sq_r = vec![0.0f32; track_count];
+            let mut master_peak_l = 0.0f32;
+            let mut master_peak_r = 0.0f32;
+            let mut master_sum_sq_l = 0.0f32;
+            let mut master_sum_sq_r = 0.0f32;
+
             for frame_idx in 0..frame_count {
                 // Loop boundary check
                 if inner.loop_enabled {
@@ -1044,20 +1140,18 @@ fn build_output_stream(
                     let interleaved_idx = sample_idx * src_ch;
 
                     // Read source sample(s) — lock-free for Stream, slice for Mmap/Vec
-                    match &track_src.pcm {
+                    let (sl, sr) = match &track_src.pcm {
                         PcmData::Stream(buf) => {
                             if let Some(s) = buf.read_sample(interleaved_idx) {
                                 if src_ch == 1 {
-                                    mix[0] += s * track_vol;
-                                    mix[1] += s * track_vol;
+                                    (s * track_vol, s * track_vol)
                                 } else {
-                                    mix[0] += s * track_vol;
-                                    if let Some(s2) = buf.read_sample(interleaved_idx + 1) {
-                                        mix[1] += s2 * track_vol;
-                                    }
+                                    let s2 = buf.read_sample(interleaved_idx + 1).unwrap_or(0.0);
+                                    (s * track_vol, s2 * track_vol)
                                 }
+                            } else {
+                                continue; // silence (not yet decoded or buffer underrun)
                             }
-                            // else: silence (not yet decoded or buffer underrun)
                         }
                         _ => {
                             let samples = track_src.pcm.samples();
@@ -1065,34 +1159,72 @@ fn build_output_stream(
 
                             if src_ch == 1 {
                                 let s = samples[interleaved_idx] * track_vol;
-                                mix[0] += s;
-                                mix[1] += s;
+                                (s, s)
                             } else {
-                                mix[0] += samples[interleaved_idx] * track_vol;
-                                if interleaved_idx + 1 < samples.len() {
-                                    mix[1] += samples[interleaved_idx + 1] * track_vol;
-                                }
+                                let l = samples[interleaved_idx] * track_vol;
+                                let r = if interleaved_idx + 1 < samples.len() {
+                                    samples[interleaved_idx + 1] * track_vol
+                                } else { 0.0 };
+                                (l, r)
                             }
                         }
-                    }
+                    };
+
+                    mix[0] += sl;
+                    mix[1] += sr;
+
+                    // Accumulate per-track metering
+                    let al = sl.abs();
+                    let ar = sr.abs();
+                    if al > track_peak_l[track_idx] { track_peak_l[track_idx] = al; }
+                    if ar > track_peak_r[track_idx] { track_peak_r[track_idx] = ar; }
+                    track_sum_sq_l[track_idx] += sl * sl;
+                    track_sum_sq_r[track_idx] += sr * sr;
                 }
 
                 // Write to output buffer
                 let base = frame_idx * out_ch;
-                if out_ch >= 2 {
-                    data[base] = mix[0] * master_vol;
-                    data[base + 1] = mix[1] * master_vol;
+                let (out_l, out_r) = if out_ch >= 2 {
+                    let l = mix[0] * master_vol;
+                    let r = mix[1] * master_vol;
+                    data[base] = l;
+                    data[base + 1] = r;
                     // Fill extra channels with silence
                     for c in 2..out_ch {
                         data[base + c] = 0.0;
                     }
-                } else if out_ch == 1 {
-                    data[base] = (mix[0] + mix[1]) * 0.5 * master_vol;
-                }
+                    (l, r)
+                } else {
+                    let m = (mix[0] + mix[1]) * 0.5 * master_vol;
+                    data[base] = m;
+                    (m, m)
+                };
+
+                // Accumulate master metering
+                let al = out_l.abs();
+                let ar = out_r.abs();
+                if al > master_peak_l { master_peak_l = al; }
+                if ar > master_peak_r { master_peak_r = ar; }
+                master_sum_sq_l += out_l * out_l;
+                master_sum_sq_r += out_r * out_r;
 
                 // Advance position
                 pos += direction * abs_speed as f64 / out_rate;
             }
+
+            // Store meter data atomically (fixed-size arrays, bounds-checked)
+            let fc = frame_count.max(1) as f32;
+            let tc = meter_ref.track_count.load(Ordering::Relaxed);
+            for i in 0..track_count.min(tc).min(MAX_METER_TRACKS) {
+                MeterData::store_f32(&meter_ref.track_peak_l[i], track_peak_l[i]);
+                MeterData::store_f32(&meter_ref.track_peak_r[i], track_peak_r[i]);
+                MeterData::store_f32(&meter_ref.track_rms_l[i], (track_sum_sq_l[i] / fc).sqrt());
+                MeterData::store_f32(&meter_ref.track_rms_r[i], (track_sum_sq_r[i] / fc).sqrt());
+            }
+            MeterData::store_f32(&meter_ref.master_peak_l, master_peak_l);
+            MeterData::store_f32(&meter_ref.master_peak_r, master_peak_r);
+            MeterData::store_f32(&meter_ref.master_rms_l, (master_sum_sq_l / fc).sqrt());
+            MeterData::store_f32(&meter_ref.master_rms_r, (master_sum_sq_r / fc).sqrt());
 
             // Update read cursors for stream tracks so decode threads can reclaim space
             for track_src in &inner.tracks {
@@ -1129,6 +1261,7 @@ pub async fn playback_set_tracks(
     let inner_arc = state.inner.clone();
     let position_arc = state.position.clone();
     let playing_arc = state.playing.clone();
+    let meter_arc = state.meter.clone();
 
     let set_start = std::time::Instant::now();
 
@@ -1163,6 +1296,7 @@ pub async fn playback_set_tracks(
     }).await.map_err(|e| e.to_string())?;
 
     let count = loaded.len();
+    let track_ids: Vec<String> = loaded.iter().map(|t| t.config.track_id.clone()).collect();
     let mut inner = inner_arc.lock().map_err(|e| e.to_string())?;
 
     // Store volume envelopes separately and reset walking indices
@@ -1170,9 +1304,12 @@ pub async fn playback_set_tracks(
     inner.envelope_indices = vec![0; count];
     inner.tracks = loaded;
 
+    // Update meter data for the new track list (uses atomics internally, no &mut needed)
+    meter_arc.set_tracks(count, track_ids);
+
     // Build output stream if not already running
     if !inner.stream_started {
-        match build_output_stream(&inner_arc, &position_arc, &playing_arc) {
+        match build_output_stream(&inner_arc, &position_arc, &playing_arc, &meter_arc) {
             Ok((stream, sample_rate, channels)) => {
                 stream.play().map_err(|e| format!("Failed to start output: {}", e))?;
                 inner.output_sample_rate = sample_rate;
@@ -1328,6 +1465,34 @@ pub fn playback_set_track_envelope(
         }
     }
     Ok(())
+}
+
+/// Poll current meter levels (called ~60fps from frontend via rAF).
+#[tauri::command]
+pub fn playback_get_meter_levels(
+    state: tauri::State<'_, PlaybackEngine>,
+) -> Result<MeterLevels, String> {
+    let meter = &state.meter;
+    let count = meter.track_count.load(Ordering::Acquire);
+    let ids = meter.track_ids.lock().map_err(|e| e.to_string())?;
+
+    let tracks: Vec<TrackMeterLevel> = (0..count.min(ids.len()))
+        .map(|i| TrackMeterLevel {
+            track_id: ids[i].clone(),
+            peak_l: MeterData::load_f32(&meter.track_peak_l[i]),
+            peak_r: MeterData::load_f32(&meter.track_peak_r[i]),
+            rms_l: MeterData::load_f32(&meter.track_rms_l[i]),
+            rms_r: MeterData::load_f32(&meter.track_rms_r[i]),
+        })
+        .collect();
+
+    Ok(MeterLevels {
+        tracks,
+        master_peak_l: MeterData::load_f32(&meter.master_peak_l),
+        master_peak_r: MeterData::load_f32(&meter.master_peak_r),
+        master_rms_l: MeterData::load_f32(&meter.master_rms_l),
+        master_rms_r: MeterData::load_f32(&meter.master_rms_r),
+    })
 }
 
 /// Hot-swap a streaming track to mmap'd cached WAV.

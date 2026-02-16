@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useSelectionStore } from './selection';
 import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
+import { useMeterStore } from './meter';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
 
@@ -256,11 +257,13 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     console.log(`[Playback] Audio started in ${(performance.now() - playT0).toFixed(0)}ms from play() call`);
     startPositionPoll();
+    useMeterStore().startPolling();
   }
 
   function pause(): void {
     invoke('playback_pause').catch(e => console.warn('[Playback] pause error:', e));
     stopPositionPoll();
+    useMeterStore().stopPolling();
     isPlaying.value = false;
   }
 
