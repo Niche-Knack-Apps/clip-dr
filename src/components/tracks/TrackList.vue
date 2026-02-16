@@ -9,6 +9,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import { useExportStore } from '@/stores/export';
 import { useSettingsStore } from '@/stores/settings';
 import { useSelectionStore } from '@/stores/selection';
+import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
 import type { ExportProfile } from '@/shared/types';
@@ -67,25 +68,11 @@ const panelWidth = computed(() => uiStore.trackPanelWidth);
 const snapEnabled = computed(() => uiStore.snapEnabled);
 const trackZoom = computed(() => uiStore.trackZoom);
 
-// Logarithmic zoom slider: left = zoomed in (max px/sec), right = zoomed out (min px/sec)
-// Maps slider 0..1000 to zoom range using log scale for natural feel
-const SLIDER_MAX = 1000;
-const zoomSliderValue = computed(() => {
-  const minLog = Math.log(uiStore.TRACK_ZOOM_MIN);
-  const maxLog = Math.log(uiStore.TRACK_ZOOM_MAX);
-  const currentLog = Math.log(trackZoom.value);
-  // Invert: left (0) = max zoom, right (SLIDER_MAX) = min zoom
-  return Math.round(SLIDER_MAX - ((currentLog - minLog) / (maxLog - minLog)) * SLIDER_MAX);
-});
-
-function handleZoomSlider(event: Event) {
-  const sliderVal = Number((event.target as HTMLInputElement).value);
-  const minLog = Math.log(uiStore.TRACK_ZOOM_MIN);
-  const maxLog = Math.log(uiStore.TRACK_ZOOM_MAX);
-  // Invert: slider 0 = max zoom, slider SLIDER_MAX = min zoom
-  const fraction = 1 - (sliderVal / SLIDER_MAX);
-  const zoom = Math.exp(minLog + fraction * (maxLog - minLog));
-  uiStore.setTrackZoom(zoom);
+function formatZoom(v: number): string {
+  if (v >= 100) return `${Math.round(v)}`;
+  if (v >= 10) return v.toFixed(0);
+  if (v >= 1) return v.toFixed(1);
+  return v.toFixed(2);
 }
 
 // Reference to the scroll container for zoom calculations
@@ -447,23 +434,17 @@ function handleClipSelect(trackId: string, clipId: string) {
       </div>
       <div class="flex items-center gap-2">
         <span v-if="exporting" class="text-xs text-cyan-400">Exporting...</span>
-        <!-- Zoom slider: left = zoom in, right = zoom out -->
-        <div class="flex items-center gap-1" title="Timeline zoom (left=in, right=out)">
-          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7" />
-          </svg>
-          <input
-            type="range"
-            :min="0"
-            :max="SLIDER_MAX"
-            :value="zoomSliderValue"
-            class="w-20 h-1 accent-cyan-500 cursor-pointer"
-            @input="handleZoomSlider"
-          />
-          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM13 10H7" />
-          </svg>
-        </div>
+        <InfiniteKnob
+          :model-value="trackZoom"
+          :min="uiStore.TRACK_ZOOM_MIN"
+          :max="uiStore.TRACK_ZOOM_MAX"
+          :step="0.1"
+          :sensitivity="2"
+          :logarithmic="true"
+          label="Zoom"
+          :format-value="formatZoom"
+          @update:model-value="(v: number) => uiStore.setTrackZoom(v)"
+        />
         <span class="text-xs text-gray-500">{{ tracks.length }} track{{ tracks.length !== 1 ? 's' : '' }}</span>
       </div>
     </div>
