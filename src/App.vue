@@ -3,6 +3,7 @@ import { ref, provide } from 'vue';
 import AppLayout from '@/components/layout/AppLayout.vue';
 import SettingsView from '@/views/SettingsView.vue';
 import EditorView from '@/views/EditorView.vue';
+import FloatingMeter from '@/components/ui/FloatingMeter.vue';
 
 const showSettings = ref(false);
 
@@ -22,4 +23,6 @@ provide('openSettings', openSettings);
     v-if="showSettings"
     @close="showSettings = false"
   />
+
+  <FloatingMeter />
 </template>

@@ -13,9 +13,19 @@ import { useTracksStore } from './tracks';
 const SECTION_MIN_HEIGHT = 80;
 const SECTION_MAX_HEIGHT = 400;
 
+export interface FloatingMeterState {
+  type: 'track' | 'master';
+  trackId: string | null;
+  x: number;
+  y: number;
+}
+
 export const useUIStore = defineStore('ui', () => {
   // Track panel width (resizable)
   const trackPanelWidth = ref(TRACK_PANEL_DEFAULT_WIDTH);
+
+  // Floating meter panel
+  const floatingMeter = ref<FloatingMeterState | null>(null);
 
   // Section heights (resizable)
   const waveformHeight = ref(WAVEFORM_HEIGHT);
@@ -106,6 +116,21 @@ export const useUIStore = defineStore('ui', () => {
     useTracksStore().resetMinTimelineDuration();
   }
 
+  function openFloatingMeter(type: 'track' | 'master', trackId?: string): void {
+    const x = Math.round((window.innerWidth - 120) / 2);
+    floatingMeter.value = { type, trackId: trackId ?? null, x, y: 100 };
+  }
+
+  function closeFloatingMeter(): void {
+    floatingMeter.value = null;
+  }
+
+  function setFloatingMeterPosition(x: number, y: number): void {
+    if (floatingMeter.value) {
+      floatingMeter.value = { ...floatingMeter.value, x, y };
+    }
+  }
+
   return {
     trackPanelWidth,
     waveformHeight,
@@ -115,6 +140,7 @@ export const useUIStore = defineStore('ui', () => {
     trackZoom,
     TRACK_ZOOM_MIN,
     TRACK_ZOOM_MAX,
+    floatingMeter,
     isTrackPanelCollapsed,
     isTrackPanelExpanded,
     setTrackPanelWidth,
@@ -128,5 +154,8 @@ export const useUIStore = defineStore('ui', () => {
     zoomTrackIn,
     zoomTrackOut,
     zoomTrackToFit,
+    openFloatingMeter,
+    closeFloatingMeter,
+    setFloatingMeterPosition,
   };
 });

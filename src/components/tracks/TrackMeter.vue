@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useMeterStore } from '@/stores/meter';
+import { useUIStore } from '@/stores/ui';
 interface Props {
   trackId: string;
 }
 
 const props = defineProps<Props>();
 const meterStore = useMeterStore();
+const uiStore = useUIStore();
+
+function handleMeterClick() {
+  uiStore.openFloatingMeter('track', props.trackId);
+}
 
 const meterHeight = 16;
 
@@ -46,8 +52,9 @@ function handleClipClick() {
 
 <template>
   <div
-    class="flex gap-px items-end shrink-0"
+    class="flex gap-px items-end shrink-0 cursor-pointer"
     :style="{ height: '20px', width: '14px' }"
+    @click.stop="handleMeterClick"
   >
     <!-- Clip indicator dot -->
     <div

@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useMeterStore } from '@/stores/meter';
+import { useUIStore } from '@/stores/ui';
 
 const meterStore = useMeterStore();
+const uiStore = useUIStore();
+
+function handleMeterClick() {
+  uiStore.openFloatingMeter('master');
+}
 
 const meterHeight = 22; // Compact height for toolbar area
 
@@ -42,7 +48,7 @@ function handleClipClick() {
 </script>
 
 <template>
-  <div class="flex items-center gap-1" title="Master output level">
+  <div class="flex items-center gap-1 cursor-pointer" title="Master output level" @click.stop="handleMeterClick">
     <!-- Stereo meter bars -->
     <div class="flex gap-px items-end relative" :style="{ height: `${meterHeight}px` }">
       <!-- Clip indicator -->
