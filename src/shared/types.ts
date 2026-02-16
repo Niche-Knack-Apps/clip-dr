@@ -71,6 +71,15 @@ export interface TrackClip {
   duration: number;
 }
 
+/** A keyframe point on a volume automation envelope */
+export interface VolumeAutomationPoint {
+  id: string;
+  /** Track-relative seconds (same convention as TimeMark.time) */
+  time: number;
+  /** Linear gain: 0.0 to MAX_VOLUME_LINEAR */
+  value: number;
+}
+
 /** A timemark/reference point placed during recording */
 export interface TimeMark {
   id: string;
@@ -134,6 +143,7 @@ export interface Track {
   color: string;
   muted: boolean;
   solo: boolean;
+  /** Linear gain: 0.0 (silence) to ~15.849 (+24dB). 1.0 = unity (0dB). */
   volume: number;
   /** Optional tag to categorize tracks (e.g., 'speech-segment') */
   tag?: string;
@@ -143,6 +153,8 @@ export interface Track {
   clips?: TrackClip[];
   /** Timemarks/reference points placed during recording */
   timemarks?: TimeMark[];
+  /** Volume automation envelope keyframes */
+  volumeEnvelope?: VolumeAutomationPoint[];
   /** Import status — undefined for existing/recording tracks */
   importStatus?: ImportStatus;
   /** Waveform analysis progress 0-1 (from Rust decode) */

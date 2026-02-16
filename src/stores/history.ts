@@ -61,6 +61,7 @@ function cloneTrack(track: Track): Track {
     },
     clips: track.clips ? track.clips.map(cloneClip) : undefined,
     timemarks: track.timemarks ? track.timemarks.map(m => ({ ...m })) : undefined,
+    volumeEnvelope: track.volumeEnvelope ? track.volumeEnvelope.map(p => ({ ...p })) : undefined,
   };
 }
 

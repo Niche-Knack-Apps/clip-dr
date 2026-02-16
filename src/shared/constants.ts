@@ -1,5 +1,10 @@
 export const SEEK_THROTTLE_MS = 50;
 
+// Volume range: 0 (silence) to +24dB (~15.85x linear gain)
+export const MAX_VOLUME_DB = 24;
+export const MIN_VOLUME_DB = -60;
+export const MAX_VOLUME_LINEAR = Math.pow(10, MAX_VOLUME_DB / 20); // ~15.849
+
 export const DEFAULT_SELECTION_DURATION = 10;
 
 export const WAVEFORM_BUCKET_COUNT = 1000;

@@ -511,6 +511,22 @@ export const usePlaybackStore = defineStore('playback', () => {
     });
   }
 
+  // Watch for track volume changes during playback — sync to Rust engine live
+  watch(
+    () => tracksStore.tracks.map(t => ({ id: t.id, volume: t.volume })),
+    async (newVols, oldVols) => {
+      if (!isPlaying.value || !oldVols) return;
+      for (let i = 0; i < newVols.length; i++) {
+        const nv = newVols[i];
+        const ov = oldVols.find(o => o.id === nv.id);
+        if (ov && ov.volume !== nv.volume) {
+          await invoke('playback_set_track_volume', { trackId: nv.id, volume: nv.volume });
+        }
+      }
+    },
+    { deep: true }
+  );
+
   // Watch for track mute/solo changes during playback — sync to Rust engine
   let lastTracksKey = 0;
   watch(

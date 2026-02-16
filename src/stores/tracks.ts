@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent } from '@/shared/types';
+import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent, VolumeAutomationPoint } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
-import { generateId } from '@/shared/utils';
-import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
+import { generateId, binarySearch } from '@/shared/utils';
+import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
 
@@ -210,7 +210,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
       useHistoryStore().pushState('Set volume');
-      track.volume = Math.max(0, Math.min(1, volume));
+      track.volume = Math.max(0, Math.min(MAX_VOLUME_LINEAR, volume));
     }
   }
 
@@ -959,9 +959,10 @@ export const useTracksStore = defineStore('tracks', () => {
       }
     }
 
-    // Step 1b: Adjust timemarks before sliding (uses pre-slide positions for overlap check)
+    // Step 1b: Adjust timemarks and volume envelope before sliding (uses pre-slide positions for overlap check)
     for (const t of tracks.value) {
       adjustTimemarksForCut(t.id, inPoint, outPoint);
+      adjustVolumeEnvelopeForCut(t.id, inPoint, outPoint);
     }
 
     // Step 2: Close the gap - shift everything at/after outPoint left by gapDuration
@@ -1330,10 +1331,20 @@ export const useTracksStore = defineStore('tracks', () => {
       return m;
     });
 
+    // Shift volume envelope points at/after playhead right by paste duration
+    const newEnvelope = track.volumeEnvelope?.map(p => {
+      const absTime = track.trackStart + p.time;
+      if (absTime >= playheadTime - 0.001) {
+        return { ...p, time: p.time + pasteDuration };
+      }
+      return p;
+    });
+
     tracks.value[trackIndex] = {
       ...track,
       clips: currentClips,
       timemarks: newTimemarks,
+      volumeEnvelope: newEnvelope,
       trackStart: firstClipStart,
       duration: lastClipEnd - firstClipStart,
     };
@@ -1620,6 +1631,117 @@ export const useTracksStore = defineStore('tracks', () => {
     });
   }
 
+  // ── Volume Automation Envelope ──
+
+  /** Interpolate a value from a sorted envelope at a given time. */
+  function interpolateEnvelope(envelope: VolumeAutomationPoint[], fallback: number, time: number): number {
+    if (!envelope || envelope.length === 0) return fallback;
+    if (time <= envelope[0].time) return envelope[0].value;
+    if (time >= envelope[envelope.length - 1].time) return envelope[envelope.length - 1].value;
+
+    // Binary search for the segment containing `time`
+    const idx = binarySearch(envelope, time, p => p.time);
+    // idx is the insertion point — the first element >= time
+    if (idx >= envelope.length) return envelope[envelope.length - 1].value;
+    if (idx === 0) return envelope[0].value;
+
+    const a = envelope[idx - 1];
+    const b = envelope[idx];
+    const t = (time - a.time) / (b.time - a.time);
+    return a.value + (b.value - a.value) * t;
+  }
+
+  /** Add a keyframe to a track's volume envelope. */
+  function addVolumePoint(trackId: string, time: number, value: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track) return;
+    useHistoryStore().pushState('Add volume point');
+
+    if (!track.volumeEnvelope) track.volumeEnvelope = [];
+    track.volumeEnvelope.push({
+      id: generateId(),
+      time,
+      value: Math.max(0, Math.min(MAX_VOLUME_LINEAR, value)),
+    });
+    track.volumeEnvelope.sort((a, b) => a.time - b.time);
+  }
+
+  /** Update a keyframe's position/value (no history — drag convention). */
+  function updateVolumePoint(trackId: string, pointId: string, time: number, value: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.volumeEnvelope) return;
+
+    const point = track.volumeEnvelope.find(p => p.id === pointId);
+    if (point) {
+      point.time = Math.max(0, time);
+      point.value = Math.max(0, Math.min(MAX_VOLUME_LINEAR, value));
+      track.volumeEnvelope.sort((a, b) => a.time - b.time);
+    }
+  }
+
+  /** Remove a keyframe from a track's volume envelope. */
+  function removeVolumePoint(trackId: string, pointId: string): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.volumeEnvelope) return;
+    useHistoryStore().pushState('Remove volume point');
+    track.volumeEnvelope = track.volumeEnvelope.filter(p => p.id !== pointId);
+  }
+
+  /** Get interpolated volume at a specific time, falling back to track.volume. */
+  function getVolumeAtTime(trackId: string, time: number): number {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track) return 1;
+    return interpolateEnvelope(track.volumeEnvelope ?? [], track.volume, time);
+  }
+
+  /** Adjust envelope after a cut (ripple): remove points in [cutStart, cutEnd), shift after left. */
+  function adjustVolumeEnvelopeForCut(trackId: string, cutStart: number, cutEnd: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+
+    const trackEnd = track.trackStart + track.duration;
+    if (track.trackStart >= cutEnd || trackEnd <= cutStart) return;
+
+    const gapDuration = cutEnd - cutStart;
+    track.volumeEnvelope = track.volumeEnvelope
+      .filter(p => {
+        const absTime = track.trackStart + p.time;
+        return absTime < cutStart || absTime >= cutEnd;
+      })
+      .map(p => {
+        const absTime = track.trackStart + p.time;
+        if (absTime >= cutEnd) {
+          return { ...p, time: p.time - gapDuration };
+        }
+        return p;
+      });
+  }
+
+  /** Adjust envelope after a delete (no ripple): remove points in [deleteStart, deleteEnd). */
+  function adjustVolumeEnvelopeForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+
+    track.volumeEnvelope = track.volumeEnvelope.filter(p => {
+      const absTime = track.trackStart + p.time;
+      return absTime < deleteStart || absTime >= deleteEnd;
+    });
+  }
+
+  /** Adjust envelope after an insert: shift points at/after insertPoint right by insertDuration. */
+  function adjustVolumeEnvelopeForInsert(trackId: string, insertPoint: number, insertDuration: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+
+    track.volumeEnvelope = track.volumeEnvelope.map(p => {
+      const absTime = track.trackStart + p.time;
+      if (absTime >= insertPoint - 0.001) {
+        return { ...p, time: p.time + insertDuration };
+      }
+      return p;
+    });
+  }
+
   return {
     tracks,
     selectedTrackId,
@@ -1670,6 +1792,14 @@ export const useTracksStore = defineStore('tracks', () => {
     adjustTimemarksForCut,
     adjustTimemarksForDelete,
     adjustTimemarksForInsert,
+    interpolateEnvelope,
+    addVolumePoint,
+    updateVolumePoint,
+    removeVolumePoint,
+    getVolumeAtTime,
+    adjustVolumeEnvelopeForCut,
+    adjustVolumeEnvelopeForDelete,
+    adjustVolumeEnvelopeForInsert,
     createImportingTrack,
     updateImportWaveform,
     finalizeImportWaveform,

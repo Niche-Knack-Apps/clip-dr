@@ -183,10 +183,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
       // Remove the clip but keep the track (clip was selected, not the track)
       tracksStore.removeClipKeepTrack(trackId, clip.id);
 
-      // Adjust timemarks before sliding (uses pre-slide positions)
+      // Adjust timemarks and volume envelope before sliding (uses pre-slide positions)
       const gapEnd = gapStart + gapDuration;
       for (const track of tracksStore.tracks) {
         tracksStore.adjustTimemarksForCut(track.id, gapStart, gapEnd);
+        tracksStore.adjustVolumeEnvelopeForCut(track.id, gapStart, gapEnd);
       }
 
       // Slide remaining clips left to close the gap
@@ -252,10 +253,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
       tracksStore.clearTrackAudio(selectedTrack.id);
 
-      // Adjust timemarks before sliding (uses pre-slide positions)
+      // Adjust timemarks and volume envelope before sliding (uses pre-slide positions)
       const cutEnd = trackStart + trackDuration;
       for (const track of tracksStore.tracks) {
         tracksStore.adjustTimemarksForCut(track.id, trackStart, cutEnd);
+        tracksStore.adjustVolumeEnvelopeForCut(track.id, trackStart, cutEnd);
       }
 
       tracksStore.slideTracksLeft(trackStart, trackDuration);
@@ -370,9 +372,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
         for (const trackId of trackIds) {
           transcriptionStore.adjustForDelete(trackId, inPoint, outPoint);
         }
-        // Adjust timemarks: remove marks in deleted region (no shift)
+        // Adjust timemarks and volume envelope: remove in deleted region (no shift)
         for (const trackId of trackIds) {
           tracksStore.adjustTimemarksForDelete(trackId, inPoint, outPoint);
+          tracksStore.adjustVolumeEnvelopeForDelete(trackId, inPoint, outPoint);
         }
         selectionStore.clearInOutPoints();
         console.log(`[Clipboard] deleteSelected: removed segment from ${cutCount} track(s)`);

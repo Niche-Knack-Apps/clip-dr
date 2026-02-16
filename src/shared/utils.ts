@@ -110,3 +110,21 @@ export function getFileExtension(path: string): string {
   const dotIndex = name.lastIndexOf('.');
   return dotIndex > 0 ? name.slice(dotIndex).toLowerCase() : '';
 }
+
+// ── Audio volume utilities ──
+
+export function linearToDb(linear: number): number {
+  if (linear <= 0) return -Infinity;
+  return 20 * Math.log10(linear);
+}
+
+export function dbToLinear(db: number): number {
+  return Math.pow(10, db / 20);
+}
+
+export function formatDb(linear: number): string {
+  if (linear <= 0) return '-inf';
+  const db = linearToDb(linear);
+  if (db > 0) return `+${db.toFixed(1)}`;
+  return db.toFixed(1);
+}

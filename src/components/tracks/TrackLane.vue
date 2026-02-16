@@ -7,7 +7,8 @@ import type { Track } from '@/shared/types';
 import { usePlaybackStore } from '@/stores/playback';
 import { useTracksStore } from '@/stores/tracks';
 import { useUIStore } from '@/stores/ui';
-import { TRACK_HEIGHT, TRACK_PANEL_MIN_WIDTH } from '@/shared/constants';
+import { TRACK_HEIGHT, TRACK_PANEL_MIN_WIDTH, MAX_VOLUME_DB, MIN_VOLUME_DB } from '@/shared/constants';
+import { linearToDb, dbToLinear, formatDb } from '@/shared/utils';
 
 interface Props {
   track: Track;
@@ -237,9 +238,16 @@ function handleKeyDown(event: KeyboardEvent) {
   }
 }
 
-// Volume handler
-function handleVolumeChange(value: number) {
-  emit('setVolume', props.track.id, value);
+// Volume handler — slider operates in dB, convert to linear for the store
+const volumeDb = computed(() => {
+  if (props.track.volume <= 0) return MIN_VOLUME_DB;
+  return linearToDb(props.track.volume);
+});
+const volumeDbLabel = computed(() => formatDb(props.track.volume));
+
+function handleVolumeDbChange(db: number) {
+  const linear = db <= MIN_VOLUME_DB ? 0 : dbToLinear(db);
+  emit('setVolume', props.track.id, linear);
 }
 
 // Draw static waveform for importing tracks (progressive fill-in)
@@ -446,7 +454,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Bottom row: volume slider (only when expanded) -->
+      <!-- Bottom row: volume slider (dB scale, only when expanded) -->
       <div
         v-if="showVolumeSlider"
         class="flex items-center gap-1 mt-auto"
@@ -457,14 +465,14 @@ onUnmounted(() => {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
         </svg>
         <Slider
-          :model-value="track.volume"
-          :min="0"
-          :max="1"
-          :step="0.01"
+          :model-value="volumeDb"
+          :min="MIN_VOLUME_DB"
+          :max="MAX_VOLUME_DB"
+          :step="0.5"
           class="flex-1"
-          @update:model-value="handleVolumeChange"
+          @update:model-value="handleVolumeDbChange"
         />
-        <span class="text-[9px] text-gray-500 w-6 text-right">{{ Math.round(track.volume * 100) }}%</span>
+        <span class="text-[9px] text-gray-500 w-10 text-right" :title="`${volumeDbLabel} dB`">{{ volumeDbLabel }}</span>
       </div>
     </div>
 
