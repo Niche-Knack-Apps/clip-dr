@@ -959,6 +959,11 @@ export const useTracksStore = defineStore('tracks', () => {
       }
     }
 
+    // Step 1b: Adjust timemarks before sliding (uses pre-slide positions for overlap check)
+    for (const t of tracks.value) {
+      adjustTimemarksForCut(t.id, inPoint, outPoint);
+    }
+
     // Step 2: Close the gap - shift everything at/after outPoint left by gapDuration
     slideTracksLeft(outPoint, gapDuration);
 
@@ -1316,9 +1321,19 @@ export const useTracksStore = defineStore('tracks', () => {
     const firstClipStart = Math.min(...currentClips.map(c => c.clipStart));
     const lastClipEnd = Math.max(...currentClips.map(c => c.clipStart + c.duration));
 
+    // Shift timemarks at/after playhead right by paste duration
+    const newTimemarks = track.timemarks?.map(m => {
+      const absTime = track.trackStart + m.time;
+      if (absTime >= playheadTime - 0.001) {
+        return { ...m, time: m.time + pasteDuration };
+      }
+      return m;
+    });
+
     tracks.value[trackIndex] = {
       ...track,
       clips: currentClips,
+      timemarks: newTimemarks,
       trackStart: firstClipStart,
       duration: lastClipEnd - firstClipStart,
     };
@@ -1547,6 +1562,64 @@ export const useTracksStore = defineStore('tracks', () => {
     track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
   }
 
+  /**
+   * Adjust timemarks after a cut (ripple): remove marks in [cutStart, cutEnd),
+   * shift marks after cutEnd left by gapDuration.
+   * Skips tracks that don't overlap the cut region (prevents double-shift with slideTracksLeft).
+   */
+  function adjustTimemarksForCut(trackId: string, cutStart: number, cutEnd: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.timemarks || track.timemarks.length === 0) return;
+
+    const trackEnd = track.trackStart + track.duration;
+    // Skip tracks that don't overlap the cut region
+    if (track.trackStart >= cutEnd || trackEnd <= cutStart) return;
+
+    const gapDuration = cutEnd - cutStart;
+    track.timemarks = track.timemarks
+      .filter(m => {
+        const absTime = track.trackStart + m.time;
+        return absTime < cutStart || absTime >= cutEnd;
+      })
+      .map(m => {
+        const absTime = track.trackStart + m.time;
+        if (absTime >= cutEnd) {
+          return { ...m, time: m.time - gapDuration };
+        }
+        return m;
+      });
+  }
+
+  /**
+   * Adjust timemarks after a delete (no ripple): remove marks in [deleteStart, deleteEnd).
+   * Gap stays open, so no shifting.
+   */
+  function adjustTimemarksForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.timemarks || track.timemarks.length === 0) return;
+
+    track.timemarks = track.timemarks.filter(m => {
+      const absTime = track.trackStart + m.time;
+      return absTime < deleteStart || absTime >= deleteEnd;
+    });
+  }
+
+  /**
+   * Adjust timemarks after an insert: shift marks at/after insertPoint right by insertDuration.
+   */
+  function adjustTimemarksForInsert(trackId: string, insertPoint: number, insertDuration: number): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.timemarks || track.timemarks.length === 0) return;
+
+    track.timemarks = track.timemarks.map(m => {
+      const absTime = track.trackStart + m.time;
+      if (absTime >= insertPoint - 0.001) {
+        return { ...m, time: m.time + insertDuration };
+      }
+      return m;
+    });
+  }
+
   return {
     tracks,
     selectedTrackId,
@@ -1594,6 +1667,9 @@ export const useTracksStore = defineStore('tracks', () => {
     addTimemark,
     updateTimemarkTime,
     removeTrackTimemark,
+    adjustTimemarksForCut,
+    adjustTimemarksForDelete,
+    adjustTimemarksForInsert,
     createImportingTrack,
     updateImportWaveform,
     finalizeImportWaveform,
