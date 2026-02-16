@@ -138,6 +138,7 @@ export const usePlaybackStore = defineStore('playback', () => {
       duration: t.duration,
       volume: t.volume,
       muted: false, // mute handled via playback_set_track_muted
+      volume_envelope: t.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null,
     }));
 
     await invoke('playback_set_tracks', { tracks: trackConfigs });
@@ -521,6 +522,27 @@ export const usePlaybackStore = defineStore('playback', () => {
         const ov = oldVols.find(o => o.id === nv.id);
         if (ov && ov.volume !== nv.volume) {
           await invoke('playback_set_track_volume', { trackId: nv.id, volume: nv.volume });
+        }
+      }
+    },
+    { deep: true }
+  );
+
+  // Watch for volume envelope changes during playback — sync to Rust engine live
+  watch(
+    () => tracksStore.tracks.map(t => ({
+      id: t.id,
+      env: t.volumeEnvelope ? t.volumeEnvelope.map(p => `${p.time}:${p.value}`).join(',') : '',
+    })),
+    async (newEnvs, oldEnvs) => {
+      if (!isPlaying.value || !oldEnvs) return;
+      for (let i = 0; i < newEnvs.length; i++) {
+        const ne = newEnvs[i];
+        const oe = oldEnvs.find(o => o.id === ne.id);
+        if (oe && oe.env !== ne.env) {
+          const track = tracksStore.tracks.find(t => t.id === ne.id);
+          const envelope = track?.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null;
+          await invoke('playback_set_track_envelope', { trackId: ne.id, envelope });
         }
       }
     },

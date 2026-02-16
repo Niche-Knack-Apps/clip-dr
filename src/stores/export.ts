@@ -9,7 +9,7 @@ import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
 import { listen } from '@tauri-apps/api/event';
-import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip } from '@/shared/types';
+import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip, VolumeAutomationPoint } from '@/shared/types';
 
 const FORMAT_LABELS: Record<string, string> = {
   mp3: 'MP3 Audio',
@@ -163,6 +163,7 @@ export const useExportStore = defineStore('export', () => {
       track_start: t.trackStart,
       duration: t.duration,
       volume: t.volume,
+      volume_envelope: t.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })),
     }));
 
     // Timeline range: from 0 to the end of the last track
@@ -525,6 +526,8 @@ export const useExportStore = defineStore('export', () => {
       clipStart: number;
       duration: number;
       volume: number;
+      trackStart: number;
+      volumeEnvelope?: VolumeAutomationPoint[];
     }> = [];
 
     for (const track of tracks) {
@@ -539,6 +542,8 @@ export const useExportStore = defineStore('export', () => {
           clipStart: clip.clipStart,
           duration: clip.duration,
           volume: track.volume,
+          trackStart: track.trackStart,
+          volumeEnvelope: track.volumeEnvelope,
         });
       }
     }
@@ -552,13 +557,23 @@ export const useExportStore = defineStore('export', () => {
 
     for (const clip of allClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+      // Determine if we need per-sample envelope evaluation
+      const hasEnvelope = clip.volumeEnvelope && clip.volumeEnvelope.length > 0;
+
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = mixedBuffer.getChannelData(ch);
         const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
         const inputData = clip.buffer.getChannelData(inputCh);
         for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
           if (startSample + i >= 0) {
-            outputData[startSample + i] += inputData[i] * clip.volume;
+            let vol = clip.volume;
+            if (hasEnvelope) {
+              // Compute track-relative time for this sample
+              const timelineTime = timelineStart + (startSample + i) / sampleRate;
+              const trackRelTime = timelineTime - clip.trackStart;
+              vol = tracksStore.interpolateEnvelope(clip.volumeEnvelope!, clip.volume, trackRelTime);
+            }
+            outputData[startSample + i] += inputData[i] * vol;
           }
         }
       }

@@ -12,7 +12,7 @@ use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm};
 use serde::Deserialize;
 use tauri::Emitter;
 
-use super::playback::{PcmData, load_wav_mmap, load_compressed};
+use super::playback::{PcmData, AutomationPoint, load_wav_mmap, load_compressed};
 
 #[tauri::command]
 pub async fn export_audio_region(
@@ -325,6 +325,8 @@ pub struct ExportEDLTrack {
     pub track_start: f64,  // timeline offset in seconds
     pub duration: f64,
     pub volume: f32,
+    #[serde(default)]
+    pub volume_envelope: Option<Vec<AutomationPoint>>,
 }
 
 /// Loaded audio source for EDL mixing
@@ -332,6 +334,7 @@ struct EdlSource {
     track_start: f64,
     duration: f64,
     volume: f32,
+    volume_envelope: Option<Vec<AutomationPoint>>,
     pcm: PcmData,
     sample_rate: u32,
     channels: u16,
@@ -363,6 +366,7 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
             track_start: track.track_start,
             duration: track.duration,
             volume: track.volume,
+            volume_envelope: track.volume_envelope.clone(),
             pcm,
             sample_rate,
             channels,
@@ -402,11 +406,20 @@ fn mix_chunk(
         let src_rate = src.sample_rate as f64;
         let src_ch = src.channels as usize;
         let samples = src.pcm.samples();
+        let mut env_idx: usize = 0;
 
         for i in 0..frame_count {
             let t = timeline_start + (start_frame + i) as f64 / output_rate;
             let rel_t = t - src.track_start;
             if rel_t < 0.0 || rel_t >= src.duration { continue; }
+
+            // Evaluate volume: use envelope if present, otherwise flat volume
+            let vol = match &src.volume_envelope {
+                Some(env) if !env.is_empty() => {
+                    super::playback::eval_envelope(env, rel_t, src.volume, &mut env_idx)
+                }
+                _ => src.volume,
+            };
 
             let src_frame = (rel_t * src_rate) as usize;
             let interleaved_idx = src_frame * src_ch;
@@ -415,15 +428,15 @@ fn mix_chunk(
             let out_base = i * output_channels;
 
             if src_ch == 1 {
-                let s = samples[interleaved_idx] * src.volume;
+                let s = samples[interleaved_idx] * vol;
                 mix_buf[out_base] += s;
                 if output_channels >= 2 {
                     mix_buf[out_base + 1] += s;
                 }
             } else {
-                mix_buf[out_base] += samples[interleaved_idx] * src.volume;
+                mix_buf[out_base] += samples[interleaved_idx] * vol;
                 if output_channels >= 2 && interleaved_idx + 1 < samples.len() {
-                    mix_buf[out_base + 1] += samples[interleaved_idx + 1] * src.volume;
+                    mix_buf[out_base + 1] += samples[interleaved_idx + 1] * vol;
                 }
             }
         }

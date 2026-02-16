@@ -89,6 +89,7 @@ fn main() {
             playback::playback_set_speed,
             playback::playback_set_volume,
             playback::playback_set_track_volume,
+            playback::playback_set_track_envelope,
             playback::playback_set_track_muted,
             playback::playback_set_loop,
             playback::playback_get_position,

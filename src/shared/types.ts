@@ -389,5 +389,6 @@ export interface ExportEDLTrack {
   track_start: number;   // timeline offset in seconds
   duration: number;
   volume: number;
+  volume_envelope?: Array<{ time: number; value: number }>;
 }
 

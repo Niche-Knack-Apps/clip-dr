@@ -17,6 +17,12 @@ use crate::services::path_service;
 // ── Types ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationPoint {
+    pub time: f64,   // track-relative seconds
+    pub value: f32,  // linear gain
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackTrackConfig {
     pub track_id: String,
     pub source_path: String,
@@ -24,6 +30,8 @@ pub struct PlaybackTrackConfig {
     pub duration: f64,
     pub volume: f32,
     pub muted: bool,
+    #[serde(default)]
+    pub volume_envelope: Option<Vec<AutomationPoint>>,
 }
 
 /// Per-track audio source — either an mmap'd WAV or decoded PCM in memory
@@ -263,10 +271,40 @@ struct EngineInner {
     master_volume: f32,
     track_volumes: HashMap<String, f32>,
     track_muted: HashMap<String, bool>,
+    /// Per-track volume automation envelopes (indexed by track order)
+    track_envelopes: Vec<Option<Vec<AutomationPoint>>>,
+    /// Per-track walking index for sequential envelope evaluation
+    envelope_indices: Vec<usize>,
     loop_enabled: bool,
     loop_start: f64,
     loop_end: f64,
     stream_started: bool,
+}
+
+/// Evaluate a volume envelope at a given time using a walking-pointer optimization.
+/// The `last_idx` is advanced forward (not reset) since audio samples are sequential.
+pub(crate) fn eval_envelope(envelope: &[AutomationPoint], time: f64, fallback: f32, last_idx: &mut usize) -> f32 {
+    if envelope.is_empty() { return fallback; }
+    if time <= envelope[0].time { return envelope[0].value; }
+    if time >= envelope[envelope.len() - 1].time { return envelope[envelope.len() - 1].value; }
+
+    // Advance walking pointer forward to find the right segment
+    while *last_idx + 1 < envelope.len() && envelope[*last_idx + 1].time <= time {
+        *last_idx += 1;
+    }
+    // Handle reverse playback: if time is before current index, walk backward
+    while *last_idx > 0 && envelope[*last_idx].time > time {
+        *last_idx -= 1;
+    }
+
+    if *last_idx + 1 >= envelope.len() { return envelope[envelope.len() - 1].value; }
+
+    let a = &envelope[*last_idx];
+    let b = &envelope[*last_idx + 1];
+    let dt = b.time - a.time;
+    if dt <= 0.0 { return a.value; }
+    let t = ((time - a.time) / dt) as f32;
+    a.value + (b.value - a.value) * t
 }
 
 impl PlaybackEngine {
@@ -280,6 +318,8 @@ impl PlaybackEngine {
                 master_volume: 1.0,
                 track_volumes: HashMap::new(),
                 track_muted: HashMap::new(),
+                track_envelopes: Vec::new(),
+                envelope_indices: Vec::new(),
                 loop_enabled: false,
                 loop_start: 0.0,
                 loop_end: 0.0,
@@ -925,7 +965,7 @@ fn build_output_stream(
                 return;
             }
 
-            let Ok(inner) = engine_ref.lock() else {
+            let Ok(mut inner) = engine_ref.lock() else {
                 for s in data.iter_mut() { *s = 0.0; }
                 return;
             };
@@ -954,16 +994,27 @@ fn build_output_stream(
                 // Mix all active tracks at this timeline position
                 let mut mix = [0.0f32; 2]; // stereo output
 
-                for track_src in &inner.tracks {
+                // Split borrows: take envelope_indices as a separate mutable slice
+                // so we can iterate over tracks immutably while updating indices
+                let EngineInner {
+                    ref tracks,
+                    ref track_envelopes,
+                    ref mut envelope_indices,
+                    ref track_muted,
+                    ref track_volumes,
+                    ..
+                } = *inner;
+
+                for (track_idx, track_src) in tracks.iter().enumerate() {
                     // Check per-track mute
                     if track_src.config.muted {
                         continue;
                     }
-                    if let Some(&muted) = inner.track_muted.get(&track_src.config.track_id) {
+                    if let Some(&muted) = track_muted.get(&track_src.config.track_id) {
                         if muted { continue; }
                     }
 
-                    let track_vol = inner.track_volumes
+                    let base_vol = track_volumes
                         .get(&track_src.config.track_id)
                         .copied()
                         .unwrap_or(track_src.config.volume);
@@ -973,6 +1024,18 @@ fn build_output_stream(
                     if rel_pos < 0.0 || rel_pos >= track_src.config.duration {
                         continue;
                     }
+
+                    // Evaluate volume: use automation envelope if available, else base volume
+                    let track_vol = if let Some(Some(env)) = track_envelopes.get(track_idx) {
+                        if !env.is_empty() {
+                            let idx_ref = envelope_indices.get_mut(track_idx).unwrap();
+                            eval_envelope(env, rel_pos, base_vol, idx_ref)
+                        } else {
+                            base_vol
+                        }
+                    } else {
+                        base_vol
+                    };
 
                     // Convert to sample position in the source
                     let src_rate = track_src.sample_rate as f64;
@@ -1069,6 +1132,11 @@ pub async fn playback_set_tracks(
 
     let set_start = std::time::Instant::now();
 
+    // Extract envelopes before moving configs into the blocking thread
+    let envelopes: Vec<Option<Vec<AutomationPoint>>> = tracks.iter()
+        .map(|t| t.volume_envelope.clone())
+        .collect();
+
     // Load tracks on a blocking thread so streaming buffer fill doesn't block IPC
     let loaded = tokio::task::spawn_blocking(move || {
         log::info!("Setting {} playback tracks", tracks.len());
@@ -1096,6 +1164,10 @@ pub async fn playback_set_tracks(
 
     let count = loaded.len();
     let mut inner = inner_arc.lock().map_err(|e| e.to_string())?;
+
+    // Store volume envelopes separately and reset walking indices
+    inner.track_envelopes = envelopes;
+    inner.envelope_indices = vec![0; count];
     inner.tracks = loaded;
 
     // Build output stream if not already running
@@ -1238,6 +1310,23 @@ pub async fn prepare_audio_cache(
             Err(e) => log::error!("[Playback] Audio cache failed for track {}: {}", tid, e),
         }
     });
+    Ok(())
+}
+
+/// Update a track's volume automation envelope during playback.
+#[tauri::command]
+pub fn playback_set_track_envelope(
+    track_id: String,
+    envelope: Option<Vec<AutomationPoint>>,
+    state: tauri::State<'_, PlaybackEngine>,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if let Some(idx) = inner.tracks.iter().position(|t| t.config.track_id == track_id) {
+        if idx < inner.track_envelopes.len() {
+            inner.track_envelopes[idx] = envelope;
+            inner.envelope_indices[idx] = 0; // reset walking pointer
+        }
+    }
     Ok(())
 }
 
