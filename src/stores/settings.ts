@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import { appLocalDataDir } from '@tauri-apps/api/path';
 import type { Settings, ASRModel, RecordingSource, RecordingLargeFileFormat, Mp3Bitrate, ExportFormat, ExportProfile } from '@/shared/types';
 import { DEFAULT_SETTINGS, DEFAULT_EXPORT_PROFILES } from '@/shared/constants';
@@ -9,6 +10,15 @@ const STORAGE_KEY = 'clip-doctor-settings';
 
 export const useSettingsStore = defineStore('settings', () => {
   const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
+  const ffmpegAvailable = ref(true); // optimistic default
+
+  async function checkFfmpeg(): Promise<void> {
+    try {
+      ffmpegAvailable.value = await invoke<boolean>('check_ffmpeg_available');
+    } catch {
+      ffmpegAvailable.value = false;
+    }
+  }
 
   function loadSettings(): void {
     try {
@@ -165,7 +175,12 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function getExportProfiles(): ExportProfile[] {
-    return settings.value.exportProfiles || DEFAULT_EXPORT_PROFILES;
+    let profiles = settings.value.exportProfiles || DEFAULT_EXPORT_PROFILES;
+    // Hide FLAC and OGG profiles if ffmpeg is not available
+    if (!ffmpegAvailable.value) {
+      profiles = profiles.filter(p => p.format !== 'flac' && p.format !== 'ogg');
+    }
+    return profiles;
   }
 
   function getFavoriteProfile(): ExportProfile | undefined {
@@ -276,9 +291,11 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   loadSettings();
+  checkFfmpeg();
 
   return {
     settings,
+    ffmpegAvailable,
     setLoopByDefault,
     setAutoNavigateAfterWords,
     setWaveformColor,

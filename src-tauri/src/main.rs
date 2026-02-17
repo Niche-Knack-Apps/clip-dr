@@ -50,6 +50,8 @@ fn main() {
             transcribe::download_model,
             export::export_audio_region,
             export::export_audio_mp3,
+            export::export_audio_flac,
+            export::export_audio_ogg,
             export::export_edl,
             vad::detect_speech_segments,
             vad::export_without_silence,
@@ -96,6 +98,7 @@ fn main() {
             playback::playback_get_meter_levels,
             playback::prepare_audio_cache,
             playback::playback_swap_to_cache,
+            export::check_ffmpeg_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

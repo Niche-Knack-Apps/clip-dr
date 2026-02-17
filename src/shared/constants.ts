@@ -142,6 +142,8 @@ export const DEFAULT_EXPORT_PROFILES: ExportProfile[] = [
   { id: 'mp3-192', name: 'MP3 Standard', format: 'mp3', mp3Bitrate: 192, isDefault: true, isFavorite: true },
   { id: 'mp3-320', name: 'MP3 High Quality', format: 'mp3', mp3Bitrate: 320, isDefault: true },
   { id: 'wav', name: 'WAV Lossless', format: 'wav', isDefault: true },
+  { id: 'flac', name: 'FLAC Lossless', format: 'flac', isDefault: true },
+  { id: 'ogg-q5', name: 'OGG Standard', format: 'ogg', oggQuality: 0.5, isDefault: true },
 ];
 
 export const DEFAULT_CLEANING_OPTIONS: CleaningOptions = {

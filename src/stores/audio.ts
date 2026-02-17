@@ -288,6 +288,24 @@ export const useAudioStore = defineStore('audio', () => {
         // Update selection to cover full timeline with actual buffer duration
         selectionStore.setSelection(0, tracksStore.timelineDuration);
         console.log(`[Audio] [${ms()}] Buffer set — playback enabled, playhead at ${trackStart.toFixed(1)}s`);
+
+        // Proactively cache compressed formats for smooth Rust mmap playback
+        const isCompressed = metadata.format !== 'wav' && metadata.format !== 'rf64';
+        if (isCompressed) {
+          if (!unlistenCacheReady) {
+            unlistenCacheReady = await listen<{ trackId: string; cachedPath: string }>('audio-cache-ready', (event) => {
+              if (event.payload.trackId !== trackId) return;
+              console.log(`[Audio] [${ms()}] Cache ready for ${trackId}: ${event.payload.cachedPath}`);
+              tracksStore.setCachedAudioPath(trackId, event.payload.cachedPath);
+              invoke('playback_swap_to_cache', { trackId, cachedPath: event.payload.cachedPath })
+                .catch(e => console.warn('[Audio] swap_to_cache:', e));
+              unlistenCacheProgress?.();
+              unlistenCacheReady?.();
+            });
+          }
+          invoke('prepare_audio_cache', { path, trackId })
+            .catch(e => console.error('[Audio] prepare_audio_cache failed:', e));
+        }
       } else if (isLargeFile) {
         // Large file: playback through Rust streaming decode — position playhead
         const { usePlaybackStore } = await import('./playback');

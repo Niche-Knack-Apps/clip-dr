@@ -1,6 +1,6 @@
 [package]
 name = "clip-dr"
-version = "0.11.0"
+version = "0.11.1"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
-symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "ogg", "wav"] }
+symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "ogg", "vorbis", "wav"] }
 rubato = "0.14"
 hound = "3.5"
 uuid = { version = "1", features = ["v4"] }
@@ -32,6 +32,9 @@ realfft = "3.4"
 
 # MP3 encoding
 mp3lame-encoder = "0.1"
+
+# OGG Vorbis encoding (vendored libvorbis/libogg)
+vorbis_rs = "0.5"
 
 # Peak cache + WAV mmap
 memmap2 = "0.9"

@@ -247,6 +247,7 @@ export interface ExportProfile {
   name: string;
   format: ExportFormat;
   mp3Bitrate?: Mp3Bitrate;
+  oggQuality?: number;     // 0.0–1.0 for OGG Vorbis quality
   isDefault?: boolean;     // built-in, not deletable
   isFavorite?: boolean;    // starred = used for Quick Re-Export
 }
@@ -376,10 +377,11 @@ export interface SilenceRegion {
 export interface ExportEDL {
   tracks: ExportEDLTrack[];
   output_path: string;
-  format: string;        // "wav" | "mp3"
+  format: string;        // "wav" | "mp3" | "flac" | "ogg"
   sample_rate: number;
   channels: number;
   mp3_bitrate?: number;
+  ogg_quality?: number;  // 0.0–1.0 for OGG Vorbis quality
   start_time: number;
   end_time: number;
 }

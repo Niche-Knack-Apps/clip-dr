@@ -590,6 +590,12 @@ fn check_decode_cache(path: &str) -> Result<PathBuf, String> {
 
     if cache_path.exists() {
         if let (Ok(src_meta), Ok(cache_meta)) = (fs::metadata(src_path), fs::metadata(&cache_path)) {
+            // Reject empty/corrupt cache files (WAV header is ~44-68 bytes with no audio data)
+            if cache_meta.len() < 1024 {
+                log::warn!("Decode cache too small ({}B), removing stale entry: {:?}", cache_meta.len(), cache_path);
+                let _ = fs::remove_file(&cache_path);
+                return Err("Stale cache removed".to_string());
+            }
             if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
                 if cache_mtime >= src_mtime {
                     return Ok(cache_path);
@@ -762,6 +768,7 @@ fn start_streaming_decode(
 
                 let spec = *decoded.spec();
                 let num_frames = decoded.frames();
+                if num_frames == 0 { continue; } // Skip empty packets (e.g. Vorbis headers)
                 let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
                 sample_buf.copy_interleaved_ref(decoded);
 
@@ -824,7 +831,11 @@ fn decode_to_temp_wav_with_progress(
     // If cached WAV exists and is newer than source, reuse it
     if cache_path.exists() {
         if let (Ok(src_meta), Ok(cache_meta)) = (fs::metadata(src_path), fs::metadata(&cache_path)) {
-            if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
+            // Reject empty/corrupt cache files (WAV header only, no audio data)
+            if cache_meta.len() < 1024 {
+                log::warn!("Decode cache too small ({}B), removing stale entry: {:?}", cache_meta.len(), cache_path);
+                let _ = fs::remove_file(&cache_path);
+            } else if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
                 if cache_mtime >= src_mtime {
                     log::info!("Decode cache hit: {:?}", cache_path);
                     return Ok(cache_path);
@@ -904,6 +915,7 @@ fn decode_to_temp_wav_with_progress(
 
         let spec = *decoded.spec();
         let num_frames = decoded.frames();
+        if num_frames == 0 { continue; } // Skip empty packets (e.g. Vorbis headers)
         decoded_frames += num_frames as u64;
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
@@ -1361,7 +1373,15 @@ pub fn playback_seek(position: f64, state: tauri::State<'_, PlaybackEngine>) -> 
     if let Ok(inner) = state.inner.lock() {
         for track in &inner.tracks {
             if let PcmData::Stream(buf) = &track.pcm {
-                buf.seek_request.store(position.to_bits(), Ordering::Release);
+                // Convert timeline-absolute position to file-relative position
+                let rel_pos = (position - track.config.track_start).max(0.0);
+                // Skip redundant seek — avoids resetting a buffer that was just filled
+                let current_base_samples = buf.base_offset.load(Ordering::Relaxed);
+                let current_base_secs = current_base_samples as f64
+                    / (track.sample_rate as f64 * track.channels as f64);
+                if (rel_pos - current_base_secs).abs() > 0.05 {
+                    buf.seek_request.store(rel_pos.to_bits(), Ordering::Release);
+                }
             }
         }
     }

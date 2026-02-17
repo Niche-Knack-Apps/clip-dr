@@ -108,7 +108,7 @@ export const useExportStore = defineStore('export', () => {
       settingsStore.setLastExportProfileId(profile.id);
       settingsStore.setLastExportPath(outputPath);
 
-      return await doMixedExport(outputPath, format, profile.mp3Bitrate || 192);
+      return await doMixedExport(outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
       console.error('[Export] Profile export error:', e);
@@ -134,7 +134,7 @@ export const useExportStore = defineStore('export', () => {
     const { format } = normalizeAudioPath(lastPath, profile.format);
 
     try {
-      return await doMixedExport(lastPath, format, profile.mp3Bitrate || 192);
+      return await doMixedExport(lastPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
       console.error('[Export] Quick re-export error:', e);
@@ -152,7 +152,7 @@ export const useExportStore = defineStore('export', () => {
   /**
    * Build an EDL from active tracks for Rust-side streaming export.
    */
-  function buildEdl(tracks: Track[], outputPath: string, format: ExportFormat, bitrate: number): ExportEDL {
+  function buildEdl(tracks: Track[], outputPath: string, format: ExportFormat, bitrate: number, oggQuality?: number): ExportEDL {
     // Use the sample rate of the first track, or default to 44100
     const firstTrack = tracks[0];
     const sampleRate = firstTrack?.audioData.sampleRate || 44100;
@@ -172,10 +172,11 @@ export const useExportStore = defineStore('export', () => {
     return {
       tracks: edlTracks,
       output_path: outputPath,
-      format: format === 'mp3' ? 'mp3' : 'wav',
+      format: format,
       sample_rate: sampleRate,
       channels,
       mp3_bitrate: format === 'mp3' ? bitrate : undefined,
+      ogg_quality: format === 'ogg' ? (oggQuality ?? 0.4) : undefined,
       start_time: 0,
       end_time: endTime,
     };
@@ -186,7 +187,7 @@ export const useExportStore = defineStore('export', () => {
    * Uses EDL streaming export when all tracks have source paths (handles large files).
    * Falls back to JS AudioBuffer mixing for tracks without source paths.
    */
-  async function doMixedExport(outputPath: string, format: ExportFormat, bitrate: number): Promise<string | null> {
+  async function doMixedExport(outputPath: string, format: ExportFormat, bitrate: number, oggQuality?: number): Promise<string | null> {
     loading.value = true;
     error.value = null;
     progress.value = 10;
@@ -198,7 +199,7 @@ export const useExportStore = defineStore('export', () => {
 
       // Use EDL streaming export when possible (required for large files)
       if (canUseEdlExport(tracks)) {
-        const edl = buildEdl(tracks, outputPath, format, bitrate);
+        const edl = buildEdl(tracks, outputPath, format, bitrate, oggQuality);
 
         // Listen for progress events from Rust
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
@@ -242,6 +243,21 @@ export const useExportStore = defineStore('export', () => {
           startTime: 0,
           endTime: mixedBuffer.duration,
           bitrate,
+        });
+      } else if (format === 'flac') {
+        await invoke('export_audio_flac', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: mixedBuffer.duration,
+        });
+      } else if (format === 'ogg') {
+        await invoke('export_audio_ogg', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: mixedBuffer.duration,
+          quality: oggQuality ?? 0.4,
         });
       } else {
         await invoke('export_audio_region', {
@@ -305,7 +321,7 @@ export const useExportStore = defineStore('export', () => {
 
       // Use EDL path for tracks with source paths (required for large files)
       if (track.sourcePath) {
-        const edl = buildEdl([track], outputPath, format, profile.mp3Bitrate || 192);
+        const edl = buildEdl([track], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
 
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
           progress.value = Math.round(event.payload.progress * 100);
@@ -343,6 +359,21 @@ export const useExportStore = defineStore('export', () => {
           startTime: 0,
           endTime: trackBuffer.duration,
           bitrate: profile.mp3Bitrate || 192,
+        });
+      } else if (format === 'flac') {
+        await invoke('export_audio_flac', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: trackBuffer.duration,
+        });
+      } else if (format === 'ogg') {
+        await invoke('export_audio_ogg', {
+          sourcePath: tempPath,
+          outputPath,
+          startTime: 0,
+          endTime: trackBuffer.duration,
+          quality: profile.oggQuality ?? 0.4,
         });
       } else {
         await invoke('export_audio_region', {
