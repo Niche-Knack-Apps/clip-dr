@@ -344,9 +344,12 @@ export const useRecordingStore = defineStore('recording', () => {
       // Brief delay to let OS flush file writes
       await new Promise(r => setTimeout(r, 200));
 
-      // Create track(s) from the recorded audio
+      // Create track(s) from the recorded audio (fire-and-forget so dialog closes immediately)
       if (result.path) {
-        await createTrackFromRecording(result);
+        createTrackFromRecording(result).catch(e => {
+          console.error('[Recording] Background import failed:', e);
+          error.value = e instanceof Error ? e.message : String(e);
+        });
       }
 
       return result;

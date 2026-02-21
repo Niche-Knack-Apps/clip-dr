@@ -205,6 +205,9 @@ export const useAudioStore = defineStore('audio', () => {
           const assetUrl = convertFileSrc(path);
           console.log(`[Audio] [${ms()}] Phase 3 started: fetching via asset protocol`);
           const response = await fetch(assetUrl);
+          if (!response.ok) {
+            throw new Error(`Asset protocol returned HTTP ${response.status} for ${path}`);
+          }
           const contentLength = Number(response.headers.get('content-length') || 0);
           console.log(`[Audio] [${ms()}] Phase 3 response: status=${response.status}, content-length=${contentLength > 0 ? (contentLength / 1024 / 1024).toFixed(1) + 'MB' : 'unknown'}`);
 
@@ -252,9 +255,18 @@ export const useAudioStore = defineStore('audio', () => {
             console.log(`[Audio] [${ms()}] Phase 3 fetch complete: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB (non-streamed)`);
           }
 
+          if (arrayBuffer.byteLength === 0) {
+            throw new Error('Asset protocol returned empty response body');
+          }
+
           tracksStore.updateImportDecodeProgress(trackId, 0.85);
           console.log(`[Audio] [${ms()}] Phase 3 decoding audio buffer...`);
-          audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+          audioBuffer = await Promise.race([
+            ctx.decodeAudioData(arrayBuffer),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('decodeAudioData timed out after 30s')), 30_000)
+            ),
+          ]);
           tracksStore.updateImportDecodeProgress(trackId, 1.0);
           console.log(`[Audio] [${ms()}] Phase 3 complete: browser decode done (${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.numberOfChannels}ch, ${audioBuffer.sampleRate}Hz)`);
         } catch (e) {

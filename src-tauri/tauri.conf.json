@@ -26,7 +26,7 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["**"]
+          "allow": ["$HOME/**", "$APPDATA/**", "$TEMP/**", "$AUDIO/**", "$DOCUMENT/**", "$DOWNLOAD/**", "**"]
         }
       }
     }
