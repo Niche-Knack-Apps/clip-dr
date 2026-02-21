@@ -13,6 +13,39 @@ export interface WaveformRenderOptions {
   endTime?: number;
 }
 
+// Peak tile cache — shared across all useWaveform() instances
+const tileCache = new Map<string, number[]>();
+const TILE_CACHE_MAX = 256;
+let currentGeneration = 0;
+
+// LRU-aware cache access: move accessed key to end of Map iteration order
+function getCachedTile(key: string): number[] | undefined {
+  const data = tileCache.get(key);
+  if (data) {
+    tileCache.delete(key);
+    tileCache.set(key, data);
+  }
+  return data;
+}
+
+function setCachedTile(key: string, data: number[]): void {
+  // Evict oldest entries (front of Map) until under limit
+  while (tileCache.size >= TILE_CACHE_MAX) {
+    const firstKey = tileCache.keys().next().value;
+    if (firstKey !== undefined) tileCache.delete(firstKey);
+    else break;
+  }
+  tileCache.set(key, data);
+}
+
+// Quantize time range to a grid so small pan/zoom changes hit the cache
+function quantizeRange(start: number, end: number, trackDuration: number) {
+  const sliceSize = Math.max(trackDuration / 128, 0.01);
+  const qStart = Math.floor(start / sliceSize) * sliceSize;
+  const qEnd = Math.ceil(end / sliceSize) * sliceSize;
+  return { qStart, qEnd };
+}
+
 export function useWaveform() {
   const { effectiveWaveformData, effectiveDuration } = useEffectiveAudio();
   const tracksStore = useTracksStore();
@@ -21,11 +54,7 @@ export function useWaveform() {
   const waveformData = effectiveWaveformData;
   const duration = effectiveDuration;
 
-  // Peak tile cache for high-resolution waveform at deep zoom
   const tileVersion = ref(0);
-  const tileCache = new Map<string, number[]>();
-  let inFlightTileKey = ''; // dedup in-flight requests
-  const TILE_CACHE_MAX = 64; // LRU eviction limit
 
   function getBucketsForRange(
     start: number,
@@ -39,35 +68,30 @@ export function useWaveform() {
 
     const startBucket = Math.floor((start / duration.value) * totalBuckets);
     const endBucket = Math.ceil((end / duration.value) * totalBuckets);
-    const rangeBuckets = endBucket - startBucket;
 
-    // Check if peak tile can provide better detail (any track with pyramid overlapping range)
-    if (rangeBuckets < bucketCount / 2) {
-      const candidateTrack = tracksStore.tracks.find(t =>
-        t.hasPeakPyramid && t.sourcePath &&
-        t.trackStart < end && (t.trackStart + t.duration) > start
-      );
-      if (candidateTrack) {
-        // Convert timeline coordinates to track-relative, clamped to track bounds
-        const relStart = Math.max(0, start - candidateTrack.trackStart);
-        const relEnd = Math.min(candidateTrack.duration, end - candidateTrack.trackStart);
-        const cacheKey = `${candidateTrack.sourcePath}:${relStart.toFixed(3)}:${relEnd.toFixed(3)}:${bucketCount}`;
-        const cached = tileCache.get(cacheKey);
-        if (cached && cached.length >= bucketCount * 2) {
-          // Return cached tile data
-          const buckets: WaveformBucket[] = [];
-          for (let i = 0; i < bucketCount; i++) {
-            buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
-          }
-          return buckets;
-        }
+    // Always check for a candidate track with pyramid (no coarseness guard)
+    const candidateTrack = tracksStore.tracks.find(t =>
+      t.hasPeakPyramid && t.sourcePath &&
+      t.trackStart < end && (t.trackStart + t.duration) > start
+    );
+    if (candidateTrack) {
+      const relStart = Math.max(0, start - candidateTrack.trackStart);
+      const relEnd = Math.min(candidateTrack.duration, end - candidateTrack.trackStart);
+      const { qStart, qEnd } = quantizeRange(relStart, relEnd, candidateTrack.duration);
+      const cacheKey = `${candidateTrack.sourcePath}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${bucketCount}`;
 
-        // Fetch immediately with in-flight dedup (no rAF delay)
-        if (inFlightTileKey !== cacheKey) {
-          inFlightTileKey = cacheKey;
-          fetchPeakTile(candidateTrack.sourcePath!, relStart, relEnd, bucketCount, cacheKey);
+      const cached = getCachedTile(cacheKey);
+      if (cached && cached.length >= bucketCount * 2) {
+        const buckets: WaveformBucket[] = [];
+        for (let i = 0; i < bucketCount; i++) {
+          buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
         }
+        return buckets;
       }
+
+      // Fetch with generation counter — multiple fetches can be in-flight
+      const gen = ++currentGeneration;
+      fetchPeakTile(candidateTrack.sourcePath!, qStart, qEnd, bucketCount, cacheKey, gen);
     }
 
     // Fall back to existing 1000-bucket data, stretched to fill bucketCount
@@ -122,6 +146,20 @@ export function useWaveform() {
         buckets.push({ min: 0, max: 0 });
       }
     }
+
+    // If all upsampled buckets are zero, try expanding the neighborhood to find non-zero data
+    const allZero = buckets.every(b => b.min === 0 && b.max === 0);
+    if (allZero && rangeBuckets > 0) {
+      const expandedStart = Math.max(0, clampedStart - 2);
+      const expandedEnd = Math.min(totalBuckets, clampedEnd + 2);
+      for (let j = expandedStart; j < expandedEnd; j++) {
+        const idx = j * 2;
+        if (idx < data.length - 1 && (data[idx] !== 0 || data[idx + 1] !== 0)) {
+          return buckets.map(() => ({ min: data[idx], max: data[idx + 1] }));
+        }
+      }
+    }
+
     return buckets;
   }
 
@@ -131,6 +169,7 @@ export function useWaveform() {
     endTime: number,
     bucketCount: number,
     cacheKey: string,
+    generation: number,
   ): Promise<void> {
     try {
       const tileData = await invoke<number[]>('get_peak_tile', {
@@ -140,18 +179,14 @@ export function useWaveform() {
         bucketCount,
       });
 
-      // LRU eviction
-      if (tileCache.size >= TILE_CACHE_MAX) {
-        const firstKey = tileCache.keys().next().value;
-        if (firstKey !== undefined) tileCache.delete(firstKey);
-      }
+      setCachedTile(cacheKey, tileData);
 
-      tileCache.set(cacheKey, tileData);
-      tileVersion.value++; // Trigger re-render
+      // Only trigger re-render if this generation is still current
+      if (generation === currentGeneration) {
+        tileVersion.value++;
+      }
     } catch (e) {
       console.warn('[Waveform] Peak tile fetch failed:', e);
-    } finally {
-      if (inFlightTileKey === cacheKey) inFlightTileKey = '';
     }
   }
 
