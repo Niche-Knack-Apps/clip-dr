@@ -27,10 +27,6 @@ export function useWaveform() {
   let inFlightTileKey = ''; // dedup in-flight requests
   const TILE_CACHE_MAX = 64; // LRU eviction limit
 
-  // Last successfully rendered tile — shown while new tiles load to prevent flashing
-  let lastTileBuckets: WaveformBucket[] | null = null;
-  let lastTileInHighRes = false; // whether the last render used tile data
-
   function getBucketsForRange(
     start: number,
     end: number,
@@ -58,13 +54,11 @@ export function useWaveform() {
         const cacheKey = `${candidateTrack.sourcePath}:${relStart.toFixed(3)}:${relEnd.toFixed(3)}:${bucketCount}`;
         const cached = tileCache.get(cacheKey);
         if (cached && cached.length >= bucketCount * 2) {
-          // Return cached tile data and remember it as last good tile
+          // Return cached tile data
           const buckets: WaveformBucket[] = [];
           for (let i = 0; i < bucketCount; i++) {
             buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
           }
-          lastTileBuckets = buckets;
-          lastTileInHighRes = true;
           return buckets;
         }
 
@@ -73,54 +67,61 @@ export function useWaveform() {
           inFlightTileKey = cacheKey;
           fetchPeakTile(candidateTrack.sourcePath!, relStart, relEnd, bucketCount, cacheKey);
         }
-
-        // While tile loads, keep showing last tile data to prevent flashing
-        if (lastTileBuckets && lastTileInHighRes) {
-          return lastTileBuckets;
-        }
       }
-    } else {
-      // No longer in tile territory — clear last tile so we don't re-use stale data
-      lastTileInHighRes = false;
-      lastTileBuckets = null;
     }
 
-    // Fall back to existing 1000-bucket data
-    if (rangeBuckets <= bucketCount) {
+    // Fall back to existing 1000-bucket data, stretched to fill bucketCount
+    return stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
+  }
+
+  // Stretch/resample available 1000-bucket data to fill the requested bucketCount.
+  // When deeply zoomed, rangeBuckets might be 1-3 but canvas needs ~1200 buckets.
+  // Without stretching, the waveform would disappear at deep zoom.
+  function stretchFallbackBuckets(
+    data: number[],
+    startBucket: number,
+    endBucket: number,
+    totalBuckets: number,
+    bucketCount: number,
+  ): WaveformBucket[] {
+    const clampedStart = Math.max(0, Math.min(startBucket, totalBuckets - 1));
+    const clampedEnd = Math.max(clampedStart + 1, Math.min(endBucket, totalBuckets));
+    const rangeBuckets = clampedEnd - clampedStart;
+
+    if (rangeBuckets >= bucketCount) {
+      // Downsample: more source buckets than output buckets
+      const samplesPerBucket = rangeBuckets / bucketCount;
       const buckets: WaveformBucket[] = [];
-      for (let i = startBucket; i < endBucket; i++) {
-        const idx = i * 2;
-        if (idx < data.length - 1) {
-          buckets.push({ min: data[idx], max: data[idx + 1] });
+      for (let i = 0; i < bucketCount; i++) {
+        const bStart = clampedStart + Math.floor(i * samplesPerBucket);
+        const bEnd = clampedStart + Math.floor((i + 1) * samplesPerBucket);
+        let min = Infinity;
+        let max = -Infinity;
+        for (let j = bStart; j < bEnd; j++) {
+          const idx = j * 2;
+          if (idx < data.length - 1) {
+            min = Math.min(min, data[idx]);
+            max = Math.max(max, data[idx + 1]);
+          }
         }
+        if (min === Infinity) min = 0;
+        if (max === -Infinity) max = 0;
+        buckets.push({ min, max });
       }
       return buckets;
     }
 
-    const samplesPerBucket = rangeBuckets / bucketCount;
+    // Upsample: fewer source buckets than output — stretch to fill canvas
     const buckets: WaveformBucket[] = [];
-
     for (let i = 0; i < bucketCount; i++) {
-      const bucketStart = startBucket + Math.floor(i * samplesPerBucket);
-      const bucketEnd = startBucket + Math.floor((i + 1) * samplesPerBucket);
-
-      let min = Infinity;
-      let max = -Infinity;
-
-      for (let j = bucketStart; j < bucketEnd; j++) {
-        const idx = j * 2;
-        if (idx < data.length - 1) {
-          min = Math.min(min, data[idx]);
-          max = Math.max(max, data[idx + 1]);
-        }
+      const srcIdx = clampedStart + Math.floor((i / bucketCount) * rangeBuckets);
+      const idx = Math.min(srcIdx, totalBuckets - 1) * 2;
+      if (idx < data.length - 1) {
+        buckets.push({ min: data[idx], max: data[idx + 1] });
+      } else {
+        buckets.push({ min: 0, max: 0 });
       }
-
-      if (min === Infinity) min = 0;
-      if (max === -Infinity) max = 0;
-
-      buckets.push({ min, max });
     }
-
     return buckets;
   }
 
