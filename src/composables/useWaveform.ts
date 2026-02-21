@@ -24,9 +24,8 @@ export function useWaveform() {
   // Peak tile cache for high-resolution waveform at deep zoom
   const tileVersion = ref(0);
   const tileCache = new Map<string, number[]>();
-  let pendingTileKey = '';
-  let tileDebounceId: number | null = null;
-  const TILE_CACHE_MAX = 16; // LRU eviction limit
+  let inFlightTileKey = ''; // dedup in-flight requests
+  const TILE_CACHE_MAX = 64; // LRU eviction limit
 
   function getBucketsForRange(
     start: number,
@@ -42,11 +41,17 @@ export function useWaveform() {
     const endBucket = Math.ceil((end / duration.value) * totalBuckets);
     const rangeBuckets = endBucket - startBucket;
 
-    // Check if peak tile can provide better detail (single-track with pyramid)
+    // Check if peak tile can provide better detail (any track with pyramid covering range)
     if (rangeBuckets < bucketCount / 2) {
-      const tracks = tracksStore.tracks;
-      if (tracks.length === 1 && tracks[0].hasPeakPyramid && tracks[0].sourcePath) {
-        const cacheKey = `${start.toFixed(3)}:${end.toFixed(3)}:${bucketCount}`;
+      const candidateTrack = tracksStore.tracks.find(t =>
+        t.hasPeakPyramid && t.sourcePath &&
+        t.trackStart <= start && (t.trackStart + t.duration) >= end
+      );
+      if (candidateTrack) {
+        // Convert timeline coordinates to track-relative coordinates
+        const relStart = start - candidateTrack.trackStart;
+        const relEnd = end - candidateTrack.trackStart;
+        const cacheKey = `${candidateTrack.sourcePath}:${relStart.toFixed(3)}:${relEnd.toFixed(3)}:${bucketCount}`;
         const cached = tileCache.get(cacheKey);
         if (cached && cached.length >= bucketCount * 2) {
           // Return cached tile data
@@ -57,14 +62,10 @@ export function useWaveform() {
           return buckets;
         }
 
-        // Schedule async tile fetch (debounced)
-        if (pendingTileKey !== cacheKey) {
-          pendingTileKey = cacheKey;
-          if (tileDebounceId !== null) cancelAnimationFrame(tileDebounceId);
-          tileDebounceId = requestAnimationFrame(() => {
-            tileDebounceId = null;
-            fetchPeakTile(tracks[0].sourcePath!, start, end, bucketCount, cacheKey);
-          });
+        // Fetch immediately with in-flight dedup (no rAF delay)
+        if (inFlightTileKey !== cacheKey) {
+          inFlightTileKey = cacheKey;
+          fetchPeakTile(candidateTrack.sourcePath!, relStart, relEnd, bucketCount, cacheKey);
         }
       }
     }
@@ -133,6 +134,8 @@ export function useWaveform() {
       tileVersion.value++; // Trigger re-render
     } catch (e) {
       // Peak tile not available — silently fall back to 1000-bucket data
+    } finally {
+      if (inFlightTileKey === cacheKey) inFlightTileKey = '';
     }
   }
 

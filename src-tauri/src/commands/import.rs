@@ -766,7 +766,7 @@ fn extract_bucket_range(
 const PYRAMID_MAGIC: &[u8; 4] = b"CLPP";
 const PYRAMID_VERSION: u8 = 2;
 const PYRAMID_LEVELS: &[usize] = &[256, 1024, 4096, 16384, 65536];
-const PYRAMID_MIN_DURATION: f64 = 300.0; // only build for files > 5 minutes
+const PYRAMID_MIN_DURATION: f64 = 10.0; // build for files > 10 seconds
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
