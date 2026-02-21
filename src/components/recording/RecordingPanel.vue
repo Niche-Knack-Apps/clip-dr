@@ -37,6 +37,9 @@ function handleTriggerPhrasesChange() {
   recordingStore.setTriggerPhrases(phrases);
 }
 
+// Closing flag to prevent State 1 flash between stop and parent unmount
+const closing = ref(false);
+
 // Hold-to-stop state
 const holdProgress = ref(0);
 let holdTimer: number | null = null;
@@ -92,6 +95,7 @@ function startHold() {
 
   holdTimer = window.setTimeout(async () => {
     holdProgress.value = 1;
+    closing.value = true;
     await recordingStore.stopRecording();
     emit('close');
     cancelHold();
@@ -115,6 +119,7 @@ async function handleStop() {
     // Hold-to-stop is handled by startHold/cancelHold
     return;
   }
+  closing.value = true;
   await recordingStore.stopRecording();
   emit('close');
 }
@@ -130,7 +135,7 @@ async function handleCancel() {
   <div class="p-4 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[320px] max-h-[calc(100vh-6rem)] overflow-y-auto">
 
     <!-- ========== STATE 1: Source Selection (not recording) ========== -->
-    <template v-if="!recordingStore.isRecording && !recordingStore.isPreparing">
+    <template v-if="!recordingStore.isRecording && !recordingStore.isPreparing && !closing">
       <h3 class="text-sm font-medium text-gray-200 mb-3">Record Audio</h3>
 
       <!-- Two large source cards -->

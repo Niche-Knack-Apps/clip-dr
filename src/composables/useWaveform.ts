@@ -41,16 +41,16 @@ export function useWaveform() {
     const endBucket = Math.ceil((end / duration.value) * totalBuckets);
     const rangeBuckets = endBucket - startBucket;
 
-    // Check if peak tile can provide better detail (any track with pyramid covering range)
+    // Check if peak tile can provide better detail (any track with pyramid overlapping range)
     if (rangeBuckets < bucketCount / 2) {
       const candidateTrack = tracksStore.tracks.find(t =>
         t.hasPeakPyramid && t.sourcePath &&
-        t.trackStart <= start && (t.trackStart + t.duration) >= end
+        t.trackStart < end && (t.trackStart + t.duration) > start
       );
       if (candidateTrack) {
-        // Convert timeline coordinates to track-relative coordinates
-        const relStart = start - candidateTrack.trackStart;
-        const relEnd = end - candidateTrack.trackStart;
+        // Convert timeline coordinates to track-relative, clamped to track bounds
+        const relStart = Math.max(0, start - candidateTrack.trackStart);
+        const relEnd = Math.min(candidateTrack.duration, end - candidateTrack.trackStart);
         const cacheKey = `${candidateTrack.sourcePath}:${relStart.toFixed(3)}:${relEnd.toFixed(3)}:${bucketCount}`;
         const cached = tileCache.get(cacheKey);
         if (cached && cached.length >= bucketCount * 2) {
@@ -133,7 +133,7 @@ export function useWaveform() {
       tileCache.set(cacheKey, tileData);
       tileVersion.value++; // Trigger re-render
     } catch (e) {
-      // Peak tile not available — silently fall back to 1000-bucket data
+      console.warn('[Waveform] Peak tile fetch failed:', e);
     } finally {
       if (inFlightTileKey === cacheKey) inFlightTileKey = '';
     }
