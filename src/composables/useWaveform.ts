@@ -27,6 +27,10 @@ export function useWaveform() {
   let inFlightTileKey = ''; // dedup in-flight requests
   const TILE_CACHE_MAX = 64; // LRU eviction limit
 
+  // Last successfully rendered tile — shown while new tiles load to prevent flashing
+  let lastTileBuckets: WaveformBucket[] | null = null;
+  let lastTileInHighRes = false; // whether the last render used tile data
+
   function getBucketsForRange(
     start: number,
     end: number,
@@ -54,11 +58,13 @@ export function useWaveform() {
         const cacheKey = `${candidateTrack.sourcePath}:${relStart.toFixed(3)}:${relEnd.toFixed(3)}:${bucketCount}`;
         const cached = tileCache.get(cacheKey);
         if (cached && cached.length >= bucketCount * 2) {
-          // Return cached tile data
+          // Return cached tile data and remember it as last good tile
           const buckets: WaveformBucket[] = [];
           for (let i = 0; i < bucketCount; i++) {
             buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
           }
+          lastTileBuckets = buckets;
+          lastTileInHighRes = true;
           return buckets;
         }
 
@@ -67,7 +73,16 @@ export function useWaveform() {
           inFlightTileKey = cacheKey;
           fetchPeakTile(candidateTrack.sourcePath!, relStart, relEnd, bucketCount, cacheKey);
         }
+
+        // While tile loads, keep showing last tile data to prevent flashing
+        if (lastTileBuckets && lastTileInHighRes) {
+          return lastTileBuckets;
+        }
       }
+    } else {
+      // No longer in tile territory — clear last tile so we don't re-use stale data
+      lastTileInHighRes = false;
+      lastTileBuckets = null;
     }
 
     // Fall back to existing 1000-bucket data
