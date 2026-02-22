@@ -45,6 +45,20 @@ function render() {
 
   const buckets = getBucketsForRange(props.startTime, props.endTime, width.value);
 
+  // Debug: log when render produces empty/zero results
+  if (buckets.length === 0 || buckets.every(b => b.min === 0 && b.max === 0)) {
+    console.warn('[WaveformCanvas] Empty render:', {
+      startTime: props.startTime,
+      endTime: props.endTime,
+      width: width.value,
+      bucketCount: buckets.length,
+      dataLen: waveformData.value.length,
+      duration: duration.value,
+      waveformVersion: waveformVersion.value,
+      tileVersion: tileVersion.value,
+    });
+  }
+
   renderWaveform(ctx, buckets, {
     width: width.value,
     height: props.height,

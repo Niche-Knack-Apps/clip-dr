@@ -66,9 +66,16 @@ export function useWaveform() {
 
     const data = waveformData.value;
     const totalBuckets = data.length / 2;
+    const dur = duration.value;
 
-    const startBucket = Math.floor((start / duration.value) * totalBuckets);
-    const endBucket = Math.ceil((end / duration.value) * totalBuckets);
+    // Guard against invalid duration (NaN, 0, Infinity)
+    if (!dur || !isFinite(dur) || dur <= 0) {
+      console.warn('[Waveform] Invalid duration:', dur, 'dataLen:', data.length);
+      return [];
+    }
+
+    const startBucket = Math.floor((start / dur) * totalBuckets);
+    const endBucket = Math.ceil((end / dur) * totalBuckets);
     const rangeBuckets = endBucket - startBucket;
 
     // Use peak tiles when overview data is insufficient (< 2x the output resolution)
@@ -103,7 +110,11 @@ export function useWaveform() {
     }
 
     // Fall back to existing 1000-bucket data, stretched to fill bucketCount
-    return stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
+    const fallback = stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
+    if (fallback.length > 0 && fallback.every(b => b.min === 0 && b.max === 0)) {
+      console.warn('[Waveform] Fallback all zeros:', { start, end, dur, startBucket, endBucket, rangeBuckets, totalBuckets, bucketCount, dataHasNonZero: data.some(v => v !== 0) });
+    }
+    return fallback;
   }
 
   // Stretch/resample available 1000-bucket data to fill the requested bucketCount.
