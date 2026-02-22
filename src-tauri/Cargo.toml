@@ -1,6 +1,6 @@
 [package]
 name = "clip-dr"
-version = "0.11.1"
+version = "0.12.0"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
@@ -53,4 +53,4 @@ panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"
-strip = true
+strip = "debuginfo"
