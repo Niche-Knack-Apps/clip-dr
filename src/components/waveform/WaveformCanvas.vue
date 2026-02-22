@@ -25,12 +25,6 @@ const { getBucketsForRange, renderWaveform, waveformData, duration, tileVersion 
 let resizeObserver: ResizeObserver | null = null;
 let resizeRafId: number | null = null;
 
-// Version counter that increments whenever waveform data reference changes.
-// Watching the array reference directly ensures re-render on any track
-// manipulation (cut, delete, drag) since computed arrays return new refs.
-const waveformVersion = ref(0);
-watch(waveformData, () => { waveformVersion.value++; });
-
 function render() {
   const canvas = canvasRef.value;
   if (!canvas) return;
@@ -44,20 +38,6 @@ function render() {
   ctx.scale(dpr, dpr);
 
   const buckets = getBucketsForRange(props.startTime, props.endTime, width.value);
-
-  // Debug: log when render produces empty/zero results
-  if (buckets.length === 0 || buckets.every(b => b.min === 0 && b.max === 0)) {
-    console.warn('[WaveformCanvas] Empty render:', {
-      startTime: props.startTime,
-      endTime: props.endTime,
-      width: width.value,
-      bucketCount: buckets.length,
-      dataLen: waveformData.value.length,
-      duration: duration.value,
-      waveformVersion: waveformVersion.value,
-      tileVersion: tileVersion.value,
-    });
-  }
 
   renderWaveform(ctx, buckets, {
     width: width.value,
@@ -116,7 +96,7 @@ onUnmounted(() => {
 });
 
 // Watch for props changes and waveform data changes (when tracks are modified)
-watch([() => props.startTime, () => props.endTime, () => props.color, waveformVersion, tileVersion, duration], scheduleRender, { immediate: true });
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformData, tileVersion, duration], scheduleRender, { immediate: true });
 </script>
 
 <template>

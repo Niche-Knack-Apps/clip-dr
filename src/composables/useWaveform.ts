@@ -110,11 +110,7 @@ export function useWaveform() {
     }
 
     // Fall back to existing 1000-bucket data, stretched to fill bucketCount
-    const fallback = stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
-    if (fallback.length > 0 && fallback.every(b => b.min === 0 && b.max === 0)) {
-      console.warn('[Waveform] Fallback all zeros:', { start, end, dur, startBucket, endBucket, rangeBuckets, totalBuckets, bucketCount, dataHasNonZero: data.some(v => v !== 0) });
-    }
-    return fallback;
+    return stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
   }
 
   // Stretch/resample available 1000-bucket data to fill the requested bucketCount.
@@ -233,7 +229,7 @@ export function useWaveform() {
     if (!buckets.length) return;
 
     const centerY = height / 2;
-    const barWidth = width / buckets.length;
+    const barWidth = Math.max(width / buckets.length, 1);
 
     ctx.fillStyle = color;
     ctx.beginPath();
@@ -241,14 +237,12 @@ export function useWaveform() {
     for (let i = 0; i < buckets.length; i++) {
       const { min, max } = buckets[i];
       const x = i * barWidth;
-      const minY = centerY - min * centerY;
-      const maxY = centerY - max * centerY;
+      const topY = centerY - max * centerY;
+      const bottomY = centerY - min * centerY;
+      const barH = bottomY - topY;
 
-      ctx.moveTo(x, minY);
-      ctx.lineTo(x, maxY);
-      ctx.lineTo(x + barWidth - 1, maxY);
-      ctx.lineTo(x + barWidth - 1, minY);
-      ctx.closePath();
+      if (barH < 0.5) continue; // skip zero/negligible bars
+      ctx.rect(x, topY, barWidth, barH);
     }
 
     ctx.fill();
