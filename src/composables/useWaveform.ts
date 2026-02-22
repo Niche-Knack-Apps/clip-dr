@@ -13,10 +13,9 @@ export interface WaveformRenderOptions {
   endTime?: number;
 }
 
-// Peak tile cache — shared across all useWaveform() instances
+// Peak tile cache — shared across all useWaveform() instances for cross-instance reuse
 const tileCache = new Map<string, number[]>();
 const TILE_CACHE_MAX = 256;
-let currentGeneration = 0;
 
 // LRU-aware cache access: move accessed key to end of Map iteration order
 function getCachedTile(key: string): number[] | undefined {
@@ -29,7 +28,6 @@ function getCachedTile(key: string): number[] | undefined {
 }
 
 function setCachedTile(key: string, data: number[]): void {
-  // Evict oldest entries (front of Map) until under limit
   while (tileCache.size >= TILE_CACHE_MAX) {
     const firstKey = tileCache.keys().next().value;
     if (firstKey !== undefined) tileCache.delete(firstKey);
@@ -54,44 +52,54 @@ export function useWaveform() {
   const waveformData = effectiveWaveformData;
   const duration = effectiveDuration;
 
+  // Per-instance tile state (not shared across WaveformCanvas instances)
   const tileVersion = ref(0);
+  let currentGeneration = 0;
+  const inFlightKeys = new Set<string>();
 
   function getBucketsForRange(
     start: number,
     end: number,
     bucketCount: number
   ): WaveformBucket[] {
-    if (!waveformData.value.length) return [];
+    if (!waveformData.value.length || bucketCount <= 0) return [];
 
     const data = waveformData.value;
     const totalBuckets = data.length / 2;
 
     const startBucket = Math.floor((start / duration.value) * totalBuckets);
     const endBucket = Math.ceil((end / duration.value) * totalBuckets);
+    const rangeBuckets = endBucket - startBucket;
 
-    // Always check for a candidate track with pyramid (no coarseness guard)
-    const candidateTrack = tracksStore.tracks.find(t =>
-      t.hasPeakPyramid && t.sourcePath &&
-      t.trackStart < end && (t.trackStart + t.duration) > start
-    );
-    if (candidateTrack) {
-      const relStart = Math.max(0, start - candidateTrack.trackStart);
-      const relEnd = Math.min(candidateTrack.duration, end - candidateTrack.trackStart);
-      const { qStart, qEnd } = quantizeRange(relStart, relEnd, candidateTrack.duration);
-      const cacheKey = `${candidateTrack.sourcePath}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${bucketCount}`;
+    // Use peak tiles when overview data is insufficient (< 2x the output resolution)
+    // or when deeply zoomed. The Rust backend selects the optimal LOD automatically.
+    if (rangeBuckets < bucketCount * 2) {
+      const candidateTrack = tracksStore.tracks.find(t =>
+        t.hasPeakPyramid && t.sourcePath &&
+        t.trackStart < end && (t.trackStart + t.duration) > start
+      );
+      if (candidateTrack) {
+        const relStart = Math.max(0, start - candidateTrack.trackStart);
+        const relEnd = Math.min(candidateTrack.duration, end - candidateTrack.trackStart);
+        const { qStart, qEnd } = quantizeRange(relStart, relEnd, candidateTrack.duration);
+        const cacheKey = `${candidateTrack.sourcePath}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${bucketCount}`;
 
-      const cached = getCachedTile(cacheKey);
-      if (cached && cached.length >= bucketCount * 2) {
-        const buckets: WaveformBucket[] = [];
-        for (let i = 0; i < bucketCount; i++) {
-          buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
+        const cached = getCachedTile(cacheKey);
+        if (cached && cached.length >= bucketCount * 2) {
+          const buckets: WaveformBucket[] = [];
+          for (let i = 0; i < bucketCount; i++) {
+            buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
+          }
+          return buckets;
         }
-        return buckets;
-      }
 
-      // Fetch with generation counter — multiple fetches can be in-flight
-      const gen = ++currentGeneration;
-      fetchPeakTile(candidateTrack.sourcePath!, qStart, qEnd, bucketCount, cacheKey, gen);
+        // Fire fetch if not already in-flight for this key
+        if (!inFlightKeys.has(cacheKey)) {
+          inFlightKeys.add(cacheKey);
+          const gen = ++currentGeneration;
+          fetchPeakTile(candidateTrack.sourcePath!, qStart, qEnd, bucketCount, cacheKey, gen);
+        }
+      }
     }
 
     // Fall back to existing 1000-bucket data, stretched to fill bucketCount
@@ -187,6 +195,8 @@ export function useWaveform() {
       }
     } catch (e) {
       console.warn('[Waveform] Peak tile fetch failed:', e);
+    } finally {
+      inFlightKeys.delete(cacheKey);
     }
   }
 
