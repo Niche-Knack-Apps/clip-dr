@@ -115,6 +115,8 @@ export interface ImportStartResult {
   /** If peak cache hit, waveform is returned directly (no background events needed) */
   cachedWaveform?: number[];
   cachedDuration?: number;
+  /** Whether a peak pyramid is already available on disk for this file */
+  hasPeakPyramid?: boolean;
 }
 
 export interface WaveformChunkEvent {

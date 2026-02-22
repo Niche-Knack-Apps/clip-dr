@@ -36,9 +36,13 @@ function setCachedTile(key: string, data: number[]): void {
   tileCache.set(key, data);
 }
 
-// Quantize time range to a grid so small pan/zoom changes hit the cache
-function quantizeRange(start: number, end: number, trackDuration: number) {
-  const sliceSize = Math.max(trackDuration / 128, 0.01);
+// Quantize time range to a grid so small pan/zoom changes hit the cache.
+// Grid size is based on the visible range (not track duration) to avoid
+// producing tiles vastly wider than the view for long files.
+function quantizeRange(start: number, end: number) {
+  const range = end - start;
+  // 1/8 of the visible range → quantized range is at most ~1.25x the view
+  const sliceSize = Math.max(range / 8, 0.001);
   const qStart = Math.floor(start / sliceSize) * sliceSize;
   const qEnd = Math.ceil(end / sliceSize) * sliceSize;
   return { qStart, qEnd };
@@ -54,7 +58,6 @@ export function useWaveform() {
 
   // Per-instance tile state (not shared across WaveformCanvas instances)
   const tileVersion = ref(0);
-  let currentGeneration = 0;
   const inFlightKeys = new Set<string>();
 
   function getBucketsForRange(
@@ -88,14 +91,22 @@ export function useWaveform() {
       if (candidateTrack) {
         const relStart = Math.max(0, start - candidateTrack.trackStart);
         const relEnd = Math.min(candidateTrack.duration, end - candidateTrack.trackStart);
-        const { qStart, qEnd } = quantizeRange(relStart, relEnd, candidateTrack.duration);
+        const { qStart, qEnd } = quantizeRange(relStart, relEnd);
         const cacheKey = `${candidateTrack.sourcePath}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${bucketCount}`;
 
         const cached = getCachedTile(cacheKey);
         if (cached && cached.length >= bucketCount * 2) {
+          // Extract only the view portion from the (potentially wider) quantized tile
+          const tileRange = qEnd - qStart;
+          const fracStart = Math.max(0, (relStart - qStart) / tileRange);
+          const fracEnd = Math.min(1, (relEnd - qStart) / tileRange);
+          const fracSpan = fracEnd - fracStart;
+
           const buckets: WaveformBucket[] = [];
           for (let i = 0; i < bucketCount; i++) {
-            buckets.push({ min: cached[i * 2], max: cached[i * 2 + 1] });
+            const frac = fracStart + (i / bucketCount) * fracSpan;
+            const srcIdx = Math.min(Math.floor(frac * bucketCount), bucketCount - 1);
+            buckets.push({ min: cached[srcIdx * 2], max: cached[srcIdx * 2 + 1] });
           }
           return buckets;
         }
@@ -103,8 +114,7 @@ export function useWaveform() {
         // Fire fetch if not already in-flight for this key
         if (!inFlightKeys.has(cacheKey)) {
           inFlightKeys.add(cacheKey);
-          const gen = ++currentGeneration;
-          fetchPeakTile(candidateTrack.sourcePath!, qStart, qEnd, bucketCount, cacheKey, gen);
+          fetchPeakTile(candidateTrack.sourcePath!, qStart, qEnd, bucketCount, cacheKey);
         }
       }
     }
@@ -184,7 +194,6 @@ export function useWaveform() {
     endTime: number,
     bucketCount: number,
     cacheKey: string,
-    generation: number,
   ): Promise<void> {
     try {
       const tileData = await invoke<number[]>('get_peak_tile', {
@@ -196,12 +205,11 @@ export function useWaveform() {
 
       setCachedTile(cacheKey, tileData);
 
-      // Only trigger re-render if this generation is still current
-      if (generation === currentGeneration) {
-        tileVersion.value++;
-      }
-    } catch (e) {
-      console.warn('[Waveform] Peak tile fetch failed:', e);
+      // Always trigger re-render — the cache is keyed by range so stale
+      // tiles don't affect rendering of the current view
+      tileVersion.value++;
+    } catch {
+      // Peak tile fetch failed — fallback to overview data on next render
     } finally {
       inFlightKeys.delete(cacheKey);
     }

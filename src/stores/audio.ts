@@ -121,7 +121,7 @@ export const useAudioStore = defineStore('audio', () => {
         bucketCount: WAVEFORM_BUCKET_COUNT,
       });
 
-      const { sessionId, metadata, cachedWaveform, cachedDuration } = result;
+      const { sessionId, metadata, cachedWaveform, cachedDuration, hasPeakPyramid } = result;
       const cacheHit = !!(cachedWaveform && cachedDuration);
       console.log(`[Audio] [${ms()}] Phase 1 complete: metadata probe — ${metadata.format} ${metadata.channels}ch ${metadata.sampleRate}Hz ${metadata.duration.toFixed(1)}s${cacheHit ? ' (PEAK CACHE HIT)' : ''}`);
 
@@ -136,6 +136,13 @@ export const useAudioStore = defineStore('audio', () => {
       );
       const trackId = newTrack.id;
       console.log(`[Audio] [${ms()}] Track created: ${trackId.slice(0, 8)} at ${trackStart.toFixed(1)}s`);
+
+      // Set pyramid flag immediately if Rust reported it exists on disk.
+      // This avoids the race condition where the peak-pyramid-ready event
+      // fires before the track is created in the frontend.
+      if (hasPeakPyramid) {
+        tracksStore.setHasPeakPyramid(trackId);
+      }
 
       selectionStore.setSelection(0, tracksStore.timelineDuration);
       tracksStore.selectTrack(trackId);

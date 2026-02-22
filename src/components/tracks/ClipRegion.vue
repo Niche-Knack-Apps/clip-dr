@@ -76,12 +76,9 @@ const waveformColor = computed(() => {
   return `${props.track.color}80`; // 80 = 50% opacity
 });
 
-// Density check: skip waveform rendering when zoomed out too far
-const pxPerSecond = computed(() => {
-  if (clipDuration.value <= 0) return Infinity;
-  return width.value / clipDuration.value;
-});
-const showWaveform = computed(() => pxPerSecond.value >= 2);
+// Always render waveform — the overview data (1000 buckets) maps ~1:1 to pixels
+// at any practical display width, and the top panel renders without a threshold too.
+const showWaveform = computed(() => width.value > 0 && waveformData.value.length > 0);
 
 // Cache for high-res waveform extraction (avoid recomputing every frame)
 let hiResCache: { key: string; data: number[] } | null = null;

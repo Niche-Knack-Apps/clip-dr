@@ -47,6 +47,9 @@ pub struct ImportStartResult {
     pub cached_waveform: Option<Vec<f32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_duration: Option<f64>,
+    /// Whether a peak pyramid is already available on disk for this file
+    #[serde(default)]
+    pub has_peak_pyramid: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,16 +230,29 @@ pub async fn import_audio_start(
     if let Some((cached_waveform, cached_duration)) = load_peak_cache(path_ref, bucket_count) {
         log::info!("[Waveform] Peak cache HIT for {:?} — returning inline (no background task)", path_ref.file_name().unwrap_or_default());
 
-        // Build pyramid in background if not yet built (for long files)
+        // Check if pyramid already exists on disk
+        let pyramid_exists = peak_cache_key(path_ref)
+            .and_then(|h| pyramid_cache_path(h))
+            .map(|p| p.exists())
+            .unwrap_or(false);
+
+        // Emit immediately if exists, otherwise build in background
         if duration >= PYRAMID_MIN_DURATION {
-            let pyramid_path = path.clone();
-            let pyramid_app = app_handle.clone();
-            tokio::task::spawn_blocking(move || {
-                build_and_save_pyramid(Path::new(&pyramid_path));
-                let _ = pyramid_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
-                    source_path: pyramid_path,
+            if pyramid_exists {
+                log::info!("[Pyramid] Already exists, emitting immediately for {:?}", path_ref.file_name().unwrap_or_default());
+                let _ = app_handle.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
+                    source_path: path.clone(),
                 });
-            });
+            } else {
+                let pyramid_path = path.clone();
+                let pyramid_app = app_handle.clone();
+                tokio::task::spawn_blocking(move || {
+                    build_and_save_pyramid(Path::new(&pyramid_path));
+                    let _ = pyramid_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
+                        source_path: pyramid_path,
+                    });
+                });
+            }
         }
 
         return Ok(ImportStartResult {
@@ -244,6 +260,7 @@ pub async fn import_audio_start(
             metadata,
             cached_waveform: Some(cached_waveform),
             cached_duration: Some(cached_duration),
+            has_peak_pyramid: pyramid_exists,
         });
     }
 
@@ -289,24 +306,44 @@ pub async fn import_audio_start(
         let mut sessions = state.sessions.lock().unwrap();
         sessions.remove(&bg_session_id);
 
-        // Build peak pyramid in background for long files (> 5 min)
+        // Build peak pyramid in background
         if bg_duration >= PYRAMID_MIN_DURATION {
-            let pyramid_path = bg_path.clone();
-            let pyramid_app = bg_app.clone();
-            std::thread::spawn(move || {
-                build_and_save_pyramid(Path::new(&pyramid_path));
-                let _ = pyramid_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
-                    source_path: pyramid_path,
+            let pyramid_exists = peak_cache_key(Path::new(&bg_path))
+                .and_then(|h| pyramid_cache_path(h))
+                .map(|p| p.exists())
+                .unwrap_or(false);
+
+            if pyramid_exists {
+                let _ = bg_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
+                    source_path: bg_path.clone(),
                 });
-            });
+            } else {
+                let pyramid_path = bg_path.clone();
+                let pyramid_app = bg_app.clone();
+                std::thread::spawn(move || {
+                    build_and_save_pyramid(Path::new(&pyramid_path));
+                    let _ = pyramid_app.emit("peak-pyramid-ready", PeakPyramidReadyEvent {
+                        source_path: pyramid_path,
+                    });
+                });
+            }
         }
     });
+
+    // Check if pyramid already exists on disk (will be emitted via event later,
+    // but frontend needs this flag to set hasPeakPyramid during track creation
+    // to avoid the race where the event fires before the track exists)
+    let pyramid_exists_for_result = peak_cache_key(path_ref)
+        .and_then(|h| pyramid_cache_path(h))
+        .map(|p| p.exists())
+        .unwrap_or(false);
 
     Ok(ImportStartResult {
         session_id,
         metadata,
         cached_waveform: None,
         cached_duration: None,
+        has_peak_pyramid: pyramid_exists_for_result,
     })
 }
 
@@ -779,6 +816,22 @@ struct PyramidLevel {
     peaks: Vec<(f32, f32)>, // (min, max) pairs
 }
 
+/// In-memory cache for the most recently loaded pyramid (avoids re-reading
+/// the file from disk on every get_peak_tile call during smooth zoom/pan).
+struct CachedPyramid {
+    file_hash: u64,
+    levels: Vec<PyramidLevel>,
+    sample_rate: u32,
+}
+
+use std::sync::OnceLock;
+
+static PYRAMID_MEM_CACHE: OnceLock<Mutex<Option<CachedPyramid>>> = OnceLock::new();
+
+fn get_pyramid_mem_cache() -> &'static Mutex<Option<CachedPyramid>> {
+    PYRAMID_MEM_CACHE.get_or_init(|| Mutex::new(None))
+}
+
 /// Get the pyramid cache file path.
 fn pyramid_cache_path(file_hash: u64) -> Option<PathBuf> {
     let data_dir = path_service::get_user_data_dir().ok()?;
@@ -933,6 +986,38 @@ fn downsample_peaks(prev: &[(f32, f32)], ratio: usize) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// Find the decode-cache WAV for a source file (used to build pyramids from
+/// decoded PCM instead of re-decoding compressed formats like MP3).
+fn find_decode_cache_wav(path: &Path) -> Option<PathBuf> {
+    let file_hash = peak_cache_key(path)?; // same hash as decode_cache_key
+    let data_dir = path_service::get_user_data_dir().ok()?;
+    let cache_path = data_dir.join("decode-cache").join(format!("{:016x}.wav", file_hash));
+    if cache_path.exists() { Some(cache_path) } else { None }
+}
+
+/// Try to build level-0 peaks from a WAV file via mmap. Returns None if the
+/// file can't be opened/parsed as WAV.
+fn try_build_level0_from_wav(wav_path: &Path) -> Option<(Vec<(f32, f32)>, u32, usize)> {
+    let file = File::open(wav_path).ok()?;
+    let mmap = unsafe { Mmap::map(&file).ok()? };
+    let mut wav = parse_wav_header(&mmap)?;
+    let frame_size = (wav.bits_per_sample / 8) as usize * wav.channels as usize;
+
+    // Handle > 4GB WAV files where data chunk size overflows u32.
+    // hound writes standard RIFF with truncated sizes for large files.
+    let file_remaining = mmap.len().saturating_sub(wav.data_offset);
+    if file_remaining > wav.data_size + frame_size * 256 {
+        log::info!("[Pyramid] Detected oversized WAV ({:.1}GB), using actual file size for data",
+            mmap.len() as f64 / 1_073_741_824.0);
+        wav.data_size = file_remaining;
+    }
+
+    let data_end = (wav.data_offset + wav.data_size).min(mmap.len());
+    let total = (data_end - wav.data_offset) / frame_size;
+    let peaks = build_level0_wav_mmap(&mmap, &wav);
+    Some((peaks, wav.sample_rate, total))
+}
+
 /// Build and save peak pyramid for a file.
 fn build_and_save_pyramid(path: &Path) {
     let t0 = Instant::now();
@@ -951,37 +1036,40 @@ fn build_and_save_pyramid(path: &Path) {
 
     log::info!("[Pyramid] Building for {:?}...", path.file_name().unwrap_or_default());
 
-    // Build level 0 — try WAV mmap first
+    // Build level 0 — try WAV mmap first (original or decode-cache)
     let (level0, sample_rate, total_frames) = {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext.eq_ignore_ascii_case("wav") || ext.eq_ignore_ascii_case("wave") {
-            if let Ok(file) = File::open(path) {
-                if let Ok(mmap) = unsafe { Mmap::map(&file) } {
-                    if let Some(wav) = parse_wav_header(&mmap) {
-                        let frame_size = (wav.bits_per_sample / 8) as usize * wav.channels as usize;
-                        let data_end = (wav.data_offset + wav.data_size).min(mmap.len());
-                        let total = (data_end - wav.data_offset) / frame_size;
-                        let peaks = build_level0_wav_mmap(&mmap, &wav);
-                        (peaks, wav.sample_rate, total)
-                    } else {
-                        match build_level0_symphonia(path) {
-                            Ok(r) => r,
-                            Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
-                        }
-                    }
+        let is_wav = ext.eq_ignore_ascii_case("wav") || ext.eq_ignore_ascii_case("wave");
+
+        if is_wav {
+            // Original file is WAV — mmap directly
+            if let Some(result) = try_build_level0_from_wav(path) {
+                result
+            } else {
+                match build_level0_symphonia(path) {
+                    Ok(r) => r,
+                    Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
+                }
+            }
+        } else {
+            // Non-WAV (MP3, FLAC, etc.) — try decode-cache WAV first (fast mmap)
+            if let Some(cache_wav) = find_decode_cache_wav(path) {
+                log::info!("[Pyramid] Using decode-cache WAV for fast build: {:?}", cache_wav.file_name().unwrap_or_default());
+                if let Some(result) = try_build_level0_from_wav(&cache_wav) {
+                    result
                 } else {
+                    log::warn!("[Pyramid] Decode-cache WAV unreadable, falling back to symphonia");
                     match build_level0_symphonia(path) {
                         Ok(r) => r,
                         Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
                     }
                 }
             } else {
-                return;
-            }
-        } else {
-            match build_level0_symphonia(path) {
-                Ok(r) => r,
-                Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
+                log::info!("[Pyramid] No decode-cache WAV found, using symphonia decode");
+                match build_level0_symphonia(path) {
+                    Ok(r) => r,
+                    Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
+                }
             }
         }
     };
@@ -1166,10 +1254,32 @@ pub fn get_peak_tile(
     bucket_count: usize,
 ) -> Result<Vec<f32>, String> {
     let path_ref = Path::new(&path);
+    let file_hash = peak_cache_key(path_ref)
+        .ok_or_else(|| "Cannot compute cache key for file".to_string())?;
 
-    // Try loading pyramid from cache
+    // Check in-memory cache first (avoids disk I/O during smooth zoom/pan)
+    {
+        let cache = get_pyramid_mem_cache().lock().unwrap();
+        if let Some(ref cached) = *cache {
+            if cached.file_hash == file_hash {
+                return Ok(get_peaks_for_range(&cached.levels, cached.sample_rate, start_time, end_time, bucket_count));
+            }
+        }
+    }
+
+    // Load from disk and populate in-memory cache
     if let Some((levels, sample_rate, _total_frames)) = load_peak_pyramid(path_ref) {
-        return Ok(get_peaks_for_range(&levels, sample_rate, start_time, end_time, bucket_count));
+        let result = get_peaks_for_range(&levels, sample_rate, start_time, end_time, bucket_count);
+
+        // Store in memory cache for subsequent calls
+        let mut cache = get_pyramid_mem_cache().lock().unwrap();
+        *cache = Some(CachedPyramid {
+            file_hash,
+            levels,
+            sample_rate,
+        });
+
+        return Ok(result);
     }
 
     Err("No peak pyramid available for this file".to_string())
