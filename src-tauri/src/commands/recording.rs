@@ -2140,6 +2140,7 @@ pub fn probe_system_audio() -> Result<SystemAudioInfo, String> {
         }
 
         // Test parec first (preferred — handles monitor auto-connection internally)
+        log::info!("Testing subprocess capture tools (monitor: {:?})", info.monitor_source);
         if which_exists("parec") {
             if let Some(ref source) = info.monitor_source {
                 let pa_monitor = if source.ends_with(".monitor") {
@@ -2328,7 +2329,7 @@ fn test_cpal_monitor(device_name: &str) -> bool {
         return false;
     }
 
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(500));
     drop(stream);
 
     got_callback.load(Ordering::SeqCst)
@@ -2336,13 +2337,14 @@ fn test_cpal_monitor(device_name: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn test_parec(monitor_source: &str) -> Result<String, String> {
+    log::info!("Testing parec with source: {}", monitor_source);
     let output = std::process::Command::new("timeout")
-        .args(["0.5", "parec", "-d", monitor_source,
+        .args(["1.5", "parec", "-d", monitor_source,
                "--format=float32le", "--rate=44100", "--channels=2"])
         .output()
         .map_err(|e| format!("Failed to run parec: {}", e))?;
 
-    if output.stdout.len() > 1000 {
+    if output.stdout.len() > 200 {
         Ok(format!("Test captured {} bytes", output.stdout.len()))
     } else {
         Err(format!("Captured too little data: {} bytes (stderr: {})",
@@ -2352,11 +2354,12 @@ fn test_parec(monitor_source: &str) -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 fn test_pw_record(sink_name: &str) -> Result<String, String> {
+    log::info!("Testing pw-record with sink: {}", sink_name);
     let temp_file = std::env::temp_dir().join("clip_dr_sys_test.wav");
 
-    // Record for 0.5 seconds
+    // Record for 1.5 seconds (slower hardware needs more init time)
     let _output = std::process::Command::new("timeout")
-        .args(["0.5", "pw-record", "--target", sink_name,
+        .args(["1.5", "pw-record", "--target", sink_name,
                "--format", "f32", "--rate", "44100", "--channels", "2",
                temp_file.to_str().unwrap()])
         .output()
@@ -2371,7 +2374,7 @@ fn test_pw_record(sink_name: &str) -> Result<String, String> {
         // Clean up
         let _ = std::fs::remove_file(&temp_file);
 
-        if size > 1000 {  // File has some content
+        if size > 200 {  // File has some content
             return Ok(format!("Test recorded {} bytes", size));
         } else {
             return Err("Test file too small".to_string());
@@ -2383,11 +2386,12 @@ fn test_pw_record(sink_name: &str) -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 fn test_parecord(monitor_source: &str) -> Result<String, String> {
+    log::info!("Testing parecord with source: {}", monitor_source);
     let temp_file = std::env::temp_dir().join("clip_dr_sys_test_pa.wav");
 
-    // Record for 0.5 seconds
+    // Record for 1.5 seconds (slower hardware needs more init time)
     let _output = std::process::Command::new("timeout")
-        .args(["0.5", "parecord", "-d", monitor_source,
+        .args(["1.5", "parecord", "-d", monitor_source,
                "--file-format=wav", "--rate=44100", "--channels=2",
                temp_file.to_str().unwrap()])
         .output()
@@ -2402,7 +2406,7 @@ fn test_parecord(monitor_source: &str) -> Result<String, String> {
         // Clean up
         let _ = std::fs::remove_file(&temp_file);
 
-        if size > 1000 {
+        if size > 200 {
             return Ok(format!("Test recorded {} bytes", size));
         } else {
             return Err("Test file too small".to_string());
