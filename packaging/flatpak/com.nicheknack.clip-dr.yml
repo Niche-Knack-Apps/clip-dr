@@ -58,6 +58,9 @@ modules:
       # Install binary
       - install -Dm755 src-tauri/target/release/clip-dr /app/bin/clip-dr
 
+      # Install bundled whisper model
+      - install -Dm644 src-tauri/resources/models/ggml-tiny.bin /app/bin/models/ggml-tiny.bin
+
       # Install icons
       - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/com.nicheknack.clip-dr.png
       - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.nicheknack.clip-dr.png

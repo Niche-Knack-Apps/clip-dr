@@ -111,6 +111,19 @@ fn find_model_path_internal(
         }
     }
 
+    // Check adjacent to executable (Flatpak, portable installs)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for model_file in &model_files {
+                let exe_model = exe_dir.join("models").join(model_file);
+                if exe_model.exists() {
+                    log::info!("Found model next to executable: {:?}", exe_model);
+                    return Ok(exe_model);
+                }
+            }
+        }
+    }
+
     // Dev mode fallback: check src-tauri/resources/models via CARGO_MANIFEST_DIR
     let dev_models_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("resources")
@@ -610,6 +623,19 @@ pub async fn check_whisper_model(app_handle: AppHandle, custom_path: Option<Stri
         }
     }
 
+    // Check adjacent to executable (Flatpak, portable installs)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for model_file in &["ggml-tiny.bin", "ggml-tiny.en.bin"] {
+                let exe_model = exe_dir.join("models").join(model_file);
+                if exe_model.exists() {
+                    log::info!("Found model next to executable: {:?}", exe_model);
+                    return Ok(exe_model.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
     // Dev mode fallback
     let dev_models_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("resources")
@@ -735,6 +761,19 @@ pub fn get_bundled_model_info(app_handle: AppHandle) -> Result<Option<String>, S
         let bundled_en = resource_dir.join("models").join("ggml-tiny.en.bin");
         if bundled_en.exists() {
             return Ok(Some(bundled_en.to_string_lossy().to_string()));
+        }
+    }
+
+    // Check adjacent to executable (Flatpak, portable installs)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for model_file in &["ggml-tiny.bin", "ggml-tiny.en.bin"] {
+                let exe_model = exe_dir.join("models").join(model_file);
+                if exe_model.exists() {
+                    log::info!("Found bundled model next to executable: {:?}", exe_model);
+                    return Ok(Some(exe_model.to_string_lossy().to_string()));
+                }
+            }
         }
     }
 
