@@ -450,6 +450,19 @@ export const useTracksStore = defineStore('tracks', () => {
       console.error('[Tracks] Track not found:', trackId);
       return null;
     }
+
+    // Size guard: estimate buffer bytes (duration * sampleRate * channels * 4bytes * 3 buffers)
+    {
+      const estDuration = outPoint - inPoint;
+      const estRate = track.audioData.sampleRate || 44100;
+      const estCh = track.audioData.channels || 2;
+      const estBytes = estDuration * estRate * estCh * 4 * 3;
+      if (estBytes > 1_073_741_824) {
+        console.error(`[Tracks] Cut region too large (${(estBytes / 1_073_741_824).toFixed(1)}GB). Try a smaller selection.`);
+        return null;
+      }
+    }
+
     useHistoryStore().pushState('Cut region');
 
     // ── Multi-clip track: process each clip individually ──
@@ -592,6 +605,18 @@ export const useTracksStore = defineStore('tracks', () => {
     audioContext: AudioContext,
     keepTrack = false
   ): { buffer: AudioBuffer; waveformData: number[] } | null {
+    // Size guard: estimate buffer bytes
+    {
+      const estDuration = outPoint - inPoint;
+      const estRate = track.audioData.sampleRate || 44100;
+      const estCh = track.audioData.channels || 2;
+      const estBytes = estDuration * estRate * estCh * 4 * 3;
+      if (estBytes > 1_073_741_824) {
+        console.error(`[Tracks] Cut region from clips too large (${(estBytes / 1_073_741_824).toFixed(1)}GB). Try a smaller selection.`);
+        return null;
+      }
+    }
+
     const clips = track.clips!;
     const newClips: TrackClip[] = [];
     const cutContributions: { buffer: AudioBuffer; offsetInRegion: number }[] = [];

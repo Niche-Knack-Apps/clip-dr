@@ -127,10 +127,12 @@ watch(showRecordingPanel, (show) => {
 // Check for model on load
 transcriptionStore.checkModel();
 
-function handleReTranscribe() {
+function handleTranscribe() {
   const sel = tracksStore.selectedTrackId;
   if (sel && sel !== 'ALL') {
-    transcriptionStore.removeTranscription(sel);
+    if (transcriptionStore.hasTranscriptionForTrack(sel)) {
+      transcriptionStore.removeTranscription(sel);
+    }
     transcriptionStore.queueTranscription(sel, 'high');
   }
 }
@@ -705,13 +707,13 @@ defineExpose({ focusSearch });
           size="sm"
           :disabled="!hasFile || !transcriptionStore.hasModel"
           :loading="transcriptionStore.loading"
-          :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : 'Re-run transcription'"
-          @click="handleReTranscribe"
+          :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : transcriptionStore.hasTranscription ? 'Re-run transcription' : 'Transcribe audio'"
+          @click="handleTranscribe"
         >
           <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
           </svg>
-          Re-transcribe
+          {{ transcriptionStore.hasTranscription ? 'Re-transcribe' : 'Transcribe' }}
         </Button>
         <!-- Quality selector -->
         <div class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">

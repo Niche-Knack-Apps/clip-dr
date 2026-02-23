@@ -81,6 +81,35 @@ function cloneTranscriptions(source: Map<string, { trackId: string; words: Word[
   return result;
 }
 
+// ─── Memory estimation ────────────────────────────────────────────
+const MAX_HISTORY_BYTES = 200 * 1024 * 1024; // 200MB
+
+/** Estimate snapshot memory in bytes (lightweight: O(tracks + transcription entries)).
+ *  AudioBuffers and waveformData are shared refs, so NOT counted. */
+function estimateSnapshotBytes(snapshot: Snapshot): number {
+  let bytes = 0;
+
+  // Track metadata: ~200 bytes per track + clips/timemarks/volumeEnvelope
+  for (const track of snapshot.tracks.tracks) {
+    bytes += 200;
+    if (track.clips) bytes += track.clips.length * 80; // ~80 bytes per clip metadata
+    if (track.timemarks) bytes += track.timemarks.length * 40;
+    if (track.volumeEnvelope) bytes += track.volumeEnvelope.length * 16;
+  }
+
+  // Transcription entries: ~100 bytes base + words
+  for (const [, entry] of snapshot.transcription.transcriptions) {
+    bytes += 100;
+    bytes += entry.words.length * 120; // ~120 bytes per word (id + text + timestamps)
+    bytes += entry.wordOffsets.size * 60; // ~60 bytes per offset entry
+  }
+
+  // Silence regions
+  bytes += snapshot.silence.silenceRegions.length * 24;
+
+  return bytes;
+}
+
 // ─── Store ────────────────────────────────────────────────────────
 export const useHistoryStore = defineStore('history', () => {
   const undoStack = ref<Snapshot[]>([]);
@@ -88,6 +117,7 @@ export const useHistoryStore = defineStore('history', () => {
   const isRestoring = ref(false);
   const batchDepth = ref(0);
   const batchLabel = ref('');
+  let estimatedHistoryBytes = 0;
 
   const canUndo = computed(() => undoStack.value.length > 0);
   const canRedo = computed(() => redoStack.value.length > 0);
@@ -165,14 +195,26 @@ export const useHistoryStore = defineStore('history', () => {
     if (batchDepth.value > 0) return;   // batch's beginBatch already captured
 
     const snapshot = captureSnapshot(label);
+    const snapshotBytes = estimateSnapshotBytes(snapshot);
     undoStack.value.push(snapshot);
+    estimatedHistoryBytes += snapshotBytes;
 
-    // Trim oldest entries
-    if (undoStack.value.length > MAX_HISTORY) {
-      undoStack.value = undoStack.value.slice(-MAX_HISTORY);
+    // Trim oldest entries (count-based)
+    while (undoStack.value.length > MAX_HISTORY) {
+      const removed = undoStack.value.shift();
+      if (removed) estimatedHistoryBytes -= estimateSnapshotBytes(removed);
+    }
+
+    // Trim oldest entries (memory-based)
+    while (estimatedHistoryBytes > MAX_HISTORY_BYTES && undoStack.value.length > 1) {
+      const removed = undoStack.value.shift();
+      if (removed) estimatedHistoryBytes -= estimateSnapshotBytes(removed);
     }
 
     // New action clears redo
+    for (const snap of redoStack.value) {
+      estimatedHistoryBytes -= estimateSnapshotBytes(snap);
+    }
     redoStack.value = [];
   }
 
@@ -183,9 +225,11 @@ export const useHistoryStore = defineStore('history', () => {
     // Save current state for redo
     const current = captureSnapshot('redo');
     redoStack.value.push(current);
+    estimatedHistoryBytes += estimateSnapshotBytes(current);
 
     // Restore previous state
     const previous = undoStack.value.pop()!;
+    estimatedHistoryBytes -= estimateSnapshotBytes(previous);
     restoreSnapshot(previous);
 
     console.log(`[History] Undo: ${previous.label}`);
@@ -198,9 +242,11 @@ export const useHistoryStore = defineStore('history', () => {
     // Save current state for undo
     const current = captureSnapshot('undo');
     undoStack.value.push(current);
+    estimatedHistoryBytes += estimateSnapshotBytes(current);
 
     // Restore redo state
     const next = redoStack.value.pop()!;
+    estimatedHistoryBytes -= estimateSnapshotBytes(next);
     restoreSnapshot(next);
 
     console.log(`[History] Redo: ${next.label}`);
@@ -213,8 +259,17 @@ export const useHistoryStore = defineStore('history', () => {
       batchLabel.value = label;
       const snapshot = captureSnapshot(label);
       undoStack.value.push(snapshot);
-      if (undoStack.value.length > MAX_HISTORY) {
-        undoStack.value = undoStack.value.slice(-MAX_HISTORY);
+      estimatedHistoryBytes += estimateSnapshotBytes(snapshot);
+      while (undoStack.value.length > MAX_HISTORY) {
+        const removed = undoStack.value.shift();
+        if (removed) estimatedHistoryBytes -= estimateSnapshotBytes(removed);
+      }
+      while (estimatedHistoryBytes > MAX_HISTORY_BYTES && undoStack.value.length > 1) {
+        const removed = undoStack.value.shift();
+        if (removed) estimatedHistoryBytes -= estimateSnapshotBytes(removed);
+      }
+      for (const snap of redoStack.value) {
+        estimatedHistoryBytes -= estimateSnapshotBytes(snap);
       }
       redoStack.value = [];
     }
@@ -233,6 +288,7 @@ export const useHistoryStore = defineStore('history', () => {
     undoStack.value = [];
     redoStack.value = [];
     batchDepth.value = 0;
+    estimatedHistoryBytes = 0;
   }
 
   return {

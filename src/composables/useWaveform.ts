@@ -1,4 +1,4 @@
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useTracksStore } from '@/stores/tracks';
@@ -56,10 +56,13 @@ export function useWaveform() {
   const waveformData = effectiveWaveformData;
   const duration = effectiveDuration;
 
+  // Reactive flag: true when any track has a peak pyramid available.
+  // Used to trigger re-render when pyramid becomes ready mid-session.
+  const hasPyramid = computed(() => tracksStore.tracks.some(t => t.hasPeakPyramid));
+
   // Per-instance tile state (not shared across WaveformCanvas instances)
   const tileVersion = ref(0);
   const inFlightKeys = new Set<string>();
-
   function getBucketsForRange(
     start: number,
     end: number,
@@ -208,8 +211,8 @@ export function useWaveform() {
       // Always trigger re-render — the cache is keyed by range so stale
       // tiles don't affect rendering of the current view
       tileVersion.value++;
-    } catch {
-      // Peak tile fetch failed — fallback to overview data on next render
+    } catch (e) {
+      console.warn('[Waveform] Peak tile fetch failed:', e);
     } finally {
       inFlightKeys.delete(cacheKey);
     }
@@ -268,6 +271,7 @@ export function useWaveform() {
     waveformData,
     duration,
     tileVersion,
+    hasPyramid,
     getBucketsForRange,
     renderWaveform,
     timeToX,

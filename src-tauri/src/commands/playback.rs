@@ -565,15 +565,13 @@ pub(crate) fn find_wav_data_offset(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Compute a cache key for a file based on path, size, and mtime
+/// Compute a cache key from file path + size (no mtime — mtime is fragile
+/// and changes due to backup tools, file managers, and sync utilities).
 fn decode_cache_key(path: &Path) -> Option<u64> {
     let meta = fs::metadata(path).ok()?;
     let mut hasher = DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
     meta.len().hash(&mut hasher);
-    if let Ok(mtime) = meta.modified() {
-        mtime.hash(&mut hasher);
-    }
     Some(hasher.finish())
 }
 
@@ -589,18 +587,16 @@ fn check_decode_cache(path: &str) -> Result<PathBuf, String> {
     let cache_path = cache_dir.join(format!("{:016x}.wav", file_hash));
 
     if cache_path.exists() {
-        if let (Ok(src_meta), Ok(cache_meta)) = (fs::metadata(src_path), fs::metadata(&cache_path)) {
+        if let Ok(cache_meta) = fs::metadata(&cache_path) {
             // Reject empty/corrupt cache files (WAV header is ~44-68 bytes with no audio data)
             if cache_meta.len() < 1024 {
                 log::warn!("Decode cache too small ({}B), removing stale entry: {:?}", cache_meta.len(), cache_path);
                 let _ = fs::remove_file(&cache_path);
                 return Err("Stale cache removed".to_string());
             }
-            if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
-                if cache_mtime >= src_mtime {
-                    return Ok(cache_path);
-                }
-            }
+            // Cache key includes file path + size, so a matching cache file
+            // is valid regardless of mtime (no mtime freshness check needed).
+            return Ok(cache_path);
         }
     }
 
@@ -830,16 +826,15 @@ fn decode_to_temp_wav_with_progress(
 
     // If cached WAV exists and is newer than source, reuse it
     if cache_path.exists() {
-        if let (Ok(src_meta), Ok(cache_meta)) = (fs::metadata(src_path), fs::metadata(&cache_path)) {
+        if let Ok(cache_meta) = fs::metadata(&cache_path) {
             // Reject empty/corrupt cache files (WAV header only, no audio data)
             if cache_meta.len() < 1024 {
                 log::warn!("Decode cache too small ({}B), removing stale entry: {:?}", cache_meta.len(), cache_path);
                 let _ = fs::remove_file(&cache_path);
-            } else if let (Ok(src_mtime), Ok(cache_mtime)) = (src_meta.modified(), cache_meta.modified()) {
-                if cache_mtime >= src_mtime {
-                    log::info!("Decode cache hit: {:?}", cache_path);
-                    return Ok(cache_path);
-                }
+            } else {
+                // Cache key includes file path + size — matching file is valid.
+                log::info!("Decode cache hit: {:?}", cache_path);
+                return Ok(cache_path);
             }
         }
     }
@@ -874,6 +869,22 @@ fn decode_to_temp_wav_with_progress(
 
     // Estimate total samples for progress (if n_frames available)
     let total_frames_est = track.codec_params.n_frames.unwrap_or(0);
+
+    // Safety: hound tracks data_bytes_written as u32, so PCM data must stay
+    // below u32::MAX (~4.29 GB). For 32-bit float stereo that's ~536M frames.
+    let bytes_per_frame = channels as u64 * 4; // 32-bit float = 4 bytes/sample
+    let max_frames = u32::MAX as u64 / bytes_per_frame;
+    if total_frames_est > 0 && total_frames_est > max_frames {
+        let est_gb = (total_frames_est * bytes_per_frame) as f64 / 1_073_741_824.0;
+        log::warn!(
+            "[Playback] Skipping decode cache — estimated PCM ({:.2} GB) exceeds WAV u32 limit",
+            est_gb
+        );
+        return Err(format!(
+            "Audio too large for WAV cache ({:.1} GB PCM); playback will use streaming decode",
+            est_gb
+        ));
+    }
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
@@ -917,6 +928,18 @@ fn decode_to_temp_wav_with_progress(
         let num_frames = decoded.frames();
         if num_frames == 0 { continue; } // Skip empty packets (e.g. Vorbis headers)
         decoded_frames += num_frames as u64;
+
+        // Runtime guard: stop before hound's u32 data_bytes_written overflows.
+        // n_frames estimates can be inaccurate for compressed formats (MP3 padding etc).
+        let written_data_bytes = decoded_frames * bytes_per_frame;
+        if written_data_bytes > u32::MAX as u64 - bytes_per_frame * 4096 {
+            log::warn!(
+                "[Playback] Stopping decode cache at {:.2} GB — approaching u32 WAV limit",
+                written_data_bytes as f64 / 1_073_741_824.0
+            );
+            break;
+        }
+
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
 

@@ -813,9 +813,30 @@ fn export_audio_ogg_inner(
     let start_sample = (start_time * sample_rate as f64) as u64;
     let end_sample = (end_time * sample_rate as f64) as u64;
 
-    // Collect interleaved f32 samples in the region
-    let mut all_samples: Vec<f32> = Vec::new();
+    // Set up Vorbis encoder BEFORE decode loop — encode in chunks
+    let output_file = BufWriter::new(
+        File::create(output_path)
+            .map_err(|e| format!("Create output: {}", e))?,
+    );
+
+    let sr = NonZeroU32::new(sample_rate)
+        .ok_or("Sample rate must be non-zero")?;
+    let ch = NonZeroU8::new(channels as u8)
+        .ok_or("Channels must be non-zero")?;
+
+    let mut encoder = VorbisEncoderBuilder::new(sr, ch, output_file)
+        .map_err(|e| format!("Vorbis builder error: {}", e))?
+        .bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
+            target_quality: quality,
+        })
+        .build()
+        .map_err(|e| format!("Vorbis build error: {}", e))?;
+
+    // Decode and encode in chunks — avoids collecting all samples in memory
+    let ch_count = channels as usize;
     let mut current_sample: u64 = 0;
+    let mut chunk_buf: Vec<f32> = Vec::new(); // interleaved chunk accumulator
+    let chunk_frame_limit = CHUNK_FRAMES; // reuse the 64K frame constant
 
     loop {
         let packet = match format.next_packet() {
@@ -844,51 +865,48 @@ fn export_audio_ogg_inner(
         for i in 0..frame_count {
             let frame_pos = current_sample + i;
             if frame_pos >= start_sample && frame_pos < end_sample {
-                for ch in 0..channels as usize {
-                    let idx = (i as usize * channels as usize) + ch;
+                for c in 0..ch_count {
+                    let idx = (i as usize * ch_count) + c;
                     if idx < samples.len() {
-                        all_samples.push(samples[idx]);
+                        chunk_buf.push(samples[idx]);
                     }
                 }
             }
         }
 
         current_sample += frame_count;
+
+        // Flush chunk to encoder when large enough
+        let chunk_frames = chunk_buf.len() / ch_count;
+        if chunk_frames >= chunk_frame_limit {
+            let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_frames); ch_count];
+            for i in 0..chunk_frames {
+                let base = i * ch_count;
+                for c in 0..ch_count {
+                    planar[c].push(chunk_buf[base + c].clamp(-1.0, 1.0));
+                }
+            }
+            encoder.encode_audio_block(&planar)
+                .map_err(|e| format!("Vorbis encode error: {}", e))?;
+            chunk_buf.clear();
+        }
+
         if current_sample >= end_sample { break; }
     }
 
-    // Deinterleave to planar for Vorbis
-    let ch_count = channels as usize;
-    let frame_count = all_samples.len() / ch_count;
-    let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frame_count); ch_count];
-    for i in 0..frame_count {
-        let base = i * ch_count;
-        for ch in 0..ch_count {
-            planar[ch].push(all_samples[base + ch].clamp(-1.0, 1.0));
+    // Flush remaining samples
+    let remaining_frames = chunk_buf.len() / ch_count;
+    if remaining_frames > 0 {
+        let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(remaining_frames); ch_count];
+        for i in 0..remaining_frames {
+            let base = i * ch_count;
+            for c in 0..ch_count {
+                planar[c].push(chunk_buf[base + c].clamp(-1.0, 1.0));
+            }
         }
+        encoder.encode_audio_block(&planar)
+            .map_err(|e| format!("Vorbis encode error: {}", e))?;
     }
-
-    // Encode with vorbis_rs
-    let output_file = BufWriter::new(
-        File::create(output_path)
-            .map_err(|e| format!("Create output: {}", e))?,
-    );
-
-    let sr = NonZeroU32::new(sample_rate)
-        .ok_or("Sample rate must be non-zero")?;
-    let ch = NonZeroU8::new(channels as u8)
-        .ok_or("Channels must be non-zero")?;
-
-    let mut encoder = VorbisEncoderBuilder::new(sr, ch, output_file)
-        .map_err(|e| format!("Vorbis builder error: {}", e))?
-        .bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
-            target_quality: quality,
-        })
-        .build()
-        .map_err(|e| format!("Vorbis build error: {}", e))?;
-
-    encoder.encode_audio_block(&planar)
-        .map_err(|e| format!("Vorbis encode error: {}", e))?;
 
     encoder.finish()
         .map_err(|e| format!("Vorbis finish error: {}", e))?;

@@ -467,9 +467,9 @@ function handleClipSelect(trackId: string, clipId: string) {
           :style="{
             left: `${selectionOverlayLeft}px`,
             width: `${selectionOverlayWidth}px`,
-            backgroundColor: 'rgba(0, 212, 255, 0.08)',
-            borderLeft: '1px solid rgba(0, 212, 255, 0.25)',
-            borderRight: '1px solid rgba(0, 212, 255, 0.25)',
+            backgroundColor: 'rgba(255, 255, 255, 0.18)',
+            borderLeft: '1px solid rgba(255, 255, 255, 0.5)',
+            borderRight: '1px solid rgba(255, 255, 255, 0.5)',
           }"
         />
 

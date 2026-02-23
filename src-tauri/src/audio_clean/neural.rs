@@ -37,16 +37,13 @@ impl NeuralDenoiser {
             return Ok(());
         }
 
-        // Keep original for blending
-        let original: Vec<f32> = samples.to_vec();
-
-        // Resample to 48kHz if needed
+        // Resample to 48kHz if needed — borrow samples directly (no clone)
         let needs_resample = (self.source_sample_rate - RNNOISE_SAMPLE_RATE as f32).abs() > 1.0;
 
         let samples_48k = if needs_resample {
-            self.resample_to_48k(&original)?
+            self.resample_to_48k(samples)?
         } else {
-            original.clone()
+            samples.to_vec()
         };
 
         // Process through RNNoise
@@ -59,10 +56,12 @@ impl NeuralDenoiser {
             denoised_48k
         };
 
-        // Blend with original based on strength
+        // Blend in-place: samples[i] still holds the original value
+        let dry = 1.0 - self.strength;
+        let wet = self.strength;
         for (i, sample) in samples.iter_mut().enumerate() {
             if i < denoised.len() {
-                *sample = original[i] * (1.0 - self.strength) + denoised[i] * self.strength;
+                *sample = *sample * dry + denoised[i] * wet;
             }
         }
 

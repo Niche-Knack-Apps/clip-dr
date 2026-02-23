@@ -293,12 +293,28 @@ fn load_audio_16khz(path: &Path) -> Result<Vec<f32>, String> {
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100) as f64;
     let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
 
+    // Size guard: estimate 16kHz mono samples and reject files >6 hours
+    let max_16k_samples = 16000 * 3600 * 6; // 6 hours at 16kHz
+    if let Some(n_frames) = track.codec_params.n_frames {
+        let estimated_16k = (n_frames as f64 / sample_rate * 16000.0) as usize;
+        if estimated_16k > max_16k_samples {
+            let hours = n_frames as f64 / sample_rate / 3600.0;
+            return Err(format!(
+                "Audio file is too long for transcription ({:.1} hours). Maximum supported duration is 6 hours.",
+                hours
+            ));
+        }
+    }
+
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    // Collect all mono samples
-    let mut mono_samples: Vec<f32> = Vec::new();
+    // Collect all mono samples with capacity hint
+    let estimated_mono = track.codec_params.n_frames
+        .map(|n| (n as f64 / sample_rate * 16000.0) as usize)
+        .unwrap_or(0);
+    let mut mono_samples: Vec<f32> = Vec::with_capacity(estimated_mono);
 
     loop {
         let packet = match format.next_packet() {

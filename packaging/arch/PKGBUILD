@@ -1,6 +1,6 @@
 # Maintainer: Niche-Knack Apps <support@niche-knack.com>
 pkgname=clip-dr
-pkgver=0.4.1
+pkgver=0.12.2
 pkgrel=1
 pkgdesc="Audio cleaning and clip-making application with CPU-only ASR"
 arch=('x86_64')
@@ -46,10 +46,10 @@ build() {
     # Install frontend dependencies
     npm ci
 
-    # Build frontend
-    npm run build
+    # Build frontend only (npx vite build, NOT tauri build which tries to bundle AppImage/deb)
+    npx vite build
 
-    # Build Tauri application
+    # Build Rust backend
     cd src-tauri
     cargo build --release
 }

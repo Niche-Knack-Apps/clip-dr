@@ -49,8 +49,8 @@ modules:
       # Install npm dependencies (use install instead of ci for sandbox compatibility)
       - HOME=/run/build/clip-dr npm install --legacy-peer-deps
 
-      # Build frontend
-      - HOME=/run/build/clip-dr npm run build
+      # Build frontend only (NOT tauri build which tries to bundle AppImage/deb)
+      - HOME=/run/build/clip-dr npx vite build
 
       # Build Rust backend
       - cd src-tauri && cargo build --release

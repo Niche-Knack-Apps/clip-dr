@@ -81,15 +81,13 @@ struct ImportErrorEvent {
 const PEAK_MAGIC: &[u8; 4] = b"CLPK";
 const PEAK_VERSION: u8 = 1;
 
-/// Compute a cache key from file path + size + mtime.
+/// Compute a cache key from file path + size (no mtime — mtime is fragile
+/// and changes due to backup tools, file managers, and sync utilities).
 fn peak_cache_key(path: &Path) -> Option<u64> {
     let meta = fs::metadata(path).ok()?;
     let mut hasher = DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
     meta.len().hash(&mut hasher);
-    if let Ok(mtime) = meta.modified() {
-        mtime.hash(&mut hasher);
-    }
     Some(hasher.finish())
 }
 
@@ -106,8 +104,15 @@ fn load_peak_cache(path: &Path, bucket_count: usize) -> Option<(Vec<f32>, f64)> 
     let file_hash = peak_cache_key(path)?;
     let cache_path = peak_cache_path(file_hash, bucket_count)?;
 
+    // Size guard: reject corrupted/oversized cache files (50MB max)
+    let meta = fs::metadata(&cache_path).ok()?;
+    if meta.len() > 50 * 1024 * 1024 {
+        log::warn!("Peak cache file too large ({:.1}MB), ignoring: {:?}", meta.len() as f64 / 1_048_576.0, cache_path);
+        return None;
+    }
+
     let mut file = File::open(&cache_path).ok()?;
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(meta.len() as usize);
     file.read_to_end(&mut buf).ok()?;
 
     // Validate header
@@ -413,7 +418,14 @@ fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
             channels = u16::from_le_bytes(data[pos + 10..pos + 12].try_into().ok()?);
             sample_rate = u32::from_le_bytes(data[pos + 12..pos + 16].try_into().ok()?);
             // skip byte_rate (4) and block_align (2)
-            bits_per_sample = u16::from_le_bytes(data[pos + 24..pos + 26].try_into().ok()?);
+            bits_per_sample = u16::from_le_bytes(data[pos + 22..pos + 24].try_into().ok()?);
+
+            // WAVE_FORMAT_EXTENSIBLE (0xFFFE): real format is in the SubFormat GUID.
+            // hound uses this for multi-channel and/or >16-bit audio (e.g. 32-bit float stereo).
+            if audio_format == 0xFFFE && chunk_size >= 40 {
+                let sub_format = u16::from_le_bytes(data[pos + 32..pos + 34].try_into().ok()?);
+                audio_format = sub_format;
+            }
             found_fmt = true;
         } else if chunk_id == b"data" {
             data_offset = pos + 8;
@@ -1147,8 +1159,15 @@ fn load_peak_pyramid(path: &Path) -> Option<(Vec<PyramidLevel>, u32, usize)> {
     let file_hash = peak_cache_key(path)?;
     let cache_path = pyramid_cache_path(file_hash)?;
 
+    // Size guard: reject corrupted/oversized pyramid files (200MB max)
+    let meta = fs::metadata(&cache_path).ok()?;
+    if meta.len() > 200 * 1024 * 1024 {
+        log::warn!("Peak pyramid file too large ({:.1}MB), ignoring: {:?}", meta.len() as f64 / 1_048_576.0, cache_path);
+        return None;
+    }
+
     let mut file = File::open(&cache_path).ok()?;
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(meta.len() as usize);
     file.read_to_end(&mut buf).ok()?;
 
     // Validate header (min 26 bytes: magic+version+hash+sr+frames+nlevels)

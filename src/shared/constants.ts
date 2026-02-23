@@ -30,7 +30,7 @@ export const DEFAULT_SETTINGS = {
   autoNavigateAfterWords: 3,
   waveformColor: '#00d4ff',
   playheadColor: '#ff3366',
-  selectionColor: 'rgba(0, 212, 255, 0.3)',
+  selectionColor: 'rgba(255, 255, 255, 0.2)',
   showTranscription: true,
   asrModel: 'whisper-tiny' as const,
   modelsPath: '',

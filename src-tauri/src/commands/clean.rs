@@ -70,8 +70,29 @@ pub async fn clean_audio(
         .make(&track.codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    // Collect all samples
-    let mut all_samples: Vec<f32> = Vec::new();
+    let samples_per_frame = channels as usize;
+
+    // Calculate sample range BEFORE decode loop — only decode the needed region
+    let start_sample = start_time
+        .map(|t| (t * sample_rate as f64) as usize * samples_per_frame)
+        .unwrap_or(0);
+
+    // Pre-decode size guard: estimate region size
+    if let (Some(st), Some(et)) = (start_time, end_time) {
+        let region_duration = (et - st).max(0.0);
+        let estimated_samples = (region_duration * sample_rate as f64) as usize * samples_per_frame;
+        let estimated_bytes = estimated_samples * std::mem::size_of::<f32>();
+        if estimated_bytes > 2_000_000_000 {
+            return Err(format!(
+                "Region too large to clean ({:.1}GB estimated). Try a smaller selection.",
+                estimated_bytes as f64 / 1_073_741_824.0
+            ));
+        }
+    }
+
+    // Decode only the needed region — skip frames before start, break after end
+    let mut region_samples: Vec<f32> = Vec::new();
+    let mut decoded_samples: usize = 0;
 
     loop {
         let packet = match format.next_packet() {
@@ -98,29 +119,41 @@ pub async fn clean_audio(
 
         let mut sample_buf = SampleBuffer::<f32>::new(duration, spec);
         sample_buf.copy_interleaved_ref(decoded);
-        all_samples.extend_from_slice(sample_buf.samples());
+        let packet_samples = sample_buf.samples();
+        let packet_len = packet_samples.len();
+
+        let packet_start = decoded_samples;
+        let packet_end = decoded_samples + packet_len;
+
+        // Determine end_sample dynamically (may be unbounded if end_time is None)
+        let end_sample = end_time
+            .map(|t| (t * sample_rate as f64) as usize * samples_per_frame)
+            .unwrap_or(usize::MAX);
+
+        // Skip packets entirely before the region
+        if packet_end <= start_sample {
+            decoded_samples += packet_len;
+            continue;
+        }
+
+        // Break if we've passed the region
+        if packet_start >= end_sample {
+            break;
+        }
+
+        // Collect the overlapping portion
+        let copy_start = start_sample.saturating_sub(packet_start);
+        let copy_end = (end_sample - packet_start).min(packet_len);
+        if copy_start < copy_end {
+            region_samples.extend_from_slice(&packet_samples[copy_start..copy_end]);
+        }
+
+        decoded_samples += packet_len;
     }
 
-    let total_samples = all_samples.len();
-    let samples_per_frame = channels as usize;
-
-    // Calculate sample range based on time
-    let start_sample = start_time
-        .map(|t| (t * sample_rate as f64) as usize * samples_per_frame)
-        .unwrap_or(0);
-    let end_sample = end_time
-        .map(|t| (t * sample_rate as f64) as usize * samples_per_frame)
-        .unwrap_or(total_samples);
-
-    let start_sample = start_sample.min(total_samples);
-    let end_sample = end_sample.min(total_samples);
-
-    if start_sample >= end_sample {
-        return Err("Invalid time range".to_string());
+    if region_samples.is_empty() {
+        return Err("Invalid time range or no audio in selection".to_string());
     }
-
-    // Extract the region to process
-    let region_samples: Vec<f32> = all_samples[start_sample..end_sample].to_vec();
 
     // Convert silence segments to sample indices
     let silence_segs: Option<Vec<SilenceSegment>> = silence_segments.map(|segs| {

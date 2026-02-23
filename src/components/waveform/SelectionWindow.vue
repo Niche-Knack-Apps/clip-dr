@@ -11,7 +11,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  color: 'rgba(0, 212, 255, 0.3)',
+  color: 'rgba(255, 255, 255, 0.2)',
   containerLeft: 0,
 });
 
@@ -158,7 +158,7 @@ function handleMouseUp() {
 
     <!-- Selection border -->
     <div
-      class="absolute inset-0 border-2 border-waveform-wave pointer-events-none"
+      class="absolute inset-0 border-2 border-white/30 pointer-events-none"
     />
   </div>
 </template>

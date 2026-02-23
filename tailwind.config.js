@@ -7,7 +7,7 @@ export default {
         'waveform': {
           'bg': '#1a1a2e',
           'wave': '#00d4ff',
-          'selection': 'rgba(0, 212, 255, 0.3)',
+          'selection': 'rgba(255, 255, 255, 0.2)',
           'playhead': '#ff3366',
           'clip': '#00ff88',
           'muted': '#666666',

@@ -532,24 +532,34 @@ export const usePlaybackStore = defineStore('playback', () => {
   );
 
   // Watch for volume envelope changes during playback — sync to Rust engine live
+  // Uses numeric hash instead of string concatenation to avoid O(tracks*points) string ops per frame
   watch(
-    () => tracksStore.tracks.map(t => ({
-      id: t.id,
-      env: t.volumeEnvelope ? t.volumeEnvelope.map(p => `${p.time}:${p.value}`).join(',') : '',
-    })),
-    async (newEnvs, oldEnvs) => {
-      if (!isPlaying.value || !oldEnvs) return;
-      for (let i = 0; i < newEnvs.length; i++) {
-        const ne = newEnvs[i];
-        const oe = oldEnvs.find(o => o.id === ne.id);
-        if (oe && oe.env !== ne.env) {
-          const track = tracksStore.tracks.find(t => t.id === ne.id);
-          const envelope = track?.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null;
-          await invoke('playback_set_track_envelope', { trackId: ne.id, envelope });
+    () => {
+      if (!isPlaying.value) return 0;
+      const tracks = tracksStore.tracks;
+      let hash = tracks.length;
+      for (const t of tracks) {
+        hash = ((hash << 5) - hash + t.id.charCodeAt(0)) | 0;
+        const env = t.volumeEnvelope;
+        if (env) {
+          hash = ((hash << 5) - hash + env.length) | 0;
+          for (const p of env) {
+            // Hash time and value as integers (multiply by 1000 for 3-decimal precision)
+            hash = ((hash << 5) - hash + (p.time * 1000 | 0)) | 0;
+            hash = ((hash << 5) - hash + (p.value * 1000 | 0)) | 0;
+          }
         }
       }
+      return hash;
     },
-    { deep: true }
+    async (newHash, oldHash) => {
+      if (newHash === oldHash || newHash === 0) return;
+      // Determine which tracks changed and sync their envelopes
+      for (const track of tracksStore.tracks) {
+        const envelope = track.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null;
+        await invoke('playback_set_track_envelope', { trackId: track.id, envelope });
+      }
+    }
   );
 
   // Watch for track mute/solo changes during playback — sync to Rust engine
