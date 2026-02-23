@@ -129,6 +129,80 @@ function handleWheel(event: WheelEvent) {
   selectionStore.setSelection(newStart, newEnd);
 }
 
+// Drag-to-pan state (for the grip bar above the waveform)
+const isDragPanning = ref(false);
+let dragLastX = 0;
+let dragRafId: number | null = null;
+let pendingDragEvent: MouseEvent | Touch | null = null;
+
+function handleDragBarMouseDown(event: MouseEvent) {
+  if (event.button !== 0) return;
+  isDragPanning.value = true;
+  dragLastX = event.clientX;
+  document.addEventListener('mousemove', handleDragBarMouseMove);
+  document.addEventListener('mouseup', handleDragBarMouseUp);
+}
+
+function handleDragBarMouseMove(event: MouseEvent) {
+  pendingDragEvent = event;
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(flushDragMove);
+  }
+}
+
+function flushDragMove() {
+  dragRafId = null;
+  const event = pendingDragEvent;
+  if (!event) return;
+  pendingDragEvent = null;
+
+  const deltaX = event.clientX - dragLastX;
+  dragLastX = event.clientX;
+  const dur = duration.value;
+  if (dur <= 0 || containerWidth.value <= 0) return;
+  const deltaTime = deltaX / (containerWidth.value / dur);
+  selectionStore.moveSelection(deltaTime);
+}
+
+function handleDragBarMouseUp() {
+  if (pendingDragEvent) flushDragMove();
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
+  isDragPanning.value = false;
+  document.removeEventListener('mousemove', handleDragBarMouseMove);
+  document.removeEventListener('mouseup', handleDragBarMouseUp);
+}
+
+function handleDragBarTouchStart(event: TouchEvent) {
+  if (event.touches.length !== 1) return;
+  isDragPanning.value = true;
+  dragLastX = event.touches[0].clientX;
+  document.addEventListener('touchmove', handleDragBarTouchMove, { passive: false });
+  document.addEventListener('touchend', handleDragBarTouchEnd);
+}
+
+function handleDragBarTouchMove(event: TouchEvent) {
+  event.preventDefault();
+  if (event.touches.length !== 1) return;
+  pendingDragEvent = event.touches[0];
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(flushDragMove);
+  }
+}
+
+function handleDragBarTouchEnd() {
+  if (pendingDragEvent) flushDragMove();
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
+  isDragPanning.value = false;
+  document.removeEventListener('touchmove', handleDragBarTouchMove);
+  document.removeEventListener('touchend', handleDragBarTouchEnd);
+}
+
 let resizeObserver: ResizeObserver | null = null;
 let resizeRafId: number | null = null;
 
@@ -194,6 +268,13 @@ onUnmounted(() => {
   if (resizeRafId !== null) {
     cancelAnimationFrame(resizeRafId);
   }
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+  }
+  document.removeEventListener('mousemove', handleDragBarMouseMove);
+  document.removeEventListener('mouseup', handleDragBarMouseUp);
+  document.removeEventListener('touchmove', handleDragBarTouchMove);
+  document.removeEventListener('touchend', handleDragBarTouchEnd);
 });
 </script>
 
@@ -202,6 +283,20 @@ onUnmounted(() => {
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-700">
       <span class="text-xs text-gray-400">Full Waveform</span>
       <span class="text-xs text-gray-500 font-mono">{{ formatTime(duration) }}</span>
+    </div>
+
+    <!-- Drag strip to pan zoom window -->
+    <div
+      class="h-4 flex items-center justify-center select-none bg-gray-800/50"
+      :class="isDragPanning ? 'cursor-grabbing' : 'cursor-grab'"
+      @mousedown="handleDragBarMouseDown"
+      @touchstart.passive="handleDragBarTouchStart"
+    >
+      <div class="flex flex-col gap-[2px] opacity-40">
+        <div class="w-6 h-px bg-gray-400" />
+        <div class="w-6 h-px bg-gray-400" />
+        <div class="w-6 h-px bg-gray-400" />
+      </div>
     </div>
 
     <div
