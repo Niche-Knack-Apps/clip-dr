@@ -106,8 +106,23 @@ function handleWindowBlur() {
   }
 }
 
-onMounted(() => window.addEventListener('blur', handleWindowBlur));
-onUnmounted(() => window.removeEventListener('blur', handleWindowBlur));
+// Close recording panel on click outside the transport area
+function handleClickOutside(event: MouseEvent) {
+  if (!showRecordingPanel.value) return;
+  if (recordingStore.isRecording || recordingStore.isPreparing) return;
+  const target = event.target as HTMLElement;
+  if (transportRef.value?.contains(target)) return;
+  showRecordingPanel.value = false;
+}
+
+onMounted(() => {
+  window.addEventListener('blur', handleWindowBlur);
+  document.addEventListener('mousedown', handleClickOutside);
+});
+onUnmounted(() => {
+  window.removeEventListener('blur', handleWindowBlur);
+  document.removeEventListener('mousedown', handleClickOutside);
+});
 
 // Compute recording panel max-width when it opens so it doesn't overflow viewport
 watch(showRecordingPanel, (show) => {
