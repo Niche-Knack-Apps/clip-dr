@@ -23,13 +23,28 @@ interface WaveformSessionCallbacks {
 const waveformSessions = new Map<string, WaveformSessionCallbacks>();
 let globalWaveformListenersReady = false;
 
+// Buffer for events that arrive before session callbacks are registered.
+// The WAV mmap fast path in Rust can complete and emit import-complete
+// before the frontend's invoke() returns and registers the session callbacks.
+const pendingWaveformEvents = new Map<string, {
+  chunks: WaveformChunkEvent[];
+  complete?: ImportCompleteEvent;
+  error?: string;
+}>();
+
 function ensureGlobalWaveformListeners(): void {
   if (globalWaveformListenersReady) return;
   globalWaveformListenersReady = true;
 
   listen<WaveformChunkEvent>('import-waveform-chunk', (event) => {
     const cb = waveformSessions.get(event.payload.sessionId);
-    if (cb) cb.onChunk(event.payload);
+    if (cb) {
+      cb.onChunk(event.payload);
+    } else {
+      let pending = pendingWaveformEvents.get(event.payload.sessionId);
+      if (!pending) { pending = { chunks: [] }; pendingWaveformEvents.set(event.payload.sessionId, pending); }
+      pending.chunks.push(event.payload);
+    }
   });
 
   listen<ImportCompleteEvent>('import-complete', (event) => {
@@ -37,6 +52,10 @@ function ensureGlobalWaveformListeners(): void {
     if (cb) {
       cb.onComplete(event.payload);
       waveformSessions.delete(event.payload.sessionId);
+    } else {
+      let pending = pendingWaveformEvents.get(event.payload.sessionId);
+      if (!pending) { pending = { chunks: [] }; pendingWaveformEvents.set(event.payload.sessionId, pending); }
+      pending.complete = event.payload;
     }
   });
 
@@ -45,8 +64,32 @@ function ensureGlobalWaveformListeners(): void {
     if (cb) {
       cb.onError(event.payload.error);
       waveformSessions.delete(event.payload.sessionId);
+    } else {
+      let pending = pendingWaveformEvents.get(event.payload.sessionId);
+      if (!pending) { pending = { chunks: [] }; pendingWaveformEvents.set(event.payload.sessionId, pending); }
+      pending.error = event.payload.error;
     }
   });
+}
+
+// Register session callbacks AND replay any buffered events
+function registerWaveformSession(sessionId: string, callbacks: WaveformSessionCallbacks): void {
+  waveformSessions.set(sessionId, callbacks);
+
+  const pending = pendingWaveformEvents.get(sessionId);
+  if (pending) {
+    pendingWaveformEvents.delete(sessionId);
+    for (const chunk of pending.chunks) {
+      callbacks.onChunk(chunk);
+    }
+    if (pending.error) {
+      callbacks.onError(pending.error);
+      waveformSessions.delete(sessionId);
+    } else if (pending.complete) {
+      callbacks.onComplete(pending.complete);
+      waveformSessions.delete(sessionId);
+    }
+  }
 }
 
 export const useAudioStore = defineStore('audio', () => {
@@ -196,7 +239,7 @@ export const useAudioStore = defineStore('audio', () => {
       if (!waveformSettled) {
         // Phase 2: Register callbacks synchronously via global listeners (no await gap = no race)
         let chunkCount = 0;
-        waveformSessions.set(sessionId, {
+        registerWaveformSession(sessionId, {
           onChunk: (payload) => {
             const track = tracksStore.tracks.find(t => t.id === trackId);
             if (!track) return;
@@ -336,7 +379,8 @@ export const useAudioStore = defineStore('audio', () => {
         console.log(`[Audio] [${ms()}] Buffer set — playback enabled, playhead at ${trackStart.toFixed(1)}s`);
 
         // Proactively cache compressed formats for smooth Rust mmap playback
-        const isCompressed = metadata.format !== 'wav' && metadata.format !== 'rf64';
+        const fmt = metadata.format.toLowerCase();
+        const isCompressed = fmt !== 'wav' && fmt !== 'wave' && fmt !== 'rf64';
         if (isCompressed) {
           if (!unlistenCacheReady) {
             unlistenCacheReady = await listen<{ trackId: string; cachedPath: string }>('audio-cache-ready', (event) => {
