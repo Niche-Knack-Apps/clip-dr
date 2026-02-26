@@ -28,6 +28,7 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .manage(import::ImportState::new())
         .manage(playback::PlaybackEngine::new())
+        .manage(recording::RecordingManager::new())
         .setup(|app| {
             let app_handle = app.handle().clone();
             services::path_service::init(&app_handle)?;

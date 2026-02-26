@@ -2,6 +2,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat};
 use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write, Seek, SeekFrom};
 use std::panic;
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use tauri::State;
 
 /// Wrapper to make cpal::Stream storable in a Mutex (it's !Send but we only
 /// access from the main thread during setup/teardown).
@@ -39,13 +41,108 @@ impl Drop for StreamHolder {
     }
 }
 
-/// Properly hold recording and monitor streams so they can be dropped
-static RECORDING_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
-static MONITOR_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
-/// Device preview stream (separate from monitor -- for inline VU in device picker)
-static PREVIEW_STREAM: Mutex<Option<StreamHolder>> = Mutex::new(None);
-static PREVIEW_LEVEL: AtomicU32 = AtomicU32::new(0);
-static PREVIEW_ACTIVE: AtomicBool = AtomicBool::new(false);
+// ── Per-Session Recording Architecture ──
+// RecordingManager is Tauri managed state; individual sessions hold per-stream
+// ring buffers, level atomics, and active flags. Old single-session commands
+// map to the "default" session for backward compatibility.
+
+/// A single recording session (one input device → one WAV file).
+struct RecordingSession {
+    stream: Option<StreamHolder>,
+    ring_buffer: Option<Arc<RecordingRingBuffer>>,
+    writer_handle: Option<JoinHandle<(AudioWriter, usize, Vec<PathBuf>)>>,
+    /// Per-session active flag (checked by audio callback)
+    active: Arc<AtomicBool>,
+    /// Per-session peak level (updated by audio callback, read by polling)
+    level: Arc<AtomicU32>,
+    /// Per-session debug callback counter
+    debug_count: Arc<AtomicUsize>,
+    sample_rate: u32,
+    channels: u16,
+    output_path: PathBuf,
+    target_mono: bool,
+    large_file_format: String,
+    use_system_buffer: bool,
+}
+
+/// Managed state for all recording, monitoring, and preview operations.
+/// Holds Arc-wrapped atomics so audio threads can access them without statics.
+pub struct RecordingManager {
+    /// Active recording sessions keyed by session ID ("default" for single-session)
+    sessions: Mutex<HashMap<String, RecordingSession>>,
+
+    // ── Monitor state (not per-session) ──
+    monitor_stream: Mutex<Option<StreamHolder>>,
+    monitoring_active: Arc<AtomicBool>,
+
+    // ── Preview state (not per-session) ──
+    preview_stream: Mutex<Option<StreamHolder>>,
+    preview_active: Arc<AtomicBool>,
+    preview_level: Arc<AtomicU32>,
+
+    // ── Shared current level (backward compat: single-session & monitoring) ──
+    current_level: Arc<AtomicU32>,
+
+    // ── System audio state (inherently single-instance) ──
+    system_monitor_active: Arc<AtomicBool>,
+    system_monitor_child: Arc<Mutex<Option<std::process::Child>>>,
+    system_recording_active: Arc<AtomicBool>,
+    system_wav_writer: Arc<Mutex<Option<AudioWriter>>>,
+    system_segment_base_path: Mutex<Option<PathBuf>>,
+    system_completed_segments: Mutex<Vec<PathBuf>>,
+    system_segment_data_bytes: Arc<AtomicUsize>,
+    system_segment_index: Arc<AtomicUsize>,
+    system_audio_sample_count: Arc<AtomicUsize>,
+    debug_callback_count: Arc<AtomicUsize>,
+}
+
+// RecordingSession contains a StreamHolder which has `unsafe impl Send`.
+// The Mutex wrappers ensure safe concurrent access.
+unsafe impl Send for RecordingSession {}
+
+impl RecordingManager {
+    pub fn new() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            monitor_stream: Mutex::new(None),
+            monitoring_active: Arc::new(AtomicBool::new(false)),
+            preview_stream: Mutex::new(None),
+            preview_active: Arc::new(AtomicBool::new(false)),
+            preview_level: Arc::new(AtomicU32::new(0)),
+            current_level: Arc::new(AtomicU32::new(0)),
+            system_monitor_active: Arc::new(AtomicBool::new(false)),
+            system_monitor_child: Arc::new(Mutex::new(None)),
+            system_recording_active: Arc::new(AtomicBool::new(false)),
+            system_wav_writer: Arc::new(Mutex::new(None)),
+            system_segment_base_path: Mutex::new(None),
+            system_completed_segments: Mutex::new(Vec::new()),
+            system_segment_data_bytes: Arc::new(AtomicUsize::new(0)),
+            system_segment_index: Arc::new(AtomicUsize::new(1)),
+            system_audio_sample_count: Arc::new(AtomicUsize::new(0)),
+            debug_callback_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Check if any session is actively recording
+    fn is_any_recording(&self) -> bool {
+        if let Ok(sessions) = self.sessions.lock() {
+            sessions.values().any(|s| s.active.load(Ordering::SeqCst))
+        } else {
+            false
+        }
+    }
+
+    /// Get the "default" session's recording active state
+    fn is_default_recording(&self) -> bool {
+        if let Ok(sessions) = self.sessions.lock() {
+            sessions.get("default")
+                .map(|s| s.active.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+}
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,44 +198,8 @@ pub struct RecordingResult {
     pub extra_segments: Vec<String>,
 }
 
-// Global recording state
-lazy_static::lazy_static! {
-    static ref RECORDING_STATE: Arc<Mutex<Option<RecordingState>>> = Arc::new(Mutex::new(None));
-    static ref RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static ref MONITORING_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static ref SYSTEM_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static ref SYSTEM_MONITOR_CHILD: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
-    static ref CURRENT_LEVEL: AtomicU32 = AtomicU32::new(0);
-    static ref DEBUG_CALLBACK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    // For streaming system audio - track sample count (no accumulation)
-    static ref SYSTEM_AUDIO_SAMPLE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    static ref SYSTEM_WAV_WRITER: Arc<Mutex<Option<AudioWriter>>> = Arc::new(Mutex::new(None));
-    // System audio segment tracking (for WAV auto-split)
-    static ref SYSTEM_SEGMENT_BASE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
-    static ref SYSTEM_COMPLETED_SEGMENTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-}
-
 /// Maximum PCM data bytes per WAV segment (~3.63 GB, safely below u32::MAX = 4,294,967,295)
 const WAV_SEGMENT_MAX_DATA_BYTES: usize = 3_900_000_000;
-
-/// Track bytes written to current system audio WAV segment
-static SYSTEM_SEGMENT_DATA_BYTES: AtomicUsize = AtomicUsize::new(0);
-/// Current system audio segment index (1-based)
-static SYSTEM_SEGMENT_INDEX: AtomicUsize = AtomicUsize::new(1);
-
-struct RecordingState {
-    sample_count: usize,
-    sample_rate: u32,
-    channels: u16,
-    output_path: PathBuf,
-    use_system_buffer: bool,
-    target_mono: bool,
-    /// "split-tracks" (default) or "rf64" for single-file >4GB recording
-    large_file_format: String,
-    // Ring buffer + writer thread (mic recording only; system audio uses SYSTEM_WAV_WRITER)
-    ring_buffer: Option<Arc<RecordingRingBuffer>>,
-    writer_handle: Option<JoinHandle<(AudioWriter, usize, Vec<PathBuf>)>>,
-}
 
 // ── Lock-free ring buffer for realtime-safe recording ──
 
@@ -1071,9 +1132,9 @@ pub fn get_device_capabilities(device_id: String) -> Result<DeviceCapabilities, 
 /// Start a preview stream on a specific device (for inline VU meter in device picker).
 /// Only one preview stream can be active at a time.
 #[tauri::command]
-pub async fn start_device_preview(device_id: String) -> Result<(), String> {
+pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingManager>) -> Result<(), String> {
     // Stop any existing preview
-    stop_device_preview_internal();
+    stop_device_preview_internal(&mgr);
     std::thread::sleep(Duration::from_millis(50));
 
     let host = cpal::default_host();
@@ -1086,21 +1147,24 @@ pub async fn start_device_preview(device_id: String) -> Result<(), String> {
     let config = device.default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-    PREVIEW_ACTIVE.store(true, Ordering::SeqCst);
-    PREVIEW_LEVEL.store(0, Ordering::SeqCst);
+    mgr.preview_active.store(true, Ordering::SeqCst);
+    mgr.preview_level.store(0, Ordering::SeqCst);
+
+    let active = mgr.preview_active.clone();
+    let level = mgr.preview_level.clone();
 
     let stream = match config.sample_format() {
-        SampleFormat::F32 => build_preview_stream::<f32>(&device, &config.into())?,
-        SampleFormat::I16 => build_preview_stream::<i16>(&device, &config.into())?,
-        SampleFormat::U16 => build_preview_stream::<u16>(&device, &config.into())?,
-        SampleFormat::I32 => build_preview_stream::<i32>(&device, &config.into())?,
-        SampleFormat::U8 => build_preview_stream::<u8>(&device, &config.into())?,
+        SampleFormat::F32 => build_preview_stream::<f32>(&device, &config.into(), active, level)?,
+        SampleFormat::I16 => build_preview_stream::<i16>(&device, &config.into(), active, level)?,
+        SampleFormat::U16 => build_preview_stream::<u16>(&device, &config.into(), active, level)?,
+        SampleFormat::I32 => build_preview_stream::<i32>(&device, &config.into(), active, level)?,
+        SampleFormat::U8 => build_preview_stream::<u8>(&device, &config.into(), active, level)?,
         fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
     stream.play().map_err(|e| format!("Failed to start preview stream: {}", e))?;
 
-    if let Ok(mut guard) = PREVIEW_STREAM.lock() {
+    if let Ok(mut guard) = mgr.preview_stream.lock() {
         *guard = Some(StreamHolder::new(stream));
     }
 
@@ -1111,6 +1175,8 @@ pub async fn start_device_preview(device_id: String) -> Result<(), String> {
 fn build_preview_stream<T: Sample + cpal::SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    active: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
 ) -> Result<cpal::Stream, String>
 where
     f32: cpal::FromSample<T>,
@@ -1118,14 +1184,14 @@ where
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            if !PREVIEW_ACTIVE.load(Ordering::SeqCst) { return; }
+            if !active.load(Ordering::SeqCst) { return; }
             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                 let mut max_level: f32 = 0.0;
                 for s in data.iter() {
                     let f = f32::from_sample(*s);
                     max_level = max_level.max(f.abs());
                 }
-                PREVIEW_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+                level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
             }));
             if result.is_err() {
                 log::warn!("Preview callback panic caught (ALSA timing issue)");
@@ -1139,31 +1205,31 @@ where
 
 /// Get the current preview level (0.0 - 1.0)
 #[tauri::command]
-pub fn get_device_preview_level() -> f32 {
-    PREVIEW_LEVEL.load(Ordering::SeqCst) as f32 / 1000.0
+pub fn get_device_preview_level(mgr: State<'_, RecordingManager>) -> f32 {
+    mgr.preview_level.load(Ordering::SeqCst) as f32 / 1000.0
 }
 
 /// Stop device preview
 #[tauri::command]
-pub fn stop_device_preview() {
+pub fn stop_device_preview(mgr: State<'_, RecordingManager>) {
     log::info!("Stopping device preview");
-    stop_device_preview_internal();
+    stop_device_preview_internal(&mgr);
 }
 
-fn stop_device_preview_internal() {
-    PREVIEW_ACTIVE.store(false, Ordering::SeqCst);
-    if let Ok(mut guard) = PREVIEW_STREAM.lock() {
+fn stop_device_preview_internal(mgr: &RecordingManager) {
+    mgr.preview_active.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = mgr.preview_stream.lock() {
         *guard = None;
     }
-    PREVIEW_LEVEL.store(0, Ordering::SeqCst);
+    mgr.preview_level.store(0, Ordering::SeqCst);
 }
 
 #[tauri::command]
-pub async fn start_recording(device_id: Option<String>, output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>) -> Result<String, String> {
+pub async fn start_recording(device_id: Option<String>, output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>, mgr: State<'_, RecordingManager>) -> Result<String, String> {
     // Auto-reset any stuck state from previous failed recordings
-    if RECORDING_ACTIVE.load(Ordering::SeqCst) {
+    if mgr.is_default_recording() {
         log::warn!("Recording state was stuck, auto-resetting...");
-        reset_recording_state();
+        reset_recording_state_internal(&mgr);
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
@@ -1203,19 +1269,16 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     // Score configs: prefer stereo, prefer F32/I16, prefer matching sample rate
     fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
         let mut score = 0;
-        // Prefer stereo for higher-quality recording (transcription handles mono downmix separately)
         if cfg.channels() == 2 { score += 100; }
         else if cfg.channels() == 1 { score += 50; }
-        // Prefer good sample formats
         match cfg.sample_format() {
             SampleFormat::F32 => score += 50,
             SampleFormat::I16 => score += 40,
             SampleFormat::I32 => score += 30,
             SampleFormat::F64 => score += 25,
             SampleFormat::U16 => score += 20,
-            _ => {} // U8 and others get no bonus
+            _ => {}
         }
-        // Prefer configs that support the target sample rate
         let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
         if rate_range.contains(&target_rate) { score += 10; }
         if rate_range.contains(&44100) { score += 5; }
@@ -1250,12 +1313,8 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     let sample_format = config.sample_format();
     log::info!(
         "Recording config: {} Hz, {} channels, {:?}",
-        sample_rate,
-        channels,
-        sample_format
+        sample_rate, channels, sample_format
     );
-
-    // Debug: Log more details about the device config
     log::info!("Buffer size: {:?}", config.buffer_size());
 
     // Ensure output directory exists
@@ -1290,24 +1349,13 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
             .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
     };
 
-    // Initialize recording state (writer_handle and ring_buffer set after spawn below)
-    {
-        let mut state = RECORDING_STATE.lock().unwrap();
-        *state = Some(RecordingState {
-            sample_count: 0,
-            sample_rate,
-            channels,
-            output_path: output_path.clone(),
-            use_system_buffer: false,
-            target_mono,
-            large_file_format: lff,
-            ring_buffer: None,
-            writer_handle: None,
-        });
-    }
+    // Create per-session atomics
+    let session_active = Arc::new(AtomicBool::new(true));
+    let session_level = Arc::new(AtomicU32::new(0));
+    let session_debug = Arc::new(AtomicUsize::new(0));
 
-    RECORDING_ACTIVE.store(true, Ordering::SeqCst);
-    DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+    // Also update the shared current_level for backward compat
+    mgr.current_level.store(0, Ordering::SeqCst);
 
     // Create ring buffer for lock-free audio callback → writer thread communication
     let ring = Arc::new(RecordingRingBuffer::new(
@@ -1315,37 +1363,43 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     ).with_channels(channels));
 
     // Spawn the writer thread (drains ring buffer → disk)
-    let writer_ring = ring.clone();
     let writer_handle = spawn_wav_writer_thread(
-        writer_ring, audio_writer, channels, target_mono,
+        ring.clone(), audio_writer, channels, target_mono,
         output_path.clone(), spec, use_rf64,
     );
 
-    // Store writer handle for stop_recording() to join
-    {
-        let mut state = RECORDING_STATE.lock().unwrap();
-        if let Some(ref mut s) = *state {
-            s.writer_handle = Some(writer_handle);
-            s.ring_buffer = Some(ring.clone());
-        }
-    }
-
-    // Build stream based on sample format
+    // Build stream based on sample format (per-session atomics)
     let stream_config: cpal::StreamConfig = config.into();
+    let shared_level = mgr.current_level.clone();
     let stream = match sample_format {
-        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone())?,
-        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone())?,
-        SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone())?,
-        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone())?,
-        SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone())?,
+        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
         fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
     stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
 
-    // Store stream properly (dropped on stop/cancel to release OS audio resources)
-    if let Ok(mut guard) = RECORDING_STREAM.lock() {
-        *guard = Some(StreamHolder::new(stream));
+    // Create session and store it
+    let session = RecordingSession {
+        stream: Some(StreamHolder::new(stream)),
+        ring_buffer: Some(ring),
+        writer_handle: Some(writer_handle),
+        active: session_active,
+        level: session_level,
+        debug_count: session_debug,
+        sample_rate,
+        channels,
+        output_path: output_path.clone(),
+        target_mono,
+        large_file_format: lff,
+        use_system_buffer: false,
+    };
+
+    if let Ok(mut sessions) = mgr.sessions.lock() {
+        sessions.insert("default".to_string(), session);
     }
 
     Ok(output_path.to_string_lossy().to_string())
@@ -1355,6 +1409,10 @@ fn build_input_stream<T: Sample + cpal::SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     ring: Arc<RecordingRingBuffer>,
+    active: Arc<AtomicBool>,
+    session_level: Arc<AtomicU32>,
+    shared_level: Arc<AtomicU32>,
+    debug_count: Arc<AtomicUsize>,
 ) -> Result<cpal::Stream, String>
 where
     f32: cpal::FromSample<T>,
@@ -1367,7 +1425,7 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
+                if !active.load(Ordering::SeqCst) {
                     return;
                 }
 
@@ -1380,7 +1438,6 @@ where
                     // Check if ring buffer has enough space (drop samples if full)
                     let used = wp.wrapping_sub(rp);
                     if used + data.len() > cap {
-                        // Buffer full — writer thread can't keep up. Drop this callback batch.
                         ring.overrun_count.fetch_add(1, Ordering::Relaxed);
                         let _ = ring.max_fill_level.fetch_max(cap, Ordering::Relaxed);
                         return;
@@ -1400,11 +1457,13 @@ where
                     // Update telemetry: high-water mark of ring usage
                     let _ = ring.max_fill_level.fetch_max(used + data.len(), Ordering::Relaxed);
 
-                    // Update level meter (atomic, no alloc)
-                    CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+                    // Update level meters (per-session + shared)
+                    let level_int = (max_level * 1000.0) as u32;
+                    session_level.store(level_int, Ordering::SeqCst);
+                    shared_level.store(level_int, Ordering::SeqCst);
 
                     // Debug logging every ~1 second
-                    let count = DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+                    let count = debug_count.fetch_add(1, Ordering::SeqCst);
                     if count % 43 == 0 {
                         log::info!(
                             "Recording callback #{}: {} samples, max_level={:.4}, ring used={}/{}",
@@ -1424,31 +1483,26 @@ where
 }
 
 #[tauri::command]
-pub async fn stop_recording() -> Result<RecordingResult, String> {
-    if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
-        return Err("No recording in progress".to_string());
-    }
+pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<RecordingResult, String> {
+    // Extract the "default" session
+    let session = {
+        let mut sessions = mgr.sessions.lock().map_err(|_| "Session lock poisoned".to_string())?;
+        sessions.remove("default")
+    };
 
-    RECORDING_ACTIVE.store(false, Ordering::SeqCst);
+    let mut session = session.ok_or("No recording in progress")?;
+
+    // Signal session to stop
+    session.active.store(false, Ordering::SeqCst);
 
     // Give the stream callback a moment to see the flag
     std::thread::sleep(Duration::from_millis(100));
 
     // Drop cpal stream to release OS audio resources
-    if let Ok(mut guard) = RECORDING_STREAM.lock() {
-        *guard = None;
-    }
-
-    // Extract recording state
-    let state = {
-        let mut state_guard = RECORDING_STATE.lock().unwrap();
-        state_guard.take()
-    };
-
-    let state = state.ok_or("Recording state not found")?;
+    session.stream = None;
 
     // Signal ring buffer to stop and join writer thread to get writer back
-    let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) = (state.ring_buffer, state.writer_handle) {
+    let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) = (session.ring_buffer.take(), session.writer_handle.take()) {
         // Log telemetry before joining
         let overruns = ring.overrun_count.load(Ordering::Relaxed);
         let max_fill = ring.max_fill_level.load(Ordering::Relaxed);
@@ -1467,9 +1521,11 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
                 return Err("Writer thread panicked".to_string());
             }
         }
-    } else {
+    } else if session.use_system_buffer {
         // System audio recording path (no ring buffer)
-        (None, state.sample_count, Vec::new())
+        (None, 0usize, Vec::new())
+    } else {
+        return Err("Recording state incomplete".to_string());
     };
 
     if sample_count == 0 {
@@ -1477,13 +1533,12 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
     }
 
     // Calculate duration
-    let samples_per_channel = sample_count / state.channels as usize;
-    let duration = samples_per_channel as f64 / state.sample_rate as f64;
+    let samples_per_channel = sample_count / session.channels as usize;
+    let duration = samples_per_channel as f64 / session.sample_rate as f64;
 
     log::info!(
         "Recording complete: {} samples, {:.2}s duration",
-        sample_count,
-        duration
+        sample_count, duration
     );
 
     // Finalize the writer
@@ -1493,8 +1548,8 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
     }
 
     // Patch the last segment's header (safety net for hound u32 overflow — only for split-tracks mode)
-    let use_rf64 = state.large_file_format == "rf64";
-    let last_seg_path = segment_path(&state.output_path, completed_segments.len() + 1);
+    let use_rf64 = session.large_file_format == "rf64";
+    let last_seg_path = segment_path(&session.output_path, completed_segments.len() + 1);
     if !use_rf64 {
         let _ = patch_wav_header_if_needed(&last_seg_path);
     }
@@ -1506,15 +1561,11 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
 
     // Build extra_segments list (no concatenation — keep them as separate tracks)
     let extra_segments: Vec<String> = if !completed_segments.is_empty() {
-        // completed_segments are segments 1..N-1, last_seg_path is segment N
-        // Patch headers of completed segments too
         for seg in &completed_segments {
             if !use_rf64 {
                 let _ = patch_wav_header_if_needed(seg);
             }
         }
-        // First segment = state.output_path (already in `path` field)
-        // Extra segments = completed[1..] + last_seg_path
         let mut extras: Vec<String> = completed_segments.iter()
             .skip(1)
             .map(|p| p.to_string_lossy().to_string())
@@ -1525,98 +1576,96 @@ pub async fn stop_recording() -> Result<RecordingResult, String> {
         Vec::new()
     };
 
-    // Convert to mono if needed (only for single-segment or first segment)
-    let final_channels = if state.target_mono && state.channels == 2 && extra_segments.is_empty() {
-        stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
+    // Convert to mono if needed (only for single-segment)
+    let final_channels = if session.target_mono && session.channels == 2 && extra_segments.is_empty() {
+        stereo_wav_to_mono_streaming(&session.output_path, session.sample_rate)?;
         1u16
     } else {
-        state.channels
+        session.channels
     };
 
-    log::info!("Saved recording to: {:?} ({} extra segments)", state.output_path, extra_segments.len());
+    // Reset shared level
+    mgr.current_level.store(0, Ordering::SeqCst);
+
+    log::info!("Saved recording to: {:?} ({} extra segments)", session.output_path, extra_segments.len());
 
     Ok(RecordingResult {
-        path: state.output_path.to_string_lossy().to_string(),
+        path: session.output_path.to_string_lossy().to_string(),
         duration,
-        sample_rate: state.sample_rate,
+        sample_rate: session.sample_rate,
         channels: final_channels,
         extra_segments,
     })
 }
 
 #[tauri::command]
-pub fn get_recording_level() -> f32 {
-    let level_int = CURRENT_LEVEL.load(Ordering::SeqCst);
-    level_int as f32 / 1000.0
+pub fn get_recording_level(mgr: State<'_, RecordingManager>) -> f32 {
+    mgr.current_level.load(Ordering::SeqCst) as f32 / 1000.0
 }
 
 #[tauri::command]
-pub fn is_recording() -> bool {
-    RECORDING_ACTIVE.load(Ordering::SeqCst)
+pub fn is_recording(mgr: State<'_, RecordingManager>) -> bool {
+    mgr.is_default_recording() || mgr.system_recording_active.load(Ordering::SeqCst)
 }
 
 #[tauri::command]
-pub async fn cancel_recording() -> Result<(), String> {
-    if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
-        return Ok(());
-    }
+pub async fn cancel_recording(mgr: State<'_, RecordingManager>) -> Result<(), String> {
+    // Extract the "default" session
+    let session = {
+        let mut sessions = mgr.sessions.lock().map_err(|_| "Session lock poisoned".to_string())?;
+        sessions.remove("default")
+    };
 
-    RECORDING_ACTIVE.store(false, Ordering::SeqCst);
+    if let Some(mut session) = session {
+        session.active.store(false, Ordering::SeqCst);
 
-    // Drop cpal stream to release OS audio resources
-    if let Ok(mut guard) = RECORDING_STREAM.lock() {
-        *guard = None;
-    }
+        // Drop cpal stream
+        session.stream = None;
 
-    // Clear the recording state and clean up incomplete file(s)
-    if let Ok(mut state_guard) = RECORDING_STATE.lock() {
-        if let Some(s) = state_guard.take() {
-            let output_path = s.output_path.clone();
-            // Stop ring buffer and join writer thread before cleaning up
-            if let Some(ring) = &s.ring_buffer {
-                ring.active.store(false, Ordering::Release);
-            }
-            if let Some(handle) = s.writer_handle {
-                match handle.join() {
-                    Ok((_writer, _count, completed)) => {
-                        // Delete completed segment files
-                        for seg in &completed {
-                            let _ = std::fs::remove_file(seg);
-                        }
+        let output_path = session.output_path.clone();
+        // Stop ring buffer and join writer thread before cleaning up
+        if let Some(ring) = &session.ring_buffer {
+            ring.active.store(false, Ordering::Release);
+        }
+        if let Some(handle) = session.writer_handle.take() {
+            match handle.join() {
+                Ok((_writer, _count, completed)) => {
+                    for seg in &completed {
+                        let _ = std::fs::remove_file(seg);
                     }
-                    Err(_) => {} // Thread panicked, nothing extra to clean up
                 }
+                Err(_) => {}
             }
-            let _ = std::fs::remove_file(&output_path);
+        }
+        let _ = std::fs::remove_file(&output_path);
 
-            // Clean up system audio segments if any
-            if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() {
-                for seg in completed.drain(..) {
-                    let _ = std::fs::remove_file(&seg);
-                }
+        // Clean up system audio segments if any
+        if let Ok(mut completed) = mgr.system_completed_segments.lock() {
+            for seg in completed.drain(..) {
+                let _ = std::fs::remove_file(&seg);
             }
         }
     }
 
+    mgr.current_level.store(0, Ordering::SeqCst);
     log::info!("Recording cancelled");
     Ok(())
 }
 
 /// Start monitoring a device (show levels without recording)
 #[tauri::command]
-pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
-    // Stop any existing monitoring and give the old stream callback time to see the flag
-    stop_monitoring_internal();
-    // Also reset any stuck recording state that might interfere
-    if RECORDING_ACTIVE.load(Ordering::SeqCst) {
+pub async fn start_monitoring(device_id: Option<String>, mgr: State<'_, RecordingManager>) -> Result<(), String> {
+    // Stop any existing monitoring
+    stop_monitoring_internal(&mgr);
+    // Also reset any stuck recording state
+    if mgr.is_default_recording() {
         log::warn!("Recording state was stuck during monitor start, resetting...");
-        reset_recording_state();
+        reset_recording_state_internal(&mgr);
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let host = cpal::default_host();
 
-    // Select device
     let device = if let Some(ref id) = device_id {
         host.input_devices()
             .map_err(|e| format!("Failed to enumerate devices: {}", e))?
@@ -1630,28 +1679,28 @@ pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
     let device_name = device.name().unwrap_or_default();
     log::info!("Starting monitoring on device: {}", device_name);
 
-    // Get supported config
     let config = device
         .default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-    MONITORING_ACTIVE.store(true, Ordering::SeqCst);
-    CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    mgr.monitoring_active.store(true, Ordering::SeqCst);
+    mgr.current_level.store(0, Ordering::SeqCst);
 
-    // Build stream based on sample format
+    let active = mgr.monitoring_active.clone();
+    let level = mgr.current_level.clone();
+
     let stream = match config.sample_format() {
-        SampleFormat::F32 => build_monitor_stream::<f32>(&device, &config.into())?,
-        SampleFormat::I16 => build_monitor_stream::<i16>(&device, &config.into())?,
-        SampleFormat::U16 => build_monitor_stream::<u16>(&device, &config.into())?,
-        SampleFormat::I32 => build_monitor_stream::<i32>(&device, &config.into())?,
-        SampleFormat::U8 => build_monitor_stream::<u8>(&device, &config.into())?,
+        SampleFormat::F32 => build_monitor_stream::<f32>(&device, &config.into(), active, level)?,
+        SampleFormat::I16 => build_monitor_stream::<i16>(&device, &config.into(), active, level)?,
+        SampleFormat::U16 => build_monitor_stream::<u16>(&device, &config.into(), active, level)?,
+        SampleFormat::I32 => build_monitor_stream::<i32>(&device, &config.into(), active, level)?,
+        SampleFormat::U8 => build_monitor_stream::<u8>(&device, &config.into(), active, level)?,
         fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
     stream.play().map_err(|e| format!("Failed to start monitor stream: {}", e))?;
 
-    // Store stream properly (dropped on stop to release OS audio resources)
-    if let Ok(mut guard) = MONITOR_STREAM.lock() {
+    if let Ok(mut guard) = mgr.monitor_stream.lock() {
         *guard = Some(StreamHolder::new(stream));
     }
 
@@ -1661,35 +1710,31 @@ pub async fn start_monitoring(device_id: Option<String>) -> Result<(), String> {
 fn build_monitor_stream<T: Sample + cpal::SizedSample + Send + 'static>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    active: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
 ) -> Result<cpal::Stream, String>
 where
     f32: cpal::FromSample<T>,
 {
     let err_fn = |err| {
         log::error!("Monitor error: {}", err);
-        // Don't panic on stream errors, just log them
     };
 
     device
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                if !MONITORING_ACTIVE.load(Ordering::SeqCst) {
+                if !active.load(Ordering::SeqCst) {
                     return;
                 }
 
-                // Wrap in catch_unwind to prevent ALSA timing panics from crashing
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    // Calculate level from samples
                     let mut max_level: f32 = 0.0;
                     for s in data.iter() {
                         let f = f32::from_sample(*s);
                         max_level = max_level.max(f.abs());
                     }
-
-                    // Update level (convert to 0-1000 range for AtomicU32)
-                    let level_int = (max_level * 1000.0) as u32;
-                    CURRENT_LEVEL.store(level_int, Ordering::SeqCst);
+                    level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
                 }));
 
                 if result.is_err() {
@@ -1702,26 +1747,25 @@ where
         .map_err(|e| format!("Failed to build monitor stream: {}", e))
 }
 
-fn stop_monitoring_internal() {
-    MONITORING_ACTIVE.store(false, Ordering::SeqCst);
-    // Drop the cpal stream to release OS audio resources
-    if let Ok(mut guard) = MONITOR_STREAM.lock() {
+fn stop_monitoring_internal(mgr: &RecordingManager) {
+    mgr.monitoring_active.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = mgr.monitor_stream.lock() {
         *guard = None;
     }
-    CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    mgr.current_level.store(0, Ordering::SeqCst);
 }
 
 /// Stop monitoring a device
 #[tauri::command]
-pub fn stop_monitoring() {
+pub fn stop_monitoring(mgr: State<'_, RecordingManager>) {
     log::info!("Stopping monitoring");
-    stop_monitoring_internal();
+    stop_monitoring_internal(&mgr);
 }
 
 /// Check if monitoring is active
 #[tauri::command]
-pub fn is_monitoring() -> bool {
-    MONITORING_ACTIVE.load(Ordering::SeqCst)
+pub fn is_monitoring(mgr: State<'_, RecordingManager>) -> bool {
+    mgr.monitoring_active.load(Ordering::SeqCst)
 }
 
 /// Kill any stale pw-record or parec processes from previous runs
@@ -1739,25 +1783,22 @@ fn kill_all_stale_processes() {
 /// Internal implementation for starting system audio monitoring.
 /// Uses parec (preferred) or pw-record as fallback to capture system audio.
 /// The reader thread handles both level metering (always) and sample
-/// accumulation (when RECORDING_ACTIVE is true), so a single process
+/// accumulation (when system_recording_active is true), so a single process
 /// serves both monitoring and recording.
 #[cfg(target_os = "linux")]
-fn start_system_audio_monitoring_impl() -> Result<(), String> {
-    // Stop any existing monitoring first
-    stop_system_audio_monitoring_internal();
+fn start_system_audio_monitoring_impl(mgr: &RecordingManager) -> Result<(), String> {
+    stop_system_audio_monitoring_internal(mgr);
     kill_all_stale_processes();
 
     let monitor_source = get_default_monitor_source()?;
     log::info!("Starting system audio monitoring with monitor source: {}", monitor_source);
 
-    // Append .monitor for PulseAudio API if not already present
     let pa_monitor = if monitor_source.ends_with(".monitor") {
         monitor_source.clone()
     } else {
         format!("{}.monitor", monitor_source)
     };
 
-    // Try parec first (most reliable), fall back to pw-record
     let child_result = if which_exists("parec") {
         log::info!("Using parec with monitor source: {}", pa_monitor);
         std::process::Command::new("parec")
@@ -1791,14 +1832,45 @@ fn start_system_audio_monitoring_impl() -> Result<(), String> {
     let mut child = child_result.map_err(|e| format!("Failed to start audio capture: {}", e))?;
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
 
-    // Store the Child properly for cleanup (not mem::forget)
-    *SYSTEM_MONITOR_CHILD.lock().unwrap() = Some(child);
-    SYSTEM_MONITOR_ACTIVE.store(true, Ordering::SeqCst);
-    CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    *mgr.system_monitor_child.lock().unwrap() = Some(child);
+    mgr.system_monitor_active.store(true, Ordering::SeqCst);
+    mgr.current_level.store(0, Ordering::SeqCst);
 
-    // Spawn reader thread: updates level meter always, accumulates samples when recording
+    // Clone Arcs for the reader thread
+    let sys_active = mgr.system_monitor_active.clone();
+    let sys_rec_active = mgr.system_recording_active.clone();
+    let level = mgr.current_level.clone();
+    let sample_count = mgr.system_audio_sample_count.clone();
+    let wav_writer = mgr.system_wav_writer.clone();
+    let seg_data_bytes = mgr.system_segment_data_bytes.clone();
+    let seg_index = mgr.system_segment_index.clone();
+    let debug_count = mgr.debug_callback_count.clone();
+
+    // Create Arc-wrapped copies of segment state for the reader thread
+    let thread_seg_base = Arc::new(Mutex::new(
+        mgr.system_segment_base_path.lock().ok().and_then(|g| g.clone())
+    ));
+    let thread_seg_completed = Arc::new(Mutex::new(
+        mgr.system_completed_segments.lock().ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    ));
+
+    let ctx = SysAudioReaderCtx {
+        monitor_active: sys_active,
+        recording_active: sys_rec_active,
+        level,
+        sample_count,
+        wav_writer,
+        seg_data_bytes,
+        seg_index,
+        debug_count,
+        seg_base_path: thread_seg_base,
+        seg_completed: thread_seg_completed,
+    };
+
     std::thread::spawn(move || {
-        system_audio_monitor_reader(stdout);
+        system_audio_monitor_reader(stdout, ctx);
     });
 
     log::info!("System audio monitoring started");
@@ -1806,52 +1878,52 @@ fn start_system_audio_monitoring_impl() -> Result<(), String> {
 }
 
 /// Start system audio monitoring (level meter only, no recording)
-/// Uses parec or pw-record to capture system audio and update CURRENT_LEVEL
 #[tauri::command]
-pub async fn start_system_audio_monitoring() -> Result<(), String> {
+pub async fn start_system_audio_monitoring(mgr: State<'_, RecordingManager>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        stop_monitoring_internal();
-        start_system_audio_monitoring_impl()
+        stop_monitoring_internal(&mgr);
+        start_system_audio_monitoring_impl(&mgr)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = mgr;
         Err("System audio monitoring only supported on Linux".to_string())
     }
 }
 
 /// Stop system audio monitoring
 #[tauri::command]
-pub fn stop_system_audio_monitoring() {
+pub fn stop_system_audio_monitoring(mgr: State<'_, RecordingManager>) {
     log::info!("Stopping system audio monitoring");
-    stop_system_audio_monitoring_internal();
+    stop_system_audio_monitoring_internal(&mgr);
 }
 
-fn stop_system_audio_monitoring_internal() {
-    SYSTEM_MONITOR_ACTIVE.store(false, Ordering::SeqCst);
+fn stop_system_audio_monitoring_internal(mgr: &RecordingManager) {
+    mgr.system_monitor_active.store(false, Ordering::SeqCst);
 
-    if let Ok(mut guard) = SYSTEM_MONITOR_CHILD.lock() {
+    if let Ok(mut guard) = mgr.system_monitor_child.lock() {
         if let Some(ref mut child) = *guard {
             log::info!("Killing system audio capture process (pid {})", child.id());
-            let _ = child.kill();     // Send SIGKILL
-            let _ = child.wait();     // Reap zombie
+            let _ = child.kill();
+            let _ = child.wait();
         }
         *guard = None;
     }
 
-    CURRENT_LEVEL.store(0, Ordering::SeqCst);
+    mgr.current_level.store(0, Ordering::SeqCst);
 }
 
 /// Unified stream reader for system audio: handles both monitoring and recording.
-/// Always updates the level meter. When RECORDING_ACTIVE is true, also accumulates
-/// samples for the WAV file and feeds the transcription buffer.
+/// Always updates the level meter. When recording_active is true, also accumulates
+/// samples for the WAV file.
 #[cfg(target_os = "linux")]
-fn system_audio_monitor_reader(stdout: ChildStdout) {
+fn system_audio_monitor_reader(stdout: ChildStdout, ctx: SysAudioReaderCtx) {
     let mut reader = BufReader::with_capacity(8192, stdout);
     let mut buffer = [0u8; 8192];
 
-    while SYSTEM_MONITOR_ACTIVE.load(Ordering::SeqCst) {
+    while ctx.monitor_active.load(Ordering::SeqCst) {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
@@ -1874,33 +1946,31 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                 let max_level = samples.iter()
                     .map(|s| s.abs())
                     .fold(0.0f32, f32::max);
-                CURRENT_LEVEL.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+                ctx.level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
 
                 // When recording is active, write to disk and count samples
-                if RECORDING_ACTIVE.load(Ordering::SeqCst) {
-                    SYSTEM_AUDIO_SAMPLE_COUNT.fetch_add(samples.len(), Ordering::SeqCst);
+                if ctx.recording_active.load(Ordering::SeqCst) {
+                    ctx.sample_count.fetch_add(samples.len(), Ordering::SeqCst);
                     let sample_bytes = samples.len() * 4;
 
-                    if let Ok(mut writer_guard) = SYSTEM_WAV_WRITER.lock() {
-                        // Check if segment split is needed (only for split-tracks mode, not RF64)
+                    if let Ok(mut writer_guard) = ctx.wav_writer.lock() {
                         let is_rf64 = matches!(&*writer_guard, Some(AudioWriter::Rf64(_)));
-                        let current_data_bytes = SYSTEM_SEGMENT_DATA_BYTES.load(Ordering::Relaxed);
+                        let current_data_bytes = ctx.seg_data_bytes.load(Ordering::Relaxed);
                         if !is_rf64 && current_data_bytes + sample_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
-                            // Finalize current segment, patch header, create new one
                             if let Some(old_writer) = writer_guard.take() {
                                 let _ = old_writer.finalize();
-                                let seg_idx = SYSTEM_SEGMENT_INDEX.load(Ordering::Relaxed);
-                                if let Ok(base_guard) = SYSTEM_SEGMENT_BASE_PATH.lock() {
+                                let seg_idx = ctx.seg_index.load(Ordering::Relaxed);
+                                if let Ok(base_guard) = ctx.seg_base_path.lock() {
                                     if let Some(ref base) = *base_guard {
                                         let current_seg = segment_path(base, seg_idx);
                                         let _ = patch_wav_header_if_needed(&current_seg);
-                                        if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+                                        if let Ok(mut completed) = ctx.seg_completed.lock() {
                                             completed.push(current_seg);
                                         }
 
                                         let new_idx = seg_idx + 1;
-                                        SYSTEM_SEGMENT_INDEX.store(new_idx, Ordering::Relaxed);
-                                        SYSTEM_SEGMENT_DATA_BYTES.store(0, Ordering::Relaxed);
+                                        ctx.seg_index.store(new_idx, Ordering::Relaxed);
+                                        ctx.seg_data_bytes.store(0, Ordering::Relaxed);
 
                                         let new_path = segment_path(base, new_idx);
                                         let sys_spec = WavSpec {
@@ -1920,8 +1990,7 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                             }
                         }
 
-                        // Write samples to current segment
-                        SYSTEM_SEGMENT_DATA_BYTES.fetch_add(sample_bytes, Ordering::Relaxed);
+                        ctx.seg_data_bytes.fetch_add(sample_bytes, Ordering::Relaxed);
                         if let Some(ref mut writer) = *writer_guard {
                             for &sample in &samples {
                                 let _ = writer.write_sample(sample);
@@ -1929,44 +1998,65 @@ fn system_audio_monitor_reader(stdout: ChildStdout) {
                         }
                     }
 
-                    DEBUG_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+                    ctx.debug_count.fetch_add(1, Ordering::SeqCst);
                 }
             }
             Err(_) => break,
         }
     }
 
-    // Signal that monitoring has stopped (reader died or EOF)
-    SYSTEM_MONITOR_ACTIVE.store(false, Ordering::SeqCst);
+    ctx.monitor_active.store(false, Ordering::SeqCst);
     log::info!("System audio monitor reader finished");
+}
+
+// Context struct for system audio reader thread
+struct SysAudioReaderCtx {
+    monitor_active: Arc<AtomicBool>,
+    recording_active: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+    sample_count: Arc<AtomicUsize>,
+    wav_writer: Arc<Mutex<Option<AudioWriter>>>,
+    seg_data_bytes: Arc<AtomicUsize>,
+    seg_index: Arc<AtomicUsize>,
+    debug_count: Arc<AtomicUsize>,
+    seg_base_path: Arc<Mutex<Option<PathBuf>>>,
+    seg_completed: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 /// Force reset recording state (for recovery from stuck state)
 #[tauri::command]
-pub fn reset_recording_state() {
+pub fn reset_recording_state(mgr: State<'_, RecordingManager>) {
+    reset_recording_state_internal(&mgr);
+}
+
+fn reset_recording_state_internal(mgr: &RecordingManager) {
     log::info!("Force resetting recording state");
-    RECORDING_ACTIVE.store(false, Ordering::SeqCst);
-    MONITORING_ACTIVE.store(false, Ordering::SeqCst);
-    CURRENT_LEVEL.store(0, Ordering::SeqCst);
-    // Drop any held cpal streams
-    if let Ok(mut guard) = RECORDING_STREAM.lock() { *guard = None; }
-    if let Ok(mut guard) = MONITOR_STREAM.lock() { *guard = None; }
-    if let Ok(mut state) = RECORDING_STATE.lock() {
-        if let Some(s) = state.take() {
-            // Stop ring buffer and join writer thread
-            if let Some(ring) = &s.ring_buffer {
+    mgr.monitoring_active.store(false, Ordering::SeqCst);
+    mgr.current_level.store(0, Ordering::SeqCst);
+    mgr.system_recording_active.store(false, Ordering::SeqCst);
+
+    // Drop monitoring stream
+    if let Ok(mut guard) = mgr.monitor_stream.lock() { *guard = None; }
+
+    // Clean up all sessions
+    if let Ok(mut sessions) = mgr.sessions.lock() {
+        for (_, mut session) in sessions.drain() {
+            session.active.store(false, Ordering::SeqCst);
+            session.stream = None;
+            if let Some(ring) = &session.ring_buffer {
                 ring.active.store(false, Ordering::Release);
             }
-            if let Some(handle) = s.writer_handle {
+            if let Some(handle) = session.writer_handle.take() {
                 let _ = handle.join();
             }
         }
     }
-    // Clean up system audio segment statics
-    SYSTEM_SEGMENT_DATA_BYTES.store(0, Ordering::Relaxed);
-    SYSTEM_SEGMENT_INDEX.store(1, Ordering::Relaxed);
-    if let Ok(mut base) = SYSTEM_SEGMENT_BASE_PATH.lock() { *base = None; }
-    if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() { completed.clear(); }
+
+    // Clean up system audio segment state
+    mgr.system_segment_data_bytes.store(0, Ordering::Relaxed);
+    mgr.system_segment_index.store(1, Ordering::Relaxed);
+    if let Ok(mut base) = mgr.system_segment_base_path.lock() { *base = None; }
+    if let Ok(mut completed) = mgr.system_completed_segments.lock() { completed.clear(); }
 }
 
 /// Test if a device can actually capture audio - returns info about working configs
@@ -2153,23 +2243,22 @@ pub fn check_input_muted() -> Result<bool, String> {
 
 /// Record system audio using parec/pw-record with stdout streaming (Linux only)
 /// Reuses the monitoring capture process — does NOT spawn a new process.
-/// The monitor reader thread accumulates samples when RECORDING_ACTIVE is set.
+/// The monitor reader thread accumulates samples when system_recording_active is set.
 #[tauri::command]
-pub async fn start_system_audio_recording(output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>) -> Result<String, String> {
+pub async fn start_system_audio_recording(output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>, mgr: State<'_, RecordingManager>) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         // Auto-reset any stuck state from previous failed recordings
-        if RECORDING_ACTIVE.load(Ordering::SeqCst) {
+        if mgr.system_recording_active.load(Ordering::SeqCst) {
             log::warn!("Recording state was stuck, auto-resetting...");
-            reset_recording_state();
+            reset_recording_state_internal(&mgr);
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        // Ensure system audio monitoring is running (reuse existing pw-record process).
-        // The monitor reader thread handles both level metering and sample accumulation.
-        if !SYSTEM_MONITOR_ACTIVE.load(Ordering::SeqCst) {
+        // Ensure system audio monitoring is running
+        if !mgr.system_monitor_active.load(Ordering::SeqCst) {
             log::info!("Starting system audio monitoring for recording...");
-            start_system_audio_monitoring_impl()?;
+            start_system_audio_monitoring_impl(&mgr)?;
         } else {
             log::info!("System audio monitoring already active, reusing for recording");
         }
@@ -2179,7 +2268,6 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         std::fs::create_dir_all(&output_dir_path)
             .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir_path, e))?;
 
-        // Generate output filename
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let filename = format!("recording_{}.wav", timestamp);
         let output_path = output_dir_path.join(&filename);
@@ -2187,13 +2275,13 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         log::info!("Starting system audio recording to: {:?}", output_path);
 
         // Reset sample counter and segment tracking
-        SYSTEM_AUDIO_SAMPLE_COUNT.store(0, Ordering::SeqCst);
-        SYSTEM_SEGMENT_DATA_BYTES.store(0, Ordering::Relaxed);
-        SYSTEM_SEGMENT_INDEX.store(1, Ordering::Relaxed);
-        if let Ok(mut base) = SYSTEM_SEGMENT_BASE_PATH.lock() {
+        mgr.system_audio_sample_count.store(0, Ordering::SeqCst);
+        mgr.system_segment_data_bytes.store(0, Ordering::Relaxed);
+        mgr.system_segment_index.store(1, Ordering::Relaxed);
+        if let Ok(mut base) = mgr.system_segment_base_path.lock() {
             *base = Some(output_path.clone());
         }
-        if let Ok(mut completed) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+        if let Ok(mut completed) = mgr.system_completed_segments.lock() {
             completed.clear();
         }
 
@@ -2201,7 +2289,6 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
         let use_rf64 = lff == "rf64";
 
-        // Create WAV/RF64 writer for incremental crash-safe recording
         let sys_writer = if use_rf64 {
             AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), 44100, 2)
                 .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
@@ -2219,29 +2306,33 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         };
 
         {
-            let mut wg = SYSTEM_WAV_WRITER.lock().unwrap();
+            let mut wg = mgr.system_wav_writer.lock().unwrap();
             *wg = Some(sys_writer);
         }
 
-        // Store recording state
-        {
-            let mut state = RECORDING_STATE.lock().unwrap();
-            *state = Some(RecordingState {
-                sample_count: 0,
-                sample_rate: 44100,
-                channels: 2,
-                output_path: output_path.clone(),
-                use_system_buffer: true,
-                target_mono,
-                large_file_format: lff,
-                ring_buffer: None,
-                writer_handle: None,
-            });
+        // Store recording state as a session
+        let session = RecordingSession {
+            stream: None,
+            ring_buffer: None,
+            writer_handle: None,
+            active: mgr.system_recording_active.clone(),
+            level: mgr.current_level.clone(),
+            debug_count: mgr.debug_callback_count.clone(),
+            sample_rate: 44100,
+            channels: 2,
+            output_path: output_path.clone(),
+            target_mono,
+            large_file_format: lff,
+            use_system_buffer: true,
+        };
+
+        if let Ok(mut sessions) = mgr.sessions.lock() {
+            sessions.insert("default".to_string(), session);
         }
 
         // Activate recording — the monitor reader thread will start accumulating samples
-        RECORDING_ACTIVE.store(true, Ordering::SeqCst);
-        DEBUG_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+        mgr.system_recording_active.store(true, Ordering::SeqCst);
+        mgr.debug_callback_count.store(0, Ordering::SeqCst);
 
         log::info!("System audio recording active (reusing monitor process)");
         Ok(output_path.to_string_lossy().to_string())
@@ -2249,6 +2340,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = mgr;
         Err("System audio recording only supported on Linux".to_string())
     }
 }
@@ -2324,78 +2416,67 @@ fn which_exists(cmd: &str) -> bool {
 /// Stop system audio recording and write accumulated samples to WAV file.
 /// Does NOT kill the pw-record process — monitoring continues after recording stops.
 #[tauri::command]
-pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
+pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Result<RecordingResult, String> {
     #[cfg(target_os = "linux")]
     {
-        if !RECORDING_ACTIVE.load(Ordering::SeqCst) {
+        if !mgr.system_recording_active.load(Ordering::SeqCst) {
             return Err("No recording in progress".to_string());
         }
 
         log::info!("Stopping system audio recording...");
 
-        // Signal recording stop — monitor reader stops accumulating but continues level metering
-        RECORDING_ACTIVE.store(false, Ordering::SeqCst);
+        // Signal recording stop
+        mgr.system_recording_active.store(false, Ordering::SeqCst);
 
-        // Brief pause to let the reader finish any in-flight data
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // NOTE: Don't kill the pw-record process — monitoring continues.
-        // The process will be killed when the user stops monitoring or leaves the screen.
-
-        // Get recording state
-        let state = {
-            let mut state_guard = RECORDING_STATE.lock().unwrap();
-            state_guard.take()
+        // Extract the session
+        let session = {
+            let mut sessions = mgr.sessions.lock().map_err(|_| "Session lock poisoned".to_string())?;
+            sessions.remove("default")
         };
-        let state = state.ok_or("Recording state not found")?;
+        let session = session.ok_or("Recording state not found")?;
 
-        // Get sample count
-        let sample_count = SYSTEM_AUDIO_SAMPLE_COUNT.load(Ordering::SeqCst);
+        let sample_count = mgr.system_audio_sample_count.load(Ordering::SeqCst);
 
-        log::info!("Recorded {} samples to WAV file: {:?}", sample_count, state.output_path);
+        log::info!("Recorded {} samples to WAV file: {:?}", sample_count, session.output_path);
 
         if sample_count == 0 {
-            // Clean up the writer even if no samples
-            if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
+            if let Ok(mut wg) = mgr.system_wav_writer.lock() {
                 drop(wg.take());
             }
             return Err("No audio recorded".to_string());
         }
 
-        // Compute duration from sample count
-        let duration = sample_count as f64 / state.channels as f64 / state.sample_rate as f64;
+        let duration = sample_count as f64 / session.channels as f64 / session.sample_rate as f64;
 
         // Finalize the writer
-        if let Ok(mut wg) = SYSTEM_WAV_WRITER.lock() {
+        if let Ok(mut wg) = mgr.system_wav_writer.lock() {
             if let Some(writer) = wg.take() {
                 writer.finalize()
                     .map_err(|e| format!("Failed to finalize recording: {}", e))?;
             }
         }
 
-        let use_rf64 = state.large_file_format == "rf64";
+        let use_rf64 = session.large_file_format == "rf64";
 
-        // Patch header of the last segment (safety net for hound u32 overflow — only for split-tracks)
-        let seg_idx = SYSTEM_SEGMENT_INDEX.load(Ordering::Relaxed);
-        let last_seg_path = segment_path(&state.output_path, seg_idx);
+        let seg_idx = mgr.system_segment_index.load(Ordering::Relaxed);
+        let last_seg_path = segment_path(&session.output_path, seg_idx);
         if !use_rf64 {
             let _ = patch_wav_header_if_needed(&last_seg_path);
         }
 
-        // fsync the last segment to ensure data is on disk before import
         if let Ok(f) = File::open(&last_seg_path) {
             let _ = f.sync_all();
         }
 
-        // Build extra_segments list (no concatenation — keep as separate tracks)
-        let completed = if let Ok(mut guard) = SYSTEM_COMPLETED_SEGMENTS.lock() {
+        let completed = if let Ok(mut guard) = mgr.system_completed_segments.lock() {
             guard.drain(..).collect::<Vec<_>>()
         } else {
             Vec::new()
         };
 
         let extra_segments: Vec<String> = if !completed.is_empty() {
-            // Patch headers of completed segments too
             for seg in &completed {
                 if !use_rf64 {
                     let _ = patch_wav_header_if_needed(seg);
@@ -2404,8 +2485,6 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
                     let _ = f.sync_all();
                 }
             }
-            // First segment = state.output_path (already in `path` field)
-            // Extra segments = completed[1..] + last_seg_path
             let mut extras: Vec<String> = completed.iter()
                 .skip(1)
                 .map(|p| p.to_string_lossy().to_string())
@@ -2416,23 +2495,20 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
             Vec::new()
         };
 
-        // Convert to mono if needed (only for single-segment)
-        let final_channels = if state.target_mono && state.channels == 2 && extra_segments.is_empty() {
-            stereo_wav_to_mono_streaming(&state.output_path, state.sample_rate)?;
+        let final_channels = if session.target_mono && session.channels == 2 && extra_segments.is_empty() {
+            stereo_wav_to_mono_streaming(&session.output_path, session.sample_rate)?;
             1u16
         } else {
-            state.channels
+            session.channels
         };
 
         log::info!("System audio recording complete: {:?}, {:.2}s, {} callbacks, {} extra segments",
-            state.output_path, duration, DEBUG_CALLBACK_COUNT.load(Ordering::SeqCst), extra_segments.len());
-
-        // Don't reset CURRENT_LEVEL — monitoring is still running and will keep updating it
+            session.output_path, duration, mgr.debug_callback_count.load(Ordering::SeqCst), extra_segments.len());
 
         Ok(RecordingResult {
-            path: state.output_path.to_string_lossy().to_string(),
+            path: session.output_path.to_string_lossy().to_string(),
             duration,
-            sample_rate: state.sample_rate,
+            sample_rate: session.sample_rate,
             channels: final_channels,
             extra_segments,
         })
@@ -2440,6 +2516,7 @@ pub async fn stop_system_audio_recording() -> Result<RecordingResult, String> {
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = mgr;
         Err("System audio recording only supported on Linux".to_string())
     }
 }

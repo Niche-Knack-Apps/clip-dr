@@ -50,6 +50,17 @@ export interface RecordingResult {
   extra_segments: string[];
 }
 
+export interface RecordingSession {
+  sessionId: string;
+  deviceId: string;
+  deviceName: string;
+  active: boolean;
+  level: number;
+  path: string | null;
+  startTime: number;
+  duration: number;
+}
+
 export type RecordingSource = 'microphone' | 'system';
 
 export interface SystemAudioInfo {
@@ -78,6 +89,13 @@ export const useRecordingStore = defineStore('recording', () => {
   const error = ref<string | null>(null);
   const isMuted = ref(false);
   const isLocked = ref(false);
+
+  // Session tracking (Phase 4: per-stream architecture, single-session for now)
+  const sessions = ref<RecordingSession[]>([]);
+
+  const activeSessions = computed(() =>
+    sessions.value.filter(s => s.active)
+  );
 
   // Timemark state
   const timemarks = ref<TimeMark[]>([]);
@@ -383,10 +401,27 @@ export const useRecordingStore = defineStore('recording', () => {
       recordingStartTime = Date.now();
       recordingDuration.value = 0;
 
+      // Track as a session
+      const session: RecordingSession = {
+        sessionId: 'default',
+        deviceId: selectedDeviceId.value || '',
+        deviceName: selectedDevice.value?.name || (isSystemAudio ? 'System Audio' : 'Microphone'),
+        active: true,
+        level: 0,
+        path: recordingPath.value,
+        startTime: recordingStartTime,
+        duration: 0,
+      };
+      sessions.value = [session];
+
       // Start polling level (100ms = 10Hz, sufficient for visual meter)
       levelPollInterval = window.setInterval(async () => {
         try {
           currentLevel.value = await invoke<number>('get_recording_level');
+          // Sync session level
+          if (sessions.value.length > 0) {
+            sessions.value[0].level = currentLevel.value;
+          }
         } catch (e) {
           // Ignore polling errors
         }
@@ -395,6 +430,10 @@ export const useRecordingStore = defineStore('recording', () => {
       // Start duration counter
       durationInterval = window.setInterval(() => {
         recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
+        // Sync session duration
+        if (sessions.value.length > 0) {
+          sessions.value[0].duration = recordingDuration.value;
+        }
       }, 100);
 
     } catch (e) {
@@ -442,6 +481,7 @@ export const useRecordingStore = defineStore('recording', () => {
       isRecording.value = false;
       isLocked.value = false;
       currentLevel.value = 0;
+      sessions.value = [];
 
       console.log(`[Recording] Stopped: path=${result.path}, duration=${result.duration?.toFixed(1)}s, rate=${result.sample_rate}, ch=${result.channels}, extra_segments=${result.extra_segments?.length ?? 0}`);
 
@@ -540,6 +580,7 @@ export const useRecordingStore = defineStore('recording', () => {
       currentLevel.value = 0;
       recordingDuration.value = 0;
       recordingPath.value = null;
+      sessions.value = [];
       console.log('[Recording] Cancelled');
     } catch (e) {
       console.error('[Recording] Failed to cancel:', e);
@@ -661,6 +702,9 @@ export const useRecordingStore = defineStore('recording', () => {
     allDevices,
     selectedDevice,
     defaultDevice,
+    // Sessions (Phase 4: per-stream architecture)
+    sessions,
+    activeSessions,
     // System audio
     systemAudioInfo,
     systemAudioProbing,
