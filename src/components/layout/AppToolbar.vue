@@ -81,22 +81,9 @@ const transportRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
 const searchFocused = ref(false);
 
-function handleMicClick() {
-  if (recordingStore.isRecording) {
-    showRecordingPanel.value = !showRecordingPanel.value;
-    return;
-  }
-  showRecordingPanel.value = true;
-  recordingStore.quickStart('microphone');
-}
-
-function handleSystemClick() {
-  if (recordingStore.isRecording) {
-    showRecordingPanel.value = !showRecordingPanel.value;
-    return;
-  }
-  showRecordingPanel.value = true;
-  recordingStore.quickStart('system');
+function handleRecordClick() {
+  // Toggle the recording panel (device picker when idle, controls when recording)
+  showRecordingPanel.value = !showRecordingPanel.value;
 }
 
 // Close recording panel on window blur when not actively recording
@@ -269,31 +256,20 @@ defineExpose({ focusSearch });
 
       <!-- Unified Transport Controls -->
       <div ref="transportRef" class="flex items-center gap-1 bg-gray-800 rounded-lg px-1 py-0.5 relative">
-        <!-- Mic record button -->
+        <!-- Record button — opens device picker, or shows recording controls -->
         <Button
           variant="ghost"
           size="sm"
           icon
-          :class="{ 'text-red-500': recordingStore.isRecording && recordingStore.source === 'microphone' }"
-          title="Record from microphone"
-          @click="handleMicClick"
+          :class="{ 'text-red-500': recordingStore.isRecording }"
+          title="Record audio"
+          @click="handleRecordClick"
         >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="recordingStore.isRecording && recordingStore.source === 'microphone' ? 'animate-pulse' : ''">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+          <svg v-if="recordingStore.isRecording" class="w-4 h-4 animate-pulse" fill="currentColor" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="8" />
           </svg>
-        </Button>
-
-        <!-- System record button -->
-        <Button
-          variant="ghost"
-          size="sm"
-          icon
-          :class="{ 'text-red-500': recordingStore.isRecording && recordingStore.source === 'system' }"
-          title="Record system audio"
-          @click="handleSystemClick"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="recordingStore.isRecording && recordingStore.source === 'system' ? 'animate-pulse' : ''">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+          <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
           </svg>
         </Button>
 
