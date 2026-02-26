@@ -155,7 +155,17 @@ pub async fn export_audio_mp3(
     end_time: f64,
     bitrate: u32,
 ) -> Result<(), String> {
-    let source = Path::new(&source_path);
+    export_audio_mp3_inner(&source_path, &output_path, start_time, end_time, bitrate)
+}
+
+fn export_audio_mp3_inner(
+    source_path: &str,
+    output_path: &str,
+    start_time: f64,
+    end_time: f64,
+    bitrate: u32,
+) -> Result<(), String> {
+    let source = Path::new(source_path);
 
     // Open and decode source file
     let file = File::open(source).map_err(|e| format!("Failed to open source: {}", e))?;
@@ -265,22 +275,7 @@ pub async fn export_audio_mp3(
     mp3_encoder.set_sample_rate(sample_rate).map_err(|e| format!("Failed to set sample rate: {:?}", e))?;
 
     // Map bitrate to enum variant (LAME supports specific bitrates)
-    let bitrate_enum = match bitrate {
-        0..=32 => mp3lame_encoder::Bitrate::Kbps32,
-        33..=40 => mp3lame_encoder::Bitrate::Kbps40,
-        41..=48 => mp3lame_encoder::Bitrate::Kbps48,
-        49..=64 => mp3lame_encoder::Bitrate::Kbps64,
-        65..=80 => mp3lame_encoder::Bitrate::Kbps80,
-        81..=96 => mp3lame_encoder::Bitrate::Kbps96,
-        97..=112 => mp3lame_encoder::Bitrate::Kbps112,
-        113..=128 => mp3lame_encoder::Bitrate::Kbps128,
-        129..=160 => mp3lame_encoder::Bitrate::Kbps160,
-        161..=192 => mp3lame_encoder::Bitrate::Kbps192,
-        193..=224 => mp3lame_encoder::Bitrate::Kbps224,
-        225..=256 => mp3lame_encoder::Bitrate::Kbps256,
-        257..=320 => mp3lame_encoder::Bitrate::Kbps320,
-        _ => mp3lame_encoder::Bitrate::Kbps192, // Default fallback
-    };
+    let bitrate_enum = map_bitrate(bitrate);
     mp3_encoder.set_brate(bitrate_enum).map_err(|e| format!("Failed to set bitrate: {:?}", e))?;
     mp3_encoder.set_quality(mp3lame_encoder::Quality::Best).map_err(|e| format!("Failed to set quality: {:?}", e))?;
 
@@ -304,7 +299,7 @@ pub async fn export_audio_mp3(
     unsafe { mp3_out.set_len(mp3_out.len() + flush_size); }
 
     // Write to file
-    std::fs::write(&output_path, &mp3_out)
+    std::fs::write(output_path, &mp3_out)
         .map_err(|e| format!("Failed to write MP3 file: {}", e))?;
 
     log::info!("Exported MP3 {} to {} ({}kbps)", source_path, output_path, bitrate);
@@ -922,4 +917,750 @@ pub fn check_ffmpeg_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+// ── EDL WAV export without AppHandle (for testing) ──
+
+fn export_edl_wav_no_progress(
+    edl: &ExportEDL,
+    sources: &[EdlSource],
+    total_frames: usize,
+) -> Result<String, String> {
+    let spec = WavSpec {
+        channels: edl.channels,
+        sample_rate: edl.sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    let mut writer = WavWriter::create(&edl.output_path, spec)
+        .map_err(|e| format!("Failed to create WAV: {}", e))?;
+
+    let output_rate = edl.sample_rate as f64;
+    let output_channels = edl.channels as usize;
+    let mut frames_written = 0usize;
+    let mut mix_buf: Vec<f32> = Vec::new();
+
+    while frames_written < total_frames {
+        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+        mix_chunk(
+            sources, frames_written, chunk_size,
+            edl.start_time, output_rate, output_channels, &mut mix_buf,
+        );
+        for &sample in &mix_buf {
+            writer.write_sample(sample)
+                .map_err(|e| format!("Write error: {}", e))?;
+        }
+        frames_written += chunk_size;
+    }
+
+    writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    Ok(edl.output_path.clone())
+}
+
+// ── EDL MP3 export without AppHandle (for testing) ──
+
+fn export_edl_mp3_no_progress(
+    edl: &ExportEDL,
+    sources: &[EdlSource],
+    total_frames: usize,
+) -> Result<String, String> {
+    let bitrate = edl.mp3_bitrate.unwrap_or(192);
+    let output_rate = edl.sample_rate;
+    let output_channels = edl.channels as usize;
+    let encode_channels = 2u8;
+
+    let mut builder = Builder::new().ok_or("Failed to create MP3 encoder")?;
+    builder.set_num_channels(encode_channels)
+        .map_err(|e| format!("Set channels: {:?}", e))?;
+    builder.set_sample_rate(output_rate)
+        .map_err(|e| format!("Set sample rate: {:?}", e))?;
+    builder.set_brate(map_bitrate(bitrate))
+        .map_err(|e| format!("Set bitrate: {:?}", e))?;
+    builder.set_quality(mp3lame_encoder::Quality::Best)
+        .map_err(|e| format!("Set quality: {:?}", e))?;
+
+    let mut encoder = builder.build()
+        .map_err(|e| format!("Build encoder: {:?}", e))?;
+
+    let mut output_file = File::create(&edl.output_path)
+        .map_err(|e| format!("Create output: {}", e))?;
+
+    let output_rate_f64 = output_rate as f64;
+    let mut frames_written = 0usize;
+    let mut mix_buf: Vec<f32> = Vec::new();
+    let mut chunk_i16: Vec<i16> = Vec::with_capacity(CHUNK_FRAMES * 2);
+    let mp3_buf_capacity = CHUNK_FRAMES * 2 * 5 / 4 + 7200;
+    let mut mp3_out: Vec<u8> = Vec::with_capacity(mp3_buf_capacity);
+
+    while frames_written < total_frames {
+        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+        mix_chunk(
+            sources, frames_written, chunk_size,
+            edl.start_time, output_rate_f64, output_channels, &mut mix_buf,
+        );
+
+        chunk_i16.clear();
+        for i in 0..chunk_size {
+            let base = i * output_channels;
+            let left = mix_buf[base].clamp(-1.0, 1.0);
+            let right = if output_channels >= 2 {
+                mix_buf[base + 1].clamp(-1.0, 1.0)
+            } else {
+                left
+            };
+            chunk_i16.push((left * 32767.0) as i16);
+            chunk_i16.push((right * 32767.0) as i16);
+        }
+
+        mp3_out.clear();
+        mp3_out.reserve(mp3_buf_capacity);
+        let input = InterleavedPcm(&chunk_i16);
+        let encoded = encoder.encode(input, mp3_out.spare_capacity_mut())
+            .map_err(|e| format!("Encode error: {:?}", e))?;
+        unsafe { mp3_out.set_len(encoded); }
+        output_file.write_all(&mp3_out)
+            .map_err(|e| format!("Write error: {}", e))?;
+
+        frames_written += chunk_size;
+    }
+
+    mp3_out.clear();
+    mp3_out.reserve(7200);
+    let flush_size = encoder.flush::<FlushNoGap>(mp3_out.spare_capacity_mut())
+        .map_err(|e| format!("Flush error: {:?}", e))?;
+    unsafe { mp3_out.set_len(flush_size); }
+    output_file.write_all(&mp3_out)
+        .map_err(|e| format!("Write error: {}", e))?;
+
+    Ok(edl.output_path.clone())
+}
+
+// ── EDL OGG export without AppHandle (for testing) ──
+
+fn export_edl_ogg_no_progress(
+    edl: &ExportEDL,
+    sources: &[EdlSource],
+    total_frames: usize,
+) -> Result<String, String> {
+    let quality = edl.ogg_quality.unwrap_or(0.4);
+    let output_rate = edl.sample_rate;
+    let output_channels = edl.channels as usize;
+
+    let output_file = BufWriter::new(
+        File::create(&edl.output_path)
+            .map_err(|e| format!("Create output: {}", e))?,
+    );
+
+    let sample_rate = NonZeroU32::new(output_rate)
+        .ok_or("Sample rate must be non-zero")?;
+    let channels = NonZeroU8::new(edl.channels as u8)
+        .ok_or("Channels must be non-zero")?;
+
+    let mut encoder = VorbisEncoderBuilder::new(sample_rate, channels, output_file)
+        .map_err(|e| format!("Vorbis builder error: {}", e))?
+        .bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
+            target_quality: quality,
+        })
+        .build()
+        .map_err(|e| format!("Vorbis build error: {}", e))?;
+
+    let output_rate_f64 = output_rate as f64;
+    let mut frames_written = 0usize;
+    let mut mix_buf: Vec<f32> = Vec::new();
+
+    while frames_written < total_frames {
+        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+        mix_chunk(
+            sources, frames_written, chunk_size,
+            edl.start_time, output_rate_f64, output_channels, &mut mix_buf,
+        );
+
+        let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); output_channels];
+        for i in 0..chunk_size {
+            let base = i * output_channels;
+            for ch in 0..output_channels {
+                planar[ch].push(mix_buf[base + ch].clamp(-1.0, 1.0));
+            }
+        }
+
+        encoder.encode_audio_block(&planar)
+            .map_err(|e| format!("Vorbis encode error: {}", e))?;
+
+        frames_written += chunk_size;
+    }
+
+    encoder.finish()
+        .map_err(|e| format!("Vorbis finish error: {}", e))?;
+
+    Ok(edl.output_path.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::playback::load_wav_mmap;
+
+    const SAMPLE_RATE: u32 = 44100;
+
+    /// Helper: create a stereo WAV file with a 440Hz sine tone of the given duration.
+    fn create_test_wav(path: &std::path::Path, duration_secs: f64) {
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: SAMPLE_RATE,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = WavWriter::create(path, spec).unwrap();
+        let num_frames = (duration_secs * SAMPLE_RATE as f64) as usize;
+        for i in 0..num_frames {
+            let t = i as f64 / SAMPLE_RATE as f64;
+            let sample = (t * 440.0 * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5;
+            writer.write_sample(sample).unwrap(); // L
+            writer.write_sample(sample).unwrap(); // R
+        }
+        writer.finalize().unwrap();
+    }
+
+    /// Helper: read a WAV file and return (num_frames, sample_rate, channels).
+    fn read_wav_info(path: &std::path::Path) -> (usize, u32, u16) {
+        let reader = hound::WavReader::open(path).unwrap();
+        let spec = reader.spec();
+        let total_samples = reader.len() as usize;
+        let num_frames = total_samples / spec.channels as usize;
+        (num_frames, spec.sample_rate, spec.channels)
+    }
+
+    // ── Non-EDL export tests (direct file → file) ──
+
+    /// Regression: WAV export of edited (shorter) source produces correct duration.
+    /// This is the export path used when JS mixing falls back to Rust.
+    #[test]
+    fn test_wav_export_uses_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_path = dir.path().join("output.wav");
+
+        // Create a 2-second "original" and a 1-second "edited" WAV
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        // Export using the EDITED source (simulating cachedAudioPath)
+        let edited_str = edited_path.to_str().unwrap();
+        let output_str = output_path.to_str().unwrap();
+        export_audio_region_inner(edited_str, output_str, 0.0, 1.0).unwrap();
+
+        // Verify the output matches the edited duration, not the original
+        let (frames, sr, ch) = read_wav_info(&output_path);
+        assert_eq!(sr, SAMPLE_RATE);
+        assert_eq!(ch, 2);
+        let output_duration = frames as f64 / sr as f64;
+        assert!(
+            (output_duration - 1.0).abs() < 0.01,
+            "Expected ~1.0s output from edited source, got {:.3}s",
+            output_duration
+        );
+
+        // Verify it's NOT the original's duration
+        let (orig_frames, _, _) = read_wav_info(&original_path);
+        assert!(
+            frames < orig_frames,
+            "Output frames ({}) should be less than original ({})",
+            frames,
+            orig_frames
+        );
+    }
+
+    /// Regression: MP3 export of edited source produces shorter file than original.
+    #[test]
+    fn test_mp3_export_uses_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_from_original = dir.path().join("from_original.mp3");
+        let output_from_edited = dir.path().join("from_edited.mp3");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        // Export both: original (2s) and edited (1s)
+        export_audio_mp3_inner(
+            original_path.to_str().unwrap(),
+            output_from_original.to_str().unwrap(),
+            0.0, 2.0, 192,
+        ).unwrap();
+
+        export_audio_mp3_inner(
+            edited_path.to_str().unwrap(),
+            output_from_edited.to_str().unwrap(),
+            0.0, 1.0, 192,
+        ).unwrap();
+
+        // The edited export should be significantly smaller than the original
+        let original_size = std::fs::metadata(&output_from_original).unwrap().len();
+        let edited_size = std::fs::metadata(&output_from_edited).unwrap().len();
+        assert!(
+            edited_size < original_size,
+            "Edited MP3 ({} bytes) should be smaller than original ({} bytes)",
+            edited_size,
+            original_size
+        );
+        // Roughly half the size (1s vs 2s) - allow wide tolerance for MP3 framing
+        let ratio = edited_size as f64 / original_size as f64;
+        assert!(
+            ratio < 0.75,
+            "Edited/original size ratio {:.2} too high — export may be using original source",
+            ratio
+        );
+    }
+
+    /// Regression: OGG export of edited source produces correct duration.
+    #[test]
+    fn test_ogg_export_uses_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_from_original = dir.path().join("from_original.ogg");
+        let output_from_edited = dir.path().join("from_edited.ogg");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        export_audio_ogg_inner(
+            original_path.to_str().unwrap(),
+            output_from_original.to_str().unwrap(),
+            0.0, 2.0, 0.4,
+        ).unwrap();
+
+        export_audio_ogg_inner(
+            edited_path.to_str().unwrap(),
+            output_from_edited.to_str().unwrap(),
+            0.0, 1.0, 0.4,
+        ).unwrap();
+
+        let original_size = std::fs::metadata(&output_from_original).unwrap().len();
+        let edited_size = std::fs::metadata(&output_from_edited).unwrap().len();
+        assert!(
+            edited_size < original_size,
+            "Edited OGG ({} bytes) should be smaller than original ({} bytes)",
+            edited_size,
+            original_size
+        );
+        let ratio = edited_size as f64 / original_size as f64;
+        assert!(
+            ratio < 0.75,
+            "Edited/original size ratio {:.2} too high — export may be using original source",
+            ratio
+        );
+    }
+
+    /// Regression: FLAC export of edited source produces correct duration.
+    /// Requires ffmpeg — skips gracefully if unavailable.
+    #[test]
+    fn test_flac_export_uses_edited_source() {
+        if !check_ffmpeg_available() {
+            eprintln!("Skipping FLAC test: ffmpeg not available");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_from_original = dir.path().join("from_original.flac");
+        let output_from_edited = dir.path().join("from_edited.flac");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        export_audio_flac_inner(
+            original_path.to_str().unwrap(),
+            output_from_original.to_str().unwrap(),
+            0.0, 2.0,
+        ).unwrap();
+
+        export_audio_flac_inner(
+            edited_path.to_str().unwrap(),
+            output_from_edited.to_str().unwrap(),
+            0.0, 1.0,
+        ).unwrap();
+
+        let original_size = std::fs::metadata(&output_from_original).unwrap().len();
+        let edited_size = std::fs::metadata(&output_from_edited).unwrap().len();
+        assert!(
+            edited_size < original_size,
+            "Edited FLAC ({} bytes) should be smaller than original ({} bytes)",
+            edited_size,
+            original_size
+        );
+        let ratio = edited_size as f64 / original_size as f64;
+        assert!(
+            ratio < 0.75,
+            "Edited/original size ratio {:.2} too high — export may be using original source",
+            ratio
+        );
+    }
+
+    // ── EDL export tests (streaming chunked pipeline) ──
+
+    /// Helper: build an EdlSource from a WAV file path.
+    fn load_edl_source(path: &std::path::Path, track_start: f64, duration: f64) -> EdlSource {
+        let path_str = path.to_str().unwrap();
+        let (pcm, sample_rate, channels) = load_wav_mmap(path_str).unwrap();
+        EdlSource {
+            track_start,
+            duration,
+            volume: 1.0,
+            volume_envelope: None,
+            pcm,
+            sample_rate,
+            channels,
+        }
+    }
+
+    /// Regression: EDL mix_chunk reads correct samples from edited (shorter) source.
+    #[test]
+    fn test_edl_mix_chunk_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        // Load the edited source as an EdlSource
+        let source = load_edl_source(&edited_path, 0.0, 1.0);
+
+        // Mix 1 second of frames from the edited source
+        let frame_count = SAMPLE_RATE as usize; // 1 second
+        let mut mix_buf = Vec::new();
+        mix_chunk(
+            &[source],
+            0, frame_count,
+            0.0, SAMPLE_RATE as f64, 2, &mut mix_buf,
+        );
+
+        assert_eq!(mix_buf.len(), frame_count * 2, "Expected {} samples, got {}", frame_count * 2, mix_buf.len());
+
+        // Verify the mixed output contains non-zero audio (the 440Hz tone)
+        let max_val = mix_buf.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(max_val > 0.1, "Mixed audio should contain audible signal, max={}", max_val);
+
+        // Verify that frames beyond the edited source's duration produce silence
+        let extra_frames = SAMPLE_RATE as usize; // another second
+        let mut silence_buf = Vec::new();
+        mix_chunk(
+            &[load_edl_source(&edited_path, 0.0, 1.0)],
+            frame_count, extra_frames,
+            0.0, SAMPLE_RATE as f64, 2, &mut silence_buf,
+        );
+
+        let max_silence = silence_buf.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            max_silence < 0.001,
+            "Frames beyond edited source duration should be silent, max={}",
+            max_silence
+        );
+    }
+
+    /// Regression: EDL WAV export with edited source produces correct output duration.
+    #[test]
+    fn test_edl_wav_export_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_path = dir.path().join("edl_output.wav");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        let source = load_edl_source(&edited_path, 0.0, 1.0);
+        let total_frames = (1.0 * SAMPLE_RATE as f64) as usize;
+
+        let edl = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: edited_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 1.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: output_path.to_str().unwrap().to_string(),
+            format: "wav".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: None,
+            ogg_quality: None,
+            start_time: 0.0,
+            end_time: 1.0,
+        };
+
+        export_edl_wav_no_progress(&edl, &[source], total_frames).unwrap();
+
+        let (frames, sr, ch) = read_wav_info(&output_path);
+        assert_eq!(sr, SAMPLE_RATE);
+        assert_eq!(ch, 2);
+        let output_duration = frames as f64 / sr as f64;
+        assert!(
+            (output_duration - 1.0).abs() < 0.01,
+            "EDL WAV export should be ~1.0s, got {:.3}s",
+            output_duration
+        );
+
+        // Must NOT be the original's duration
+        let (orig_frames, _, _) = read_wav_info(&original_path);
+        assert!(
+            frames < orig_frames,
+            "EDL output frames ({}) should be less than original ({})",
+            frames,
+            orig_frames
+        );
+    }
+
+    /// Regression: EDL MP3 export with edited source produces smaller file.
+    #[test]
+    fn test_edl_mp3_export_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_orig = dir.path().join("edl_original.mp3");
+        let output_edited = dir.path().join("edl_edited.mp3");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        // Export from original (2s)
+        let source_orig = load_edl_source(&original_path, 0.0, 2.0);
+        let edl_orig = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: original_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 2.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: output_orig.to_str().unwrap().to_string(),
+            format: "mp3".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: Some(192),
+            ogg_quality: None,
+            start_time: 0.0,
+            end_time: 2.0,
+        };
+        let total_orig = (2.0 * SAMPLE_RATE as f64) as usize;
+        export_edl_mp3_no_progress(&edl_orig, &[source_orig], total_orig).unwrap();
+
+        // Export from edited (1s)
+        let source_edited = load_edl_source(&edited_path, 0.0, 1.0);
+        let edl_edited = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: edited_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 1.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: output_edited.to_str().unwrap().to_string(),
+            format: "mp3".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: Some(192),
+            ogg_quality: None,
+            start_time: 0.0,
+            end_time: 1.0,
+        };
+        let total_edited = (1.0 * SAMPLE_RATE as f64) as usize;
+        export_edl_mp3_no_progress(&edl_edited, &[source_edited], total_edited).unwrap();
+
+        let original_size = std::fs::metadata(&output_orig).unwrap().len();
+        let edited_size = std::fs::metadata(&output_edited).unwrap().len();
+        assert!(
+            edited_size < original_size,
+            "EDL edited MP3 ({} bytes) should be smaller than original ({} bytes)",
+            edited_size,
+            original_size
+        );
+        let ratio = edited_size as f64 / original_size as f64;
+        assert!(
+            ratio < 0.75,
+            "EDL MP3 edited/original ratio {:.2} too high",
+            ratio
+        );
+    }
+
+    /// Regression: EDL OGG export with edited source produces smaller file.
+    #[test]
+    fn test_edl_ogg_export_edited_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_orig = dir.path().join("edl_original.ogg");
+        let output_edited = dir.path().join("edl_edited.ogg");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        // Export from original (2s)
+        let source_orig = load_edl_source(&original_path, 0.0, 2.0);
+        let edl_orig = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: original_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 2.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: output_orig.to_str().unwrap().to_string(),
+            format: "ogg".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: None,
+            ogg_quality: Some(0.4),
+            start_time: 0.0,
+            end_time: 2.0,
+        };
+        let total_orig = (2.0 * SAMPLE_RATE as f64) as usize;
+        export_edl_ogg_no_progress(&edl_orig, &[source_orig], total_orig).unwrap();
+
+        // Export from edited (1s)
+        let source_edited = load_edl_source(&edited_path, 0.0, 1.0);
+        let edl_edited = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: edited_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 1.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: output_edited.to_str().unwrap().to_string(),
+            format: "ogg".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: None,
+            ogg_quality: Some(0.4),
+            start_time: 0.0,
+            end_time: 1.0,
+        };
+        let total_edited = (1.0 * SAMPLE_RATE as f64) as usize;
+        export_edl_ogg_no_progress(&edl_edited, &[source_edited], total_edited).unwrap();
+
+        let original_size = std::fs::metadata(&output_orig).unwrap().len();
+        let edited_size = std::fs::metadata(&output_edited).unwrap().len();
+        assert!(
+            edited_size < original_size,
+            "EDL edited OGG ({} bytes) should be smaller than original ({} bytes)",
+            edited_size,
+            original_size
+        );
+        let ratio = edited_size as f64 / original_size as f64;
+        assert!(
+            ratio < 0.75,
+            "EDL OGG edited/original ratio {:.2} too high",
+            ratio
+        );
+    }
+
+    /// Regression: EDL FLAC export with edited source produces smaller file.
+    /// Requires ffmpeg — skips gracefully if unavailable.
+    #[test]
+    fn test_edl_flac_export_edited_source() {
+        if !check_ffmpeg_available() {
+            eprintln!("Skipping EDL FLAC test: ffmpeg not available");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.wav");
+        let edited_path = dir.path().join("edited.wav");
+        let output_orig = dir.path().join("edl_original.flac");
+        let output_edited = dir.path().join("edl_edited.flac");
+
+        create_test_wav(&original_path, 2.0);
+        create_test_wav(&edited_path, 1.0);
+
+        // EDL FLAC goes through WAV → ffmpeg, so test the WAV intermediate + ffmpeg
+        // Export original (2s) via WAV → FLAC
+        let source_orig = load_edl_source(&original_path, 0.0, 2.0);
+        let temp_wav_orig = dir.path().join("temp_orig.wav");
+        let edl_orig = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: original_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 2.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: temp_wav_orig.to_str().unwrap().to_string(),
+            format: "wav".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: None,
+            ogg_quality: None,
+            start_time: 0.0,
+            end_time: 2.0,
+        };
+        let total_orig = (2.0 * SAMPLE_RATE as f64) as usize;
+        export_edl_wav_no_progress(&edl_orig, &[source_orig], total_orig).unwrap();
+        wav_to_flac(temp_wav_orig.to_str().unwrap(), output_orig.to_str().unwrap()).unwrap();
+
+        // Export edited (1s) via WAV → FLAC
+        let source_edited = load_edl_source(&edited_path, 0.0, 1.0);
+        let temp_wav_edited = dir.path().join("temp_edited.wav");
+        let edl_edited = ExportEDL {
+            tracks: vec![ExportEDLTrack {
+                source_path: edited_path.to_str().unwrap().to_string(),
+                track_start: 0.0,
+                duration: 1.0,
+                volume: 1.0,
+                volume_envelope: None,
+            }],
+            output_path: temp_wav_edited.to_str().unwrap().to_string(),
+            format: "wav".to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            mp3_bitrate: None,
+            ogg_quality: None,
+            start_time: 0.0,
+            end_time: 1.0,
+        };
+        let total_edited = (1.0 * SAMPLE_RATE as f64) as usize;
+        export_edl_wav_no_progress(&edl_edited, &[source_edited], total_edited).unwrap();
+        wav_to_flac(temp_wav_edited.to_str().unwrap(), output_edited.to_str().unwrap()).unwrap();
+
+        let original_size = std::fs::metadata(&output_orig).unwrap().len();
+        let edited_size = std::fs::metadata(&output_edited).unwrap().len();
+        assert!(
+            edited_size < original_size,
+            "EDL edited FLAC ({} bytes) should be smaller than original ({} bytes)",
+            edited_size,
+            original_size
+        );
+    }
+
+    /// Verify that export_audio_region_inner correctly truncates when given
+    /// start_time/end_time within a longer source — simulating a partial export.
+    #[test]
+    fn test_wav_export_partial_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.wav");
+        let output_path = dir.path().join("partial.wav");
+
+        create_test_wav(&source_path, 3.0);
+
+        // Export only the middle 1 second (1.0s to 2.0s)
+        export_audio_region_inner(
+            source_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            1.0, 2.0,
+        ).unwrap();
+
+        let (frames, sr, _) = read_wav_info(&output_path);
+        let duration = frames as f64 / sr as f64;
+        assert!(
+            (duration - 1.0).abs() < 0.01,
+            "Partial region export should be ~1.0s, got {:.3}s",
+            duration
+        );
+    }
 }

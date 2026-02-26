@@ -147,7 +147,9 @@ export const useExportStore = defineStore('export', () => {
    * Check if all active tracks have source paths (can use EDL export).
    */
   function canUseEdlExport(tracks: Track[]): boolean {
-    return tracks.length > 0 && tracks.every(t => !!t.sourcePath);
+    return tracks.length > 0 && tracks.every(t =>
+      !!(t.cachedAudioPath || t.sourcePath) && (!t.clips || t.clips.length === 0)
+    );
   }
 
   /**
@@ -160,7 +162,7 @@ export const useExportStore = defineStore('export', () => {
     const channels = Math.min(firstTrack?.audioData.channels || 2, 2) as number;
 
     const edlTracks: ExportEDLTrack[] = tracks.map(t => ({
-      source_path: t.sourcePath!,
+      source_path: t.cachedAudioPath || t.sourcePath!,
       track_start: t.trackStart,
       duration: t.duration,
       volume: t.volume,
@@ -196,6 +198,12 @@ export const useExportStore = defineStore('export', () => {
     currentExportPath.value = outputPath;
 
     try {
+      // Ensure any in-flight clip recache from cut/delete has completed
+      if (tracksStore.pendingRecache) {
+        await tracksStore.pendingRecache;
+      }
+
+      // Read tracks AFTER recache so clips are cleared and cachedAudioPath is set
       const tracks = activeTracks.value;
 
       // Use EDL streaming export when possible (required for large files)
@@ -320,9 +328,20 @@ export const useExportStore = defineStore('export', () => {
       progress.value = 10;
       currentExportPath.value = outputPath;
 
-      // Use EDL path for tracks with source paths (required for large files)
-      if (track.sourcePath) {
-        const edl = buildEdl([track], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
+      // Ensure any in-flight clip recache from cut/delete has completed
+      if (tracksStore.pendingRecache) {
+        await tracksStore.pendingRecache;
+      }
+
+      // Re-read track from store — recache may have cleared clips and set cachedAudioPath
+      const currentTrack = tracksStore.tracks.find(t => t.id === track.id);
+      if (!currentTrack) {
+        throw new Error('Track was removed');
+      }
+
+      // Use EDL path for tracks with source paths and no unflattened clips
+      if ((currentTrack.cachedAudioPath || currentTrack.sourcePath) && (!currentTrack.clips || currentTrack.clips.length === 0)) {
+        const edl = buildEdl([currentTrack], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
 
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
           progress.value = Math.round(event.payload.progress * 100);
@@ -332,7 +351,7 @@ export const useExportStore = defineStore('export', () => {
           await invoke('export_edl', { edl });
           progress.value = 100;
           lastExportResult.value = outputPath;
-          console.log('[Export] Track EDL export complete:', track.name, '->', outputPath);
+          console.log('[Export] Track EDL export complete:', currentTrack.name, '->', outputPath);
           return outputPath;
         } finally {
           unlisten();
@@ -341,7 +360,7 @@ export const useExportStore = defineStore('export', () => {
 
       // Fallback: JS-side mixing for tracks without source paths
       const audioContext = audioStore.getAudioContext();
-      const trackBuffer = mixSingleTrack(track.id, audioContext);
+      const trackBuffer = mixSingleTrack(currentTrack.id, audioContext);
 
       if (!trackBuffer) {
         throw new Error('No audio clips to export for this track');
@@ -386,7 +405,7 @@ export const useExportStore = defineStore('export', () => {
       }
 
       lastExportResult.value = outputPath;
-      console.log('[Export] Track export complete:', track.name, '->', outputPath);
+      console.log('[Export] Track export complete:', currentTrack.name, '->', outputPath);
       return outputPath;
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
