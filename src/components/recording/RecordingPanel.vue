@@ -3,10 +3,10 @@ import { ref, watch, onUnmounted } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import LevelMeter from './LevelMeter.vue';
 import LiveWaveform from '@/components/waveform/LiveWaveform.vue';
+import DevicePicker from './DevicePicker.vue';
 import { useRecordingStore } from '@/stores/recording';
 import { useSettingsStore } from '@/stores/settings';
 import { formatTime } from '@/shared/utils';
-import type { RecordingSource } from '@/shared/types';
 
 const HOLD_TO_STOP_DURATION = 1500; // ms
 
@@ -46,8 +46,24 @@ let holdTimer: number | null = null;
 let holdStartTime = 0;
 let holdAnimFrame = 0;
 
-// Source selection handler - click a source card to immediately start recording
-async function handleSourceSelect(src: RecordingSource) {
+// Device selection handler - click a device to select it, then record button starts
+async function handleDeviceSelect(deviceId: string) {
+  // Determine source type from the device
+  const device = recordingStore.devices.find(d => d.id === deviceId);
+  if (device?.is_loopback) {
+    recordingStore.source = 'system';
+  } else {
+    recordingStore.source = 'microphone';
+  }
+}
+
+// Start recording with the currently selected device
+async function handleStartRecording() {
+  if (!recordingStore.selectedDeviceId) return;
+
+  const device = recordingStore.selectedDevice;
+  const src = device?.is_loopback ? 'system' : 'microphone';
+  settingsStore.setLastRecordingSource(src);
   await recordingStore.quickStart(src);
 }
 
@@ -138,57 +154,13 @@ async function handleCancel() {
     <template v-if="!recordingStore.isRecording && !recordingStore.isPreparing && !closing">
       <h3 class="text-sm font-medium text-gray-200 mb-3">Record Audio</h3>
 
-      <!-- Two large source cards -->
-      <div class="grid grid-cols-2 gap-3 mb-3">
-        <!-- Microphone card -->
-        <button
-          class="group flex flex-col items-center gap-2 px-4 py-5 rounded-lg border-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
-          :class="[
-            settingsStore.settings.lastRecordingSource === 'microphone'
-              ? 'border-cyan-500/50 bg-cyan-500/5'
-              : 'border-gray-600 bg-gray-700/50',
-            'hover:border-cyan-400 hover:bg-cyan-500/10'
-          ]"
-          @click="handleSourceSelect('microphone')"
-        >
-          <!-- Microphone SVG icon -->
-          <svg class="w-10 h-10 text-gray-300 group-hover:text-cyan-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-          </svg>
-          <span class="text-xs font-medium text-gray-200 group-hover:text-cyan-300 transition-colors">Microphone</span>
-          <!-- Last-used indicator -->
-          <span
-            v-if="settingsStore.settings.lastRecordingSource === 'microphone'"
-            class="text-[9px] text-cyan-500/70"
-          >last used</span>
-        </button>
-
-        <!-- System Sound card -->
-        <button
-          class="group flex flex-col items-center gap-2 px-4 py-5 rounded-lg border-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
-          :class="[
-            settingsStore.settings.lastRecordingSource === 'system'
-              ? 'border-cyan-500/50 bg-cyan-500/5'
-              : 'border-gray-600 bg-gray-700/50',
-            'hover:border-cyan-400 hover:bg-cyan-500/10'
-          ]"
-          @click="handleSourceSelect('system')"
-        >
-          <!-- Speaker/monitor SVG icon -->
-          <svg class="w-10 h-10 text-gray-300 group-hover:text-cyan-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-          </svg>
-          <span class="text-xs font-medium text-gray-200 group-hover:text-cyan-300 transition-colors">System Sound</span>
-          <!-- Last-used indicator -->
-          <span
-            v-if="settingsStore.settings.lastRecordingSource === 'system'"
-            class="text-[9px] text-cyan-500/70"
-          >last used</span>
-        </button>
+      <!-- Device picker (grouped: Microphones, System Audio) -->
+      <div class="mb-3">
+        <DevicePicker @select="handleDeviceSelect" />
       </div>
 
       <!-- Mono/Stereo channel mode toggle -->
-      <div class="flex items-center justify-center gap-2 mb-2">
+      <div class="flex items-center justify-center gap-2 mb-3">
         <span class="text-[10px] text-gray-500">Channels:</span>
         <div class="flex items-center gap-1">
           <button
@@ -208,13 +180,23 @@ async function handleCancel() {
         </div>
       </div>
 
+      <!-- Record button -->
+      <Button
+        variant="primary"
+        size="sm"
+        class="w-full"
+        :disabled="!recordingStore.selectedDeviceId"
+        @click="handleStartRecording"
+      >
+        <svg class="w-4 h-4 mr-1.5" fill="currentColor" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="8" />
+        </svg>
+        Record
+      </Button>
+
       <!-- Hint text -->
-      <p class="text-[10px] text-gray-500 text-center mb-1">
-        Click a source to start recording immediately
-      </p>
-      <p class="text-[10px] text-gray-500 text-center">
-        Double-click record button to use
-        <span class="text-gray-400">{{ settingsStore.settings.lastRecordingSource === 'microphone' ? 'Microphone' : 'System Sound' }}</span>
+      <p class="text-[10px] text-gray-500 text-center mt-2">
+        Select a device and click Record. Hover over a device to preview its level.
       </p>
 
       <!-- Error display -->
@@ -239,8 +221,8 @@ async function handleCancel() {
         <span class="text-sm text-gray-200 font-mono">
           {{ formatTime(recordingStore.recordingDuration) }}
         </span>
-        <span class="text-[10px] text-gray-500">
-          {{ recordingStore.source === 'microphone' ? 'Mic' : 'System' }}
+        <span class="text-[10px] text-gray-500 truncate max-w-[100px]" :title="recordingStore.selectedDevice?.name">
+          {{ recordingStore.selectedDevice?.name || (recordingStore.source === 'microphone' ? 'Mic' : 'System') }}
         </span>
 
         <!-- Lock toggle button -->
