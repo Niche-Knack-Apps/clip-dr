@@ -213,6 +213,7 @@ export interface Settings {
   playheadColor: string;
   selectionColor: string;
   showTranscription: boolean;
+  autoTranscribe: boolean;
   asrModel: ASRModel;
   modelsPath: string;
   lastImportFolder: string;

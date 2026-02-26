@@ -323,9 +323,9 @@ fn load_audio_16khz(path: &Path) -> Result<Vec<f32>, String> {
         .make(&track.codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    // Collect all mono samples with capacity hint
+    // Collect all mono samples with capacity hint (at original sample rate, mono)
     let estimated_mono = track.codec_params.n_frames
-        .map(|n| (n as f64 / sample_rate * 16000.0) as usize)
+        .map(|n| n as usize / channels.max(1))
         .unwrap_or(0);
     let mut mono_samples: Vec<f32> = Vec::with_capacity(estimated_mono);
 
@@ -442,6 +442,14 @@ pub async fn transcribe_audio(
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+
+    // Limit threads to leave headroom for the system (UI, audio, OS)
+    let max_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let whisper_threads = (max_threads / 2).max(1).min(8) as i32;
+    params.set_n_threads(whisper_threads);
+    log::info!("Whisper using {} threads (system has {})", whisper_threads, max_threads);
 
     // Run transcription
     state.full(params, &samples)

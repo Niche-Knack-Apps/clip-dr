@@ -406,6 +406,11 @@ onMounted(async () => {
               label="Show transcription"
               @update:model-value="settingsStore.setShowTranscription"
             />
+            <Toggle
+              :model-value="settingsStore.settings.autoTranscribe"
+              label="Auto-transcribe on import"
+              @update:model-value="settingsStore.setAutoTranscribe"
+            />
 
             <div>
               <label class="block text-xs text-gray-400 mb-1">

@@ -449,9 +449,14 @@ export const useAudioStore = defineStore('audio', () => {
       // Always try to load cached transcription from disk (free, no CPU cost)
       const loadedFromDisk = await transcriptionStore.loadTranscriptionFromDisk(trackId);
       if (!loadedFromDisk) {
-        const MAX_AUTO_TRANSCRIBE_DURATION = 900; // 15 minutes in seconds
-        if (metadata.duration >= MAX_AUTO_TRANSCRIBE_DURATION) {
-          console.log(`[Audio] Skipping auto-transcription: duration ${metadata.duration.toFixed(0)}s >= ${MAX_AUTO_TRANSCRIBE_DURATION}s (use toolbar button)`);
+        // Check if auto-transcription is enabled in settings
+        const { useSettingsStore } = await import('./settings');
+        const settingsStore = useSettingsStore();
+
+        if (!settingsStore.settings.autoTranscribe) {
+          console.log(`[Audio] Auto-transcription disabled (use toolbar button)`);
+        } else if (metadata.duration >= 900) {
+          console.log(`[Audio] Skipping auto-transcription: duration ${metadata.duration.toFixed(0)}s >= 900s (use toolbar button)`);
         } else {
           // Auto-transcribe short files, but only after fully ready (peaks + cache done)
           const currentTrack = tracksStore.tracks.find(t => t.id === trackId);

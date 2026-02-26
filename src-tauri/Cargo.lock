@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "clip-dr"
-version = "0.12.8"
+version = "0.12.11"
 dependencies = [
  "biquad",
  "chrono",

@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS = {
   playheadColor: '#ff3366',
   selectionColor: 'rgba(255, 255, 255, 0.2)',
   showTranscription: true,
+  autoTranscribe: false,
   asrModel: 'whisper-tiny' as const,
   modelsPath: '',
   lastImportFolder: '',
