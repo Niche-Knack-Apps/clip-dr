@@ -402,10 +402,25 @@ fn export_edl_mp3(
 }
 
 /// Convert a WAV file to FLAC using ffmpeg subprocess.
+/// Find ffmpeg binary: check next to our own executable first (bundled on Windows),
+/// then fall back to system PATH.
+fn find_ffmpeg() -> String {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let bundled = exe_dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+            if bundled.exists() {
+                return bundled.to_string_lossy().to_string();
+            }
+        }
+    }
+    "ffmpeg".to_string()
+}
+
 /// flacenc's output is incompatible with symphonia's FLAC reader, so we use
 /// ffmpeg which produces universally compatible FLAC files.
 fn wav_to_flac(wav_path: &str, flac_path: &str) -> Result<(), String> {
-    let output = std::process::Command::new("ffmpeg")
+    let ffmpeg = find_ffmpeg();
+    let output = std::process::Command::new(&ffmpeg)
         .args(["-y", "-i", wav_path, "-c:a", "flac", flac_path])
         .output()
         .map_err(|e| format!("Failed to run ffmpeg (is it installed?): {}", e))?;
@@ -421,8 +436,9 @@ fn wav_to_flac(wav_path: &str, flac_path: &str) -> Result<(), String> {
 /// Convert a WAV file to MP3 using ffmpeg subprocess.
 /// Replaces the mp3lame-encoder dependency which can't cross-compile to Windows.
 fn wav_to_mp3(wav_path: &str, mp3_path: &str, bitrate: u32) -> Result<(), String> {
+    let ffmpeg = find_ffmpeg();
     let bitrate_str = format!("{}k", bitrate);
-    let output = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new(&ffmpeg)
         .args(["-y", "-i", wav_path, "-c:a", "libmp3lame", "-b:a", &bitrate_str, mp3_path])
         .output()
         .map_err(|e| format!("Failed to run ffmpeg (is it installed?): {}", e))?;
@@ -718,7 +734,8 @@ fn export_audio_ogg_inner(
 
 #[tauri::command]
 pub fn check_ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg")
+    let ffmpeg = find_ffmpeg();
+    std::process::Command::new(&ffmpeg)
         .arg("-version")
         .output()
         .map(|o| o.status.success())
