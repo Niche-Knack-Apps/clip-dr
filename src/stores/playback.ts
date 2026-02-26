@@ -116,7 +116,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Get all tracks with sourcePath that can be loaded by Rust
   function getPlayableTracks(): Track[] {
     return tracksStore.tracks.filter(t =>
-      t.sourcePath && (!t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching')
+      (t.cachedAudioPath || t.sourcePath) && (!t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching')
     );
   }
 

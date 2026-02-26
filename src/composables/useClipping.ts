@@ -3,6 +3,9 @@ import { useTracksStore } from '@/stores/tracks';
 import { useSelectionStore } from '@/stores/selection';
 import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
+import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { tempDir } from '@tauri-apps/api/path';
+import { encodeWavFloat32 } from '@/shared/audio-utils';
 import type { Track } from '@/shared/types';
 
 export function useClipping() {
@@ -50,6 +53,10 @@ export function useClipping() {
       inPoint
     );
 
+    // Write temp WAV so Rust playback engine can access this clip
+    const cachePromise = cacheClipForPlayback(newTrack.id, extracted.buffer);
+    tracksStore.setPendingRecache(cachePromise);
+
     // Mute source tracks that contributed audio to the clip
     for (const t of tracksStore.tracks) {
       if (t.id === newTrack.id) continue;
@@ -62,6 +69,21 @@ export function useClipping() {
     playbackStore.seek(inPoint);
     console.log(`[Clipping] Created clip (${(outPoint - inPoint).toFixed(2)}s) at timeline ${inPoint.toFixed(2)}s`);
     return newTrack;
+  }
+
+  // Write a clip's AudioBuffer to a temp WAV and set cachedAudioPath for Rust playback
+  async function cacheClipForPlayback(trackId: string, buffer: AudioBuffer): Promise<void> {
+    try {
+      const wavData = encodeWavFloat32(buffer);
+      const fileName = `clip_${trackId}_${Date.now()}.wav`;
+      await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
+      const tmpDir = await tempDir();
+      const cachedPath = `${tmpDir}${tmpDir.endsWith('/') ? '' : '/'}${fileName}`;
+      tracksStore.setCachedAudioPath(trackId, cachedPath);
+      console.log(`[Clipping] Cached clip WAV for Rust playback: ${cachedPath}`);
+    } catch (err) {
+      console.error('[Clipping] Failed to cache clip WAV:', err);
+    }
   }
 
   function deleteTrack(trackId: string): void {
