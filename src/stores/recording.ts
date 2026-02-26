@@ -14,6 +14,31 @@ export interface AudioDevice {
   is_default: boolean;
   is_input: boolean;
   is_loopback: boolean;
+  /** Whether this is an output device */
+  is_output: boolean;
+  /** Device type: "microphone", "loopback", "output", "virtual" */
+  device_type: string;
+  /** Number of channels supported */
+  channels: number;
+  /** Supported sample rates */
+  sample_rates: number[];
+  /** Platform-specific identifier */
+  platform_id: string;
+}
+
+export interface DeviceCapabilities {
+  device_id: string;
+  device_name: string;
+  is_input: boolean;
+  is_output: boolean;
+  configs: DeviceConfig[];
+}
+
+export interface DeviceConfig {
+  channels: number;
+  sample_format: string;
+  min_sample_rate: number;
+  max_sample_rate: number;
 }
 
 export interface RecordingResult {
@@ -71,12 +96,24 @@ export const useRecordingStore = defineStore('recording', () => {
   let durationInterval: number | null = null;
   let recordingStartTime = 0;
 
+  // Device preview state
+  const previewLevel = ref(0);
+  const previewDeviceId = ref<string | null>(null);
+  let previewPollInterval: number | null = null;
+
+  // All devices ref (includes both input and output)
+  const allDevices = ref<AudioDevice[]>([]);
+
   const microphoneDevices = computed(() =>
     devices.value.filter(d => d.is_input && !d.is_loopback)
   );
 
   const loopbackDevices = computed(() =>
     devices.value.filter(d => d.is_loopback)
+  );
+
+  const outputDevices = computed(() =>
+    allDevices.value.filter(d => d.is_output)
   );
 
   const selectedDevice = computed(() =>
@@ -98,6 +135,73 @@ export const useRecordingStore = defineStore('recording', () => {
     } catch (e) {
       console.error('[Recording] Failed to list devices:', e);
       error.value = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Refresh all devices (inputs + outputs) for the full device picker */
+  async function refreshAllDevices(): Promise<void> {
+    try {
+      allDevices.value = await invoke<AudioDevice[]>('list_all_audio_devices');
+      // Also update the input-only devices list (backward compat)
+      devices.value = allDevices.value.filter(d => d.is_input);
+      console.log('[Recording] Found all devices:', allDevices.value.length,
+        '(input:', devices.value.length, 'output:', outputDevices.value.length, ')');
+
+      if (!selectedDeviceId.value && defaultDevice.value) {
+        selectedDeviceId.value = defaultDevice.value.id;
+      }
+    } catch (e) {
+      console.error('[Recording] Failed to list all devices:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Get detailed capabilities for a specific device */
+  async function getDeviceCapabilities(deviceId: string): Promise<DeviceCapabilities | null> {
+    try {
+      return await invoke<DeviceCapabilities>('get_device_capabilities', { deviceId });
+    } catch (e) {
+      console.error('[Recording] Failed to get device capabilities:', e);
+      return null;
+    }
+  }
+
+  /** Start previewing a device's audio level (for VU meter in device picker) */
+  async function startDevicePreview(deviceId: string): Promise<void> {
+    // Stop any existing preview first
+    if (previewDeviceId.value) {
+      await stopDevicePreview();
+    }
+
+    try {
+      await invoke('start_device_preview', { deviceId });
+      previewDeviceId.value = deviceId;
+
+      previewPollInterval = window.setInterval(async () => {
+        try {
+          previewLevel.value = await invoke<number>('get_device_preview_level');
+        } catch {
+          // Ignore polling errors
+        }
+      }, 100);
+    } catch (e) {
+      console.error('[Recording] Failed to start device preview:', e);
+    }
+  }
+
+  /** Stop the current device preview */
+  async function stopDevicePreview(): Promise<void> {
+    if (previewPollInterval) {
+      clearInterval(previewPollInterval);
+      previewPollInterval = null;
+    }
+    previewDeviceId.value = null;
+    previewLevel.value = 0;
+
+    try {
+      await invoke('stop_device_preview');
+    } catch {
+      // Ignore errors when stopping
     }
   }
 
@@ -553,12 +657,20 @@ export const useRecordingStore = defineStore('recording', () => {
     triggerPhrases,
     microphoneDevices,
     loopbackDevices,
+    outputDevices,
+    allDevices,
     selectedDevice,
     defaultDevice,
     // System audio
     systemAudioInfo,
     systemAudioProbing,
+    previewLevel,
+    previewDeviceId,
     refreshDevices,
+    refreshAllDevices,
+    getDeviceCapabilities,
+    startDevicePreview,
+    stopDevicePreview,
     selectDevice,
     setSource,
     setPlacement,
