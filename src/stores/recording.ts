@@ -48,6 +48,8 @@ export interface RecordingResult {
   channels: number;
   /** Additional segment paths when recording was split (excludes `path` which is segment 1) */
   extra_segments: string[];
+  /** Seconds of pre-record buffer audio prepended to the recording */
+  pre_record_seconds: number;
 }
 
 export interface RecordingSession {
@@ -78,6 +80,13 @@ export interface SessionLevel {
   session_id: string;
   device_id: string;
   level: number;
+}
+
+export interface OrphanedRecording {
+  path: string;
+  size_bytes: number;
+  header_ok: boolean;
+  estimated_duration: number;
 }
 
 export type RecordingSource = 'microphone' | 'system';
@@ -835,6 +844,46 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  // ── Crash recovery ──
+  const orphanedRecordings = ref<OrphanedRecording[]>([]);
+
+  async function scanOrphanedRecordings(): Promise<OrphanedRecording[]> {
+    try {
+      const projectDir = await settingsStore.getProjectFolder();
+      const orphans = await invoke<OrphanedRecording[]>('scan_orphaned_recordings', { projectDir });
+      orphanedRecordings.value = orphans;
+      if (orphans.length > 0) {
+        console.log('[Recording] Found', orphans.length, 'orphaned recording(s)');
+      }
+      return orphans;
+    } catch (e) {
+      console.error('[Recording] Failed to scan for orphaned recordings:', e);
+      return [];
+    }
+  }
+
+  async function recoverRecording(path: string): Promise<RecordingResult | null> {
+    try {
+      const result = await invoke<RecordingResult>('recover_recording', { path });
+      console.log('[Recording] Recovered:', result.path, result.duration.toFixed(1) + 's');
+
+      // Remove from orphans list
+      orphanedRecordings.value = orphanedRecordings.value.filter(o => o.path !== path);
+
+      // Import the recovered file
+      await audioStore.importFile(result.path);
+      return result;
+    } catch (e) {
+      console.error('[Recording] Failed to recover recording:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+      return null;
+    }
+  }
+
+  function dismissOrphans(): void {
+    orphanedRecordings.value = [];
+  }
+
   // Initialize devices on store creation
   refreshDevices();
 
@@ -901,5 +950,10 @@ export const useRecordingStore = defineStore('recording', () => {
     setMultiSourceMode,
     startMultiRecording,
     stopMultiRecording,
+    // Crash recovery
+    orphanedRecordings,
+    scanOrphanedRecordings,
+    recoverRecording,
+    dismissOrphans,
   };
 });

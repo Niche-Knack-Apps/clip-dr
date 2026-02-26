@@ -67,6 +67,8 @@ struct RecordingSession {
     use_system_buffer: bool,
     /// Microseconds from the shared start instant to when this session's stream started
     start_offset_us: i64,
+    /// Seconds of pre-record buffer audio prepended
+    pre_record_seconds: f64,
 }
 
 /// Managed state for all recording, monitoring, and preview operations.
@@ -83,6 +85,9 @@ pub struct RecordingManager {
     preview_stream: Mutex<Option<StreamHolder>>,
     preview_active: Arc<AtomicBool>,
     preview_level: Arc<AtomicU32>,
+
+    // ── Pre-record buffer (filled during monitoring) ──
+    pre_record_buffer: Mutex<Option<Arc<PreRecordBuffer>>>,
 
     // ── Shared current level (backward compat: single-session & monitoring) ──
     current_level: Arc<AtomicU32>,
@@ -110,6 +115,7 @@ impl RecordingManager {
             sessions: Mutex::new(HashMap::new()),
             monitor_stream: Mutex::new(None),
             monitoring_active: Arc::new(AtomicBool::new(false)),
+            pre_record_buffer: Mutex::new(None),
             preview_stream: Mutex::new(None),
             preview_active: Arc::new(AtomicBool::new(false)),
             preview_level: Arc::new(AtomicU32::new(0)),
@@ -200,6 +206,9 @@ pub struct RecordingResult {
     pub channels: u16,
     /// Additional segment paths when recording was split (excludes `path` which is segment 1)
     pub extra_segments: Vec<String>,
+    /// Seconds of pre-record buffer audio prepended to the recording
+    #[serde(default)]
+    pub pre_record_seconds: f64,
 }
 
 /// Configuration for a single device in a multi-source recording.
@@ -282,6 +291,87 @@ impl RecordingRingBuffer {
         self
     }
 }
+
+// ── Pre-record circular buffer ──
+// Lock-free circular buffer filled during monitoring, drained into the WAV
+// writer when recording starts. Default capacity: 10 seconds of stereo 48kHz.
+
+/// Pre-record buffer: stores the last N seconds of audio from monitoring.
+/// Written to by the monitor callback, read by start_recording to prepend audio.
+struct PreRecordBuffer {
+    data: Box<[f32]>,
+    data_ptr: *mut f32,
+    capacity: usize,
+    /// Total samples written (monotonically increasing, wraps modulo capacity)
+    write_pos: AtomicUsize,
+    /// Number of valid samples (min(write_pos, capacity))
+    valid_samples: AtomicUsize,
+    /// Sample rate of the stored audio
+    sample_rate: u32,
+    /// Number of channels
+    channels: u16,
+}
+
+unsafe impl Send for PreRecordBuffer {}
+unsafe impl Sync for PreRecordBuffer {}
+
+impl PreRecordBuffer {
+    fn new(capacity: usize, sample_rate: u32, channels: u16) -> Self {
+        let mut data = vec![0.0f32; capacity].into_boxed_slice();
+        let data_ptr = data.as_mut_ptr();
+        Self {
+            data,
+            data_ptr,
+            capacity,
+            write_pos: AtomicUsize::new(0),
+            valid_samples: AtomicUsize::new(0),
+            sample_rate,
+            channels,
+        }
+    }
+
+    /// Write samples from the audio callback (lock-free, overwrites oldest data).
+    fn write(&self, samples: &[f32]) {
+        let wp = self.write_pos.load(Ordering::Relaxed);
+        for (i, &s) in samples.iter().enumerate() {
+            let idx = (wp + i) % self.capacity;
+            unsafe { *self.data_ptr.add(idx) = s; }
+        }
+        self.write_pos.store(wp + samples.len(), Ordering::Release);
+        let valid = (wp + samples.len()).min(self.capacity);
+        let _ = self.valid_samples.fetch_max(valid, Ordering::Relaxed);
+    }
+
+    /// Drain all valid samples in chronological order.
+    /// Returns (samples, seconds_of_audio).
+    fn drain(&self) -> (Vec<f32>, f64) {
+        let wp = self.write_pos.load(Ordering::Acquire);
+        let valid = self.valid_samples.load(Ordering::Relaxed).min(self.capacity);
+        if valid == 0 {
+            return (Vec::new(), 0.0);
+        }
+
+        let mut out = Vec::with_capacity(valid);
+        let start = if wp >= valid { wp - valid } else { 0 };
+        for i in 0..valid {
+            let idx = (start + i) % self.capacity;
+            out.push(unsafe { *self.data_ptr.add(idx) });
+        }
+
+        let seconds = valid as f64 / (self.sample_rate as f64 * self.channels as f64);
+        (out, seconds)
+    }
+
+    /// Reset the buffer (call after draining).
+    #[allow(dead_code)]
+    fn reset(&self) {
+        self.write_pos.store(0, Ordering::Release);
+        self.valid_samples.store(0, Ordering::Release);
+    }
+}
+
+/// Default pre-record buffer duration in seconds.
+const PRE_RECORD_SECONDS: usize = 10;
 
 /// Compute a segment file path from a base path and segment index.
 /// Segment 1 uses the base path unchanged; segment 2+ appends `_002`, `_003`, etc.
@@ -1398,6 +1488,34 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         output_path.clone(), spec, use_rf64,
     );
 
+    // Drain pre-record buffer into ring buffer (prepends captured monitoring audio)
+    let mut pre_record_secs = 0.0f64;
+    if let Ok(mut guard) = mgr.pre_record_buffer.lock() {
+        if let Some(ref buf) = *guard {
+            // Only drain if the buffer's format matches the recording
+            if buf.sample_rate == sample_rate && buf.channels == channels {
+                let (samples, secs) = buf.drain();
+                if !samples.is_empty() {
+                    // Write directly into ring buffer
+                    let cap = ring.capacity;
+                    let wp = ring.write_pos.load(Ordering::Relaxed);
+                    for (i, &s) in samples.iter().enumerate() {
+                        let idx = (wp + i) % cap;
+                        unsafe { *ring.data_ptr.add(idx) = s; }
+                    }
+                    ring.write_pos.store(wp + samples.len(), Ordering::Release);
+                    pre_record_secs = secs;
+                    log::info!("Pre-record buffer drained: {} samples ({:.2}s)", samples.len(), secs);
+                }
+            } else {
+                log::info!("Pre-record buffer format mismatch ({}Hz/{}ch vs {}Hz/{}ch), skipping",
+                    buf.sample_rate, buf.channels, sample_rate, channels);
+            }
+        }
+        // Clear the buffer reference (monitoring callback may still hold its own Arc)
+        *guard = None;
+    }
+
     // Build stream based on sample format (per-session atomics)
     let stream_config: cpal::StreamConfig = config.into();
     let shared_level = mgr.current_level.clone();
@@ -1428,6 +1546,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         large_file_format: lff,
         use_system_buffer: false,
         start_offset_us: 0,
+        pre_record_seconds: pre_record_secs,
     };
 
     if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1627,6 +1746,7 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
         sample_rate: session.sample_rate,
         channels: final_channels,
         extra_segments,
+        pre_record_seconds: session.pre_record_seconds,
     })
 }
 
@@ -1794,6 +1914,7 @@ pub async fn start_multi_recording(
             large_file_format: lff,
             use_system_buffer: false,
             start_offset_us: offset_us,
+            pre_record_seconds: 0.0,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1906,6 +2027,7 @@ pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec
                 sample_rate: session.sample_rate,
                 channels: final_channels,
                 extra_segments,
+                pre_record_seconds: session.pre_record_seconds,
             },
             start_offset_us: session.start_offset_us,
         });
@@ -2021,15 +2143,26 @@ pub async fn start_monitoring(device_id: Option<String>, mgr: State<'_, Recordin
     mgr.monitoring_active.store(true, Ordering::SeqCst);
     mgr.current_level.store(0, Ordering::SeqCst);
 
+    // Create pre-record buffer (10 seconds at device sample rate & channels)
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels();
+    let buf_capacity = sample_rate as usize * channels as usize * PRE_RECORD_SECONDS;
+    let pre_record = Arc::new(PreRecordBuffer::new(buf_capacity, sample_rate, channels));
+    if let Ok(mut guard) = mgr.pre_record_buffer.lock() {
+        *guard = Some(pre_record.clone());
+    }
+    log::info!("Pre-record buffer created: {}s at {}Hz {}ch ({} samples)",
+        PRE_RECORD_SECONDS, sample_rate, channels, buf_capacity);
+
     let active = mgr.monitoring_active.clone();
     let level = mgr.current_level.clone();
 
     let stream = match config.sample_format() {
-        SampleFormat::F32 => build_monitor_stream::<f32>(&device, &config.into(), active, level)?,
-        SampleFormat::I16 => build_monitor_stream::<i16>(&device, &config.into(), active, level)?,
-        SampleFormat::U16 => build_monitor_stream::<u16>(&device, &config.into(), active, level)?,
-        SampleFormat::I32 => build_monitor_stream::<i32>(&device, &config.into(), active, level)?,
-        SampleFormat::U8 => build_monitor_stream::<u8>(&device, &config.into(), active, level)?,
+        SampleFormat::F32 => build_monitor_stream::<f32>(&device, &config.into(), active, level, Some(pre_record))?,
+        SampleFormat::I16 => build_monitor_stream::<i16>(&device, &config.into(), active, level, Some(pre_record))?,
+        SampleFormat::U16 => build_monitor_stream::<u16>(&device, &config.into(), active, level, Some(pre_record))?,
+        SampleFormat::I32 => build_monitor_stream::<i32>(&device, &config.into(), active, level, Some(pre_record))?,
+        SampleFormat::U8 => build_monitor_stream::<u8>(&device, &config.into(), active, level, Some(pre_record))?,
         fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
     };
 
@@ -2047,6 +2180,7 @@ fn build_monitor_stream<T: Sample + cpal::SizedSample + Send + 'static>(
     config: &cpal::StreamConfig,
     active: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    pre_record: Option<Arc<PreRecordBuffer>>,
 ) -> Result<cpal::Stream, String>
 where
     f32: cpal::FromSample<T>,
@@ -2065,10 +2199,23 @@ where
 
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     let mut max_level: f32 = 0.0;
-                    for s in data.iter() {
-                        let f = f32::from_sample(*s);
-                        max_level = max_level.max(f.abs());
+
+                    // If pre-record buffer exists, convert and write to it
+                    if let Some(ref buf) = pre_record {
+                        let mut temp = Vec::with_capacity(data.len());
+                        for s in data.iter() {
+                            let f = f32::from_sample(*s);
+                            max_level = max_level.max(f.abs());
+                            temp.push(f);
+                        }
+                        buf.write(&temp);
+                    } else {
+                        for s in data.iter() {
+                            let f = f32::from_sample(*s);
+                            max_level = max_level.max(f.abs());
+                        }
                     }
+
                     level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
                 }));
 
@@ -2085,6 +2232,10 @@ where
 fn stop_monitoring_internal(mgr: &RecordingManager) {
     mgr.monitoring_active.store(false, Ordering::SeqCst);
     if let Ok(mut guard) = mgr.monitor_stream.lock() {
+        *guard = None;
+    }
+    // Clear the pre-record buffer
+    if let Ok(mut guard) = mgr.pre_record_buffer.lock() {
         *guard = None;
     }
     mgr.current_level.store(0, Ordering::SeqCst);
@@ -2661,6 +2812,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
             large_file_format: lff,
             use_system_buffer: true,
             start_offset_us: 0,
+            pre_record_seconds: 0.0,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -2848,6 +3000,7 @@ pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Re
             sample_rate: session.sample_rate,
             channels: final_channels,
             extra_segments,
+            pre_record_seconds: 0.0,
         })
     }
 
@@ -3240,6 +3393,176 @@ fn test_parecord(monitor_source: &str) -> Result<String, String> {
     }
 
     Err("Test file not created".to_string())
+}
+
+// ── Crash Recovery ──
+
+/// Result of scanning for orphaned recording files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanedRecording {
+    pub path: String,
+    pub size_bytes: u64,
+    /// Whether the WAV header appears valid
+    pub header_ok: bool,
+    /// Estimated duration in seconds (0 if header is invalid)
+    pub estimated_duration: f64,
+}
+
+/// Scan a directory for orphaned recording files (WAV files with truncated headers).
+#[tauri::command]
+pub fn scan_orphaned_recordings(project_dir: String) -> Result<Vec<OrphanedRecording>, String> {
+    let dir = PathBuf::from(&project_dir);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut orphans = Vec::new();
+
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("wav") {
+            continue;
+        }
+
+        let metadata = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if metadata.len() < 80 {
+            continue; // Too small to be a recording file
+        }
+
+        // Only consider files named "recording_*"
+        let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if !fname.starts_with("recording_") {
+            continue;
+        }
+
+        // Check if the WAV header's data size is plausible
+        let header_ok = check_wav_header_valid(&path);
+        let estimated_duration = if header_ok {
+            estimate_wav_duration(&path).unwrap_or(0.0)
+        } else {
+            // Estimate from file size assuming 48kHz stereo f32 (768000 bytes/sec)
+            let data_bytes = metadata.len().saturating_sub(80);
+            data_bytes as f64 / 768000.0
+        };
+
+        // Consider orphaned if header is broken or duration is suspiciously different from file size
+        if !header_ok {
+            orphans.push(OrphanedRecording {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: metadata.len(),
+                header_ok,
+                estimated_duration,
+            });
+        }
+    }
+
+    log::info!("Scanned {} for orphaned recordings: found {}", project_dir, orphans.len());
+    Ok(orphans)
+}
+
+/// Recover a recording with a truncated WAV header.
+#[tauri::command]
+pub fn recover_recording(path: String) -> Result<RecordingResult, String> {
+    let file_path = PathBuf::from(&path);
+    if !file_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    log::info!("Attempting to recover recording: {}", path);
+
+    // Patch the WAV header to match actual file size
+    patch_wav_header_if_needed(&file_path)
+        .map_err(|e| format!("Failed to recover WAV header: {}", e))?;
+
+    // Read the patched header to get accurate metadata
+    let duration = estimate_wav_duration(&file_path).unwrap_or(0.0);
+    let (sample_rate, channels) = read_wav_format(&file_path).unwrap_or((48000, 2));
+
+    log::info!("Recording recovered: {:.2}s, {}Hz, {}ch", duration, sample_rate, channels);
+
+    Ok(RecordingResult {
+        path,
+        duration,
+        sample_rate,
+        channels,
+        extra_segments: Vec::new(),
+        pre_record_seconds: 0.0,
+    })
+}
+
+/// Check if a WAV file's header has a valid data size.
+fn check_wav_header_valid(path: &Path) -> bool {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut reader = BufReader::new(file);
+    let mut header = [0u8; 80];
+    if reader.read_exact(&mut header).is_err() {
+        return false;
+    }
+
+    let magic = &header[0..4];
+    if magic != b"RIFF" && magic != b"RF64" {
+        return false;
+    }
+
+    // For RF64, header is always valid (sizes stored in ds64)
+    if magic == b"RF64" {
+        return true;
+    }
+
+    // For RIFF: check if the data chunk size is 0 (truncated) or plausible
+    if header.len() >= 80 && &header[76..80] == &[0, 0, 0, 0] {
+        // data_size is 0 — header was never patched
+        return false;
+    }
+
+    true
+}
+
+/// Estimate WAV duration from file header.
+fn estimate_wav_duration(path: &Path) -> Result<f64, String> {
+    let (sample_rate, channels) = read_wav_format(path)?;
+    let file_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let data_bytes = file_len.saturating_sub(80);
+    // Assuming f32 format: 4 bytes per sample
+    let total_samples = data_bytes / 4;
+    let samples_per_channel = total_samples / channels as u64;
+    Ok(samples_per_channel as f64 / sample_rate as f64)
+}
+
+/// Read sample rate and channels from a WAV file header.
+fn read_wav_format(path: &Path) -> Result<(u32, u16), String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open: {}", e))?;
+    let mut reader = BufReader::new(file);
+    let mut header = [0u8; 80];
+    reader.read_exact(&mut header).map_err(|e| format!("Failed to read header: {}", e))?;
+
+    // Find fmt chunk — for our layout it's at offset 48 (or 12 for standard WAV)
+    let fmt_offset = if &header[48..52] == b"fmt " {
+        48
+    } else if &header[12..16] == b"fmt " {
+        12
+    } else {
+        return Err("fmt chunk not found".to_string());
+    };
+
+    let channels = u16::from_le_bytes([header[fmt_offset + 10], header[fmt_offset + 11]]);
+    let sample_rate = u32::from_le_bytes([
+        header[fmt_offset + 12], header[fmt_offset + 13],
+        header[fmt_offset + 14], header[fmt_offset + 15],
+    ]);
+
+    Ok((sample_rate, channels))
 }
 
 // ── Tests ──

@@ -88,6 +88,8 @@ fn main() {
             recording::start_system_audio_monitoring,
             recording::stop_system_audio_monitoring,
             recording::probe_system_audio,
+            recording::scan_orphaned_recordings,
+            recording::recover_recording,
             transcribe::get_bundled_model_info,
             import::import_audio_start,
             import::import_audio_cancel,

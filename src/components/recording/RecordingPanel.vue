@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import LevelMeter from './LevelMeter.vue';
 import LiveWaveform from '@/components/waveform/LiveWaveform.vue';
 import DevicePicker from './DevicePicker.vue';
 import ActiveSessions from './ActiveSessions.vue';
+import OrphanRecovery from './OrphanRecovery.vue';
 import { useRecordingStore } from '@/stores/recording';
 import { useSettingsStore } from '@/stores/settings';
 import { formatTime } from '@/shared/utils';
@@ -79,6 +80,11 @@ const canRecord = computed(() => {
     return recordingStore.selectedDeviceIds.length > 0;
   }
   return !!recordingStore.selectedDeviceId;
+});
+
+// Scan for orphaned recordings when panel opens
+onMounted(() => {
+  recordingStore.scanOrphanedRecordings();
 });
 
 // Auto-start monitoring when panel opens (use last source)
@@ -175,6 +181,9 @@ async function handleCancel() {
     <!-- ========== STATE 1: Source Selection (not recording) ========== -->
     <template v-if="!recordingStore.isRecording && !recordingStore.isPreparing && !closing">
       <h3 class="text-sm font-medium text-gray-200 mb-3">Record Audio</h3>
+
+      <!-- Orphaned recording recovery banner -->
+      <OrphanRecovery />
 
       <!-- Device picker (grouped: Microphones, System Audio) -->
       <div class="mb-3">
