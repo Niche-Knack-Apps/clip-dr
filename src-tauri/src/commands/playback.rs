@@ -1746,4 +1746,894 @@ mod tests {
             assert_eq!(r, data[interleaved_idx + 1]);
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 1: WAV Loading Robustness
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_load_int8_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_u8.wav");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 22050,
+            bits_per_sample: 8,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        // 8-bit WAV is unsigned 0..255, hound writes i8 range -128..127
+        // Write ascending ramp: -100, -50, 0, 50, 100
+        for &v in &[-100i8, -50, 0, 50, 100] {
+            writer.write_sample(v as i32).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 22050);
+        assert_eq!(ch, 1);
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 5);
+        // Normalization: divided by 2^7 = 128
+        let expected: Vec<f32> = vec![-100.0, -50.0, 0.0, 50.0, 100.0]
+            .iter().map(|&v| v / 128.0).collect();
+        for (i, (&got, &exp)) in samples.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 0.01, "Sample {}: got {}, expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_load_int24_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_i24.wav");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        // 24-bit range: -8388608 to 8388607. Write some representative values.
+        for &v in &[4194304i32, -4194304, 0, 8388607, -8388608] {
+            writer.write_sample(v).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 48000);
+        assert_eq!(ch, 1);
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 5);
+        // Normalization: divided by 2^23 = 8388608
+        let scale = 8388608.0f32;
+        let expected = [4194304.0 / scale, -4194304.0 / scale, 0.0, 8388607.0 / scale, -8388608.0 / scale];
+        for (i, (&got, &exp)) in samples.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 0.0001, "Sample {}: got {}, expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_load_mono_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_mono.wav");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        // Ascending ramp
+        for i in 0..50 {
+            writer.write_sample((i * 500) as i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 44100);
+        assert_eq!(ch, 1);
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 50);
+        // Verify ascending ramp
+        for i in 1..50 {
+            assert!(samples[i] > samples[i - 1],
+                "Sample {} ({}) should be > sample {} ({})", i, samples[i], i - 1, samples[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_load_stereo_48khz_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_stereo_48k.wav");
+
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..60 {
+            writer.write_sample(10000i16).unwrap();
+            writer.write_sample(-10000i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 48000);
+        assert_eq!(ch, 2);
+        assert_eq!(pcm.samples().len(), 120);
+    }
+
+    #[test]
+    fn test_float32_mmap_data_offset_and_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_f32_offset.wav");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..200 {
+            writer.write_sample(i as f32 / 200.0).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 44100);
+        assert_eq!(ch, 1);
+
+        match &pcm {
+            PcmData::Mmap { data_offset, sample_count, .. } => {
+                assert!(*data_offset >= 44, "data_offset should be >= 44, got {}", data_offset);
+                assert_eq!(*sample_count, 200);
+            }
+            _ => panic!("Float32 WAV should use Mmap path"),
+        }
+    }
+
+    #[test]
+    fn test_load_nonexistent_file_returns_error() {
+        let result = load_wav_mmap("/tmp/nonexistent_test_file_12345.wav");
+        assert!(result.is_err(), "Loading nonexistent file should return Err");
+    }
+
+    #[test]
+    fn test_load_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.wav");
+        File::create(&path).unwrap();
+
+        let result = load_wav_mmap(path.to_str().unwrap());
+        assert!(result.is_err(), "Loading empty file should return Err");
+    }
+
+    /// Core regression guard for the v0.12.10 bug: integer WAV samples must NOT
+    /// be silently zeroed. 100 non-zero i16 samples should produce 100 non-zero f32 values.
+    #[test]
+    fn test_int16_samples_nonzero_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_nonzero.wav");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 1..=100 {
+            writer.write_sample((i * 100) as i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, _, _) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 100);
+
+        let zero_count = samples.iter().filter(|&&s| s == 0.0).count();
+        assert_eq!(zero_count, 0,
+            "REGRESSION: {} of 100 non-zero int16 samples became 0.0 after loading! \
+             This is the hound samples::<f32>() silent-error bug.", zero_count);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 2: Data Chunk Finding
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Helper: build a minimal standard WAV header (44 bytes) with given data_size
+    fn build_standard_wav_header(data_size: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; 44];
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&(36 + data_size).to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+        buf[12..16].copy_from_slice(b"fmt ");
+        buf[16..20].copy_from_slice(&16u32.to_le_bytes());
+        buf[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
+        buf[22..24].copy_from_slice(&2u16.to_le_bytes()); // stereo
+        buf[24..28].copy_from_slice(&44100u32.to_le_bytes());
+        buf[28..32].copy_from_slice(&176400u32.to_le_bytes());
+        buf[32..34].copy_from_slice(&4u16.to_le_bytes());
+        buf[34..36].copy_from_slice(&16u16.to_le_bytes());
+        buf[36..40].copy_from_slice(b"data");
+        buf[40..44].copy_from_slice(&data_size.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn test_find_data_offset_standard_wav() {
+        let buf = build_standard_wav_header(400);
+        assert_eq!(find_wav_data_offset(&buf), Some(44));
+    }
+
+    #[test]
+    fn test_find_data_offset_with_extra_chunks() {
+        // RIFF + WAVE + LIST chunk (8 header + 26 payload) + fmt + data
+        let list_payload = b"INFOsome extra metadata!!!";
+        let list_size = list_payload.len() as u32; // 25
+
+        let data_size = 100u32;
+        let fmt_size = 16u32;
+        // Total: 12 (RIFF header) + 8+26 (LIST, padded to even) + 8+16 (fmt) + 8 (data header) + data
+        let total_chunks = 8 + 26 + 8 + fmt_size as usize + 8 + data_size as usize;
+        let riff_size = 4 + total_chunks;
+
+        let mut buf = vec![0u8; 12 + total_chunks];
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&(riff_size as u32).to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+
+        // LIST chunk
+        let mut pos = 12;
+        buf[pos..pos + 4].copy_from_slice(b"LIST");
+        buf[pos + 4..pos + 8].copy_from_slice(&list_size.to_le_bytes());
+        buf[pos + 8..pos + 8 + list_payload.len()].copy_from_slice(list_payload);
+        pos += 8 + list_payload.len();
+        if list_payload.len() % 2 != 0 { buf.insert(pos, 0); pos += 1; }
+
+        // fmt chunk
+        buf[pos..pos + 4].copy_from_slice(b"fmt ");
+        buf[pos + 4..pos + 8].copy_from_slice(&fmt_size.to_le_bytes());
+        buf[pos + 8..pos + 10].copy_from_slice(&1u16.to_le_bytes());
+        buf[pos + 10..pos + 12].copy_from_slice(&2u16.to_le_bytes());
+        buf[pos + 12..pos + 16].copy_from_slice(&44100u32.to_le_bytes());
+        buf[pos + 16..pos + 20].copy_from_slice(&176400u32.to_le_bytes());
+        buf[pos + 20..pos + 22].copy_from_slice(&4u16.to_le_bytes());
+        buf[pos + 22..pos + 24].copy_from_slice(&16u16.to_le_bytes());
+        pos += 8 + fmt_size as usize;
+
+        // data chunk
+        let expected_data_offset = pos + 8;
+        buf[pos..pos + 4].copy_from_slice(b"data");
+        buf[pos + 4..pos + 8].copy_from_slice(&data_size.to_le_bytes());
+
+        assert_eq!(find_wav_data_offset(&buf), Some(expected_data_offset));
+    }
+
+    #[test]
+    fn test_find_data_offset_odd_chunk_size() {
+        // Build: RIFF header + odd-sized "JUNK" chunk (size=5 → padded to 6) + fmt + data
+        let junk_size = 5u32;
+        let fmt_size = 16u32;
+        let data_size = 8u32;
+        // JUNK: 8 + 5 + 1(pad) = 14, fmt: 8 + 16 = 24, data header: 8
+        let total = 14 + 24 + 8 + data_size as usize;
+
+        let mut buf = vec![0u8; 12 + total];
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&((4 + total) as u32).to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+
+        let mut pos = 12;
+        // JUNK chunk with odd size
+        buf[pos..pos + 4].copy_from_slice(b"JUNK");
+        buf[pos + 4..pos + 8].copy_from_slice(&junk_size.to_le_bytes());
+        pos += 8 + junk_size as usize + 1; // +1 for word-alignment pad
+
+        // fmt chunk
+        buf[pos..pos + 4].copy_from_slice(b"fmt ");
+        buf[pos + 4..pos + 8].copy_from_slice(&fmt_size.to_le_bytes());
+        buf[pos + 8..pos + 10].copy_from_slice(&1u16.to_le_bytes());
+        pos += 8 + fmt_size as usize;
+
+        // data chunk
+        let expected_offset = pos + 8;
+        buf[pos..pos + 4].copy_from_slice(b"data");
+        buf[pos + 4..pos + 8].copy_from_slice(&data_size.to_le_bytes());
+
+        assert_eq!(find_wav_data_offset(&buf), Some(expected_offset));
+    }
+
+    #[test]
+    fn test_find_data_offset_rf64_magic() {
+        // RF64 magic should be accepted
+        let mut buf = build_standard_wav_header(100);
+        buf[0..4].copy_from_slice(b"RF64");
+        assert_eq!(find_wav_data_offset(&buf), Some(44));
+    }
+
+    #[test]
+    fn test_find_data_offset_truncated() {
+        // Empty
+        assert_eq!(find_wav_data_offset(&[]), None);
+        // Too small
+        assert_eq!(find_wav_data_offset(&[0u8; 8]), None);
+        // Valid start but truncated before data
+        let buf = build_standard_wav_header(100);
+        assert_eq!(find_wav_data_offset(&buf[..20]), None);
+    }
+
+    #[test]
+    fn test_find_data_offset_wrong_magic() {
+        let mut buf = build_standard_wav_header(100);
+        buf[0..4].copy_from_slice(b"FLAC");
+        assert_eq!(find_wav_data_offset(&buf), None);
+
+        buf[0..4].copy_from_slice(b"OggS");
+        assert_eq!(find_wav_data_offset(&buf), None);
+    }
+
+    #[test]
+    fn test_find_data_offset_no_data_chunk() {
+        // RIFF + WAVE + fmt chunk only, no data chunk
+        let fmt_size = 16u32;
+        let total = 8 + fmt_size as usize;
+        let mut buf = vec![0u8; 12 + total];
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&((4 + total) as u32).to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+        buf[12..16].copy_from_slice(b"fmt ");
+        buf[16..20].copy_from_slice(&fmt_size.to_le_bytes());
+        buf[20..22].copy_from_slice(&1u16.to_le_bytes());
+
+        assert_eq!(find_wav_data_offset(&buf), None);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 3: RF64 Parsing
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Helper: build an RF64 byte buffer with ds64, fmt, and data chunks
+    fn build_rf64_buffer(
+        sample_rate: u32,
+        channels: u16,
+        bits_per_sample: u16,
+        data_bytes: usize,
+        include_ds64: bool,
+    ) -> Vec<u8> {
+        let ds64_chunk_size = if include_ds64 { 8 + 28 } else { 0 };
+        let fmt_chunk_size = 8 + 16;
+        let data_header = 8;
+        let total = 12 + ds64_chunk_size + fmt_chunk_size + data_header + data_bytes;
+
+        let mut buf = vec![0u8; total];
+        buf[0..4].copy_from_slice(b"RF64");
+        buf[4..8].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+
+        let mut pos = 12;
+
+        if include_ds64 {
+            buf[pos..pos + 4].copy_from_slice(b"ds64");
+            buf[pos + 4..pos + 8].copy_from_slice(&28u32.to_le_bytes());
+            // riff_size (8 bytes) — skip
+            pos += 8 + 8;
+            // data_size (8 bytes)
+            buf[pos..pos + 8].copy_from_slice(&(data_bytes as u64).to_le_bytes());
+            pos += 8;
+            // sample_count (8 bytes) + table_length (4 bytes)
+            pos += 12;
+        }
+
+        // fmt chunk
+        buf[pos..pos + 4].copy_from_slice(b"fmt ");
+        buf[pos + 4..pos + 8].copy_from_slice(&16u32.to_le_bytes());
+        buf[pos + 8..pos + 10].copy_from_slice(&3u16.to_le_bytes()); // IEEE float
+        buf[pos + 10..pos + 12].copy_from_slice(&channels.to_le_bytes());
+        buf[pos + 12..pos + 16].copy_from_slice(&sample_rate.to_le_bytes());
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * block_align as u32;
+        buf[pos + 16..pos + 20].copy_from_slice(&byte_rate.to_le_bytes());
+        buf[pos + 20..pos + 22].copy_from_slice(&block_align.to_le_bytes());
+        buf[pos + 22..pos + 24].copy_from_slice(&bits_per_sample.to_le_bytes());
+        pos += 8 + 16;
+
+        // data chunk
+        buf[pos..pos + 4].copy_from_slice(b"data");
+        buf[pos + 4..pos + 8].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+
+        buf
+    }
+
+    #[test]
+    fn test_parse_rf64_valid_with_ds64() {
+        let data_bytes = 800; // 200 f32 samples
+        let buf = build_rf64_buffer(48000, 2, 32, data_bytes, true);
+
+        let (sr, ch, offset, count) = parse_rf64_header(&buf).unwrap();
+        assert_eq!(sr, 48000);
+        assert_eq!(ch, 2);
+        assert_eq!(count, 200); // 800 bytes / 4
+        assert!(offset > 12, "data_offset should be after the header");
+        assert!(offset + data_bytes <= buf.len());
+    }
+
+    #[test]
+    fn test_parse_rf64_without_ds64_fallback() {
+        // Build RF64 but replace ds64 with JUNK — should fallback to file-size calculation
+        let data_bytes = 400; // 100 f32 samples
+        let mut buf = build_rf64_buffer(44100, 1, 32, data_bytes, true);
+
+        // Replace "ds64" with "JUNK" to simulate the pre-upgrade state
+        let ds64_pos = 12;
+        buf[ds64_pos..ds64_pos + 4].copy_from_slice(b"JUNK");
+        // Zero out the ds64 payload so data_size_64 stays 0
+        for byte in &mut buf[ds64_pos + 8..ds64_pos + 8 + 28] {
+            *byte = 0;
+        }
+
+        let (sr, ch, offset, count) = parse_rf64_header(&buf).unwrap();
+        assert_eq!(sr, 44100);
+        assert_eq!(ch, 1);
+        // Without ds64, data_bytes comes from file_size - data_offset
+        let expected_count = (buf.len() - offset) / 4;
+        assert_eq!(count, expected_count);
+    }
+
+    #[test]
+    fn test_parse_rf64_not_rf64() {
+        // Standard RIFF magic should be rejected
+        let mut buf = build_rf64_buffer(44100, 2, 32, 100, true);
+        buf[0..4].copy_from_slice(b"RIFF");
+
+        let result = parse_rf64_header(&buf);
+        assert!(result.is_err(), "RIFF magic should be rejected by parse_rf64_header");
+        assert!(result.unwrap_err().contains("Not an RF64"));
+    }
+
+    #[test]
+    fn test_parse_rf64_no_data_chunk() {
+        // Build RF64 with ds64 + fmt but NO data chunk
+        let mut buf = vec![0u8; 12 + 8 + 28 + 8 + 16];
+        buf[0..4].copy_from_slice(b"RF64");
+        buf[4..8].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+
+        // ds64 chunk
+        let mut pos = 12;
+        buf[pos..pos + 4].copy_from_slice(b"ds64");
+        buf[pos + 4..pos + 8].copy_from_slice(&28u32.to_le_bytes());
+        pos += 8 + 28;
+
+        // fmt chunk
+        buf[pos..pos + 4].copy_from_slice(b"fmt ");
+        buf[pos + 4..pos + 8].copy_from_slice(&16u32.to_le_bytes());
+        buf[pos + 8..pos + 10].copy_from_slice(&3u16.to_le_bytes()); // float
+        buf[pos + 10..pos + 12].copy_from_slice(&2u16.to_le_bytes()); // stereo
+        buf[pos + 12..pos + 16].copy_from_slice(&44100u32.to_le_bytes());
+        let byte_rate = 44100u32 * 8;
+        buf[pos + 16..pos + 20].copy_from_slice(&byte_rate.to_le_bytes());
+        buf[pos + 20..pos + 22].copy_from_slice(&8u16.to_le_bytes());
+        buf[pos + 22..pos + 24].copy_from_slice(&32u16.to_le_bytes());
+
+        let result = parse_rf64_header(&buf);
+        assert!(result.is_err(), "Missing data chunk should return Err");
+        assert!(result.unwrap_err().contains("no data chunk"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 4: Hot-Swap / encodeWavFloat32 Format
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Helper: build a float32 WAV matching the frontend's encodeWavFloat32 output
+    fn build_float32_wav(sample_rate: u32, channels: u16, samples: &[f32]) -> Vec<u8> {
+        let bits_per_sample: u16 = 32;
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * block_align as u32;
+        let data_size = (samples.len() * 4) as u32;
+        let total = 44 + data_size as usize;
+
+        let mut buf = vec![0u8; total];
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&((total - 8) as u32).to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+        buf[12..16].copy_from_slice(b"fmt ");
+        buf[16..20].copy_from_slice(&16u32.to_le_bytes());
+        buf[20..22].copy_from_slice(&3u16.to_le_bytes()); // IEEE float
+        buf[22..24].copy_from_slice(&channels.to_le_bytes());
+        buf[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+        buf[28..32].copy_from_slice(&byte_rate.to_le_bytes());
+        buf[32..34].copy_from_slice(&block_align.to_le_bytes());
+        buf[34..36].copy_from_slice(&bits_per_sample.to_le_bytes());
+        buf[36..40].copy_from_slice(b"data");
+        buf[40..44].copy_from_slice(&data_size.to_le_bytes());
+
+        for (i, &s) in samples.iter().enumerate() {
+            let off = 44 + i * 4;
+            buf[off..off + 4].copy_from_slice(&s.to_le_bytes());
+        }
+
+        buf
+    }
+
+    #[test]
+    fn test_encode_wav_float32_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_f32_encode.wav");
+
+        let input_samples: Vec<f32> = (0..200).map(|i| {
+            let l = (i as f32 / 100.0) - 1.0; // -1.0 to 0.98
+            l
+        }).collect();
+
+        let wav_data = build_float32_wav(44100, 2, &input_samples);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&wav_data).unwrap();
+        file.sync_all().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 44100);
+        assert_eq!(ch, 2);
+
+        match &pcm {
+            PcmData::Mmap { .. } => {} // expected
+            _ => panic!("Float32 WAV should use Mmap path"),
+        }
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 200);
+        for (i, (&got, &exp)) in samples.iter().zip(input_samples.iter()).enumerate() {
+            assert!((got - exp).abs() < f32::EPSILON,
+                "Sample {}: got {}, expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_frontend_float32_wav_mono() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_f32_mono.wav");
+
+        let input_samples: Vec<f32> = (0..100).map(|i| (i as f32) * 0.01).collect();
+        let wav_data = build_float32_wav(48000, 1, &input_samples);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&wav_data).unwrap();
+        file.sync_all().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 48000);
+        assert_eq!(ch, 1);
+
+        match &pcm {
+            PcmData::Mmap { .. } => {}
+            _ => panic!("Float32 WAV should use Mmap path"),
+        }
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 100);
+        for (i, (&got, &exp)) in samples.iter().zip(input_samples.iter()).enumerate() {
+            assert!((got - exp).abs() < f32::EPSILON,
+                "Sample {}: got {}, expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_hot_swap_produces_valid_pcm() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_hotswap.wav");
+
+        // Simulate hot-swap: write float32 WAV via hound (like Rust-side cache generation)
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        let mut expected = Vec::new();
+        for i in 0..100 {
+            let l = (i as f32) * 0.01;
+            let r = -(i as f32) * 0.01;
+            writer.write_sample(l).unwrap();
+            writer.write_sample(r).unwrap();
+            expected.push(l);
+            expected.push(r);
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, sr, ch) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(sr, 44100);
+        assert_eq!(ch, 2);
+
+        match &pcm {
+            PcmData::Mmap { .. } => {}
+            _ => panic!("Hot-swap float32 WAV should use Mmap path"),
+        }
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 200);
+        let zero_count = samples.iter().filter(|&&s| s == 0.0).count();
+        // Only sample 0 (frame 0, L channel = 0.0) should be zero
+        assert!(zero_count <= 2,
+            "Hot-swap produced {} zero samples out of 200 — possible silent playback regression", zero_count);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 5: Playback Sample Reading
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_interleaved_idx_mono() {
+        let data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
+        let pcm = PcmData::Vec(data.clone());
+        let samples = pcm.samples();
+        let channels: usize = 1;
+
+        for frame in 0..5 {
+            let idx = frame * channels;
+            assert_eq!(samples[idx], data[frame],
+                "Mono frame {}: expected {}, got {}", frame, data[frame], samples[idx]);
+        }
+    }
+
+    #[test]
+    fn test_interleaved_idx_stereo() {
+        // L0, R0, L1, R1, L2, R2
+        let data = vec![0.1f32, -0.1, 0.2, -0.2, 0.3, -0.3];
+        let pcm = PcmData::Vec(data.clone());
+        let samples = pcm.samples();
+        let channels: usize = 2;
+
+        for frame in 0..3 {
+            let l_idx = frame * channels;
+            let r_idx = frame * channels + 1;
+            assert_eq!(samples[l_idx], data[l_idx], "L at frame {}", frame);
+            assert_eq!(samples[r_idx], data[r_idx], "R at frame {}", frame);
+        }
+    }
+
+    #[test]
+    fn test_mmap_and_vec_identical_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_mmap_vs_vec.wav");
+
+        // Write some non-trivial f32 samples
+        let input: Vec<f32> = (0..50).map(|i| (i as f32 - 25.0) / 25.0).collect();
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for &s in &input {
+            writer.write_sample(s).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        // Load via mmap path
+        let (pcm_mmap, _, _) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        let mmap_samples = pcm_mmap.samples();
+
+        // Compare against PcmData::Vec with same data
+        let pcm_vec = PcmData::Vec(input.clone());
+        let vec_samples = pcm_vec.samples();
+
+        assert_eq!(mmap_samples.len(), vec_samples.len());
+        for (i, (&m, &v)) in mmap_samples.iter().zip(vec_samples.iter()).enumerate() {
+            assert_eq!(m, v, "Sample {} differs: mmap={}, vec={}", i, m, v);
+        }
+    }
+
+    #[test]
+    fn test_pcm_data_len() {
+        // Vec variant
+        let vec_pcm = PcmData::Vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(vec_pcm.len(), 5);
+
+        // Mmap variant — test via loading a file
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_len.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..75 {
+            writer.write_sample(i as f32 * 0.01).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (pcm, _, _) = load_wav_mmap(path.to_str().unwrap()).unwrap();
+        assert_eq!(pcm.len(), 75);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 6: Volume Envelope
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_eval_envelope_empty() {
+        let envelope: Vec<AutomationPoint> = vec![];
+        let mut idx = 0;
+        assert_eq!(eval_envelope(&envelope, 0.5, 0.75, &mut idx), 0.75);
+        assert_eq!(eval_envelope(&envelope, 1.0, 0.5, &mut idx), 0.5);
+    }
+
+    #[test]
+    fn test_eval_envelope_single_point() {
+        let envelope = vec![AutomationPoint { time: 1.0, value: 0.8 }];
+        let mut idx = 0;
+
+        // Before the point
+        assert_eq!(eval_envelope(&envelope, 0.0, 1.0, &mut idx), 0.8);
+        // At the point
+        assert_eq!(eval_envelope(&envelope, 1.0, 1.0, &mut idx), 0.8);
+        // After the point
+        assert_eq!(eval_envelope(&envelope, 2.0, 1.0, &mut idx), 0.8);
+    }
+
+    #[test]
+    fn test_eval_envelope_interpolation() {
+        let envelope = vec![
+            AutomationPoint { time: 0.0, value: 0.0 },
+            AutomationPoint { time: 1.0, value: 1.0 },
+        ];
+        let mut idx = 0;
+
+        // Midpoint: should be 0.5
+        let mid = eval_envelope(&envelope, 0.5, 0.0, &mut idx);
+        assert!((mid - 0.5).abs() < 0.001, "Midpoint: expected 0.5, got {}", mid);
+
+        // Quarter: should be 0.25
+        idx = 0;
+        let quarter = eval_envelope(&envelope, 0.25, 0.0, &mut idx);
+        assert!((quarter - 0.25).abs() < 0.001, "Quarter: expected 0.25, got {}", quarter);
+
+        // Three-quarters: should be 0.75
+        let three_q = eval_envelope(&envelope, 0.75, 0.0, &mut idx);
+        assert!((three_q - 0.75).abs() < 0.001, "3/4: expected 0.75, got {}", three_q);
+    }
+
+    #[test]
+    fn test_eval_envelope_walking_pointer() {
+        let envelope = vec![
+            AutomationPoint { time: 0.0, value: 0.0 },
+            AutomationPoint { time: 1.0, value: 0.5 },
+            AutomationPoint { time: 2.0, value: 1.0 },
+        ];
+        let mut idx = 0;
+
+        // Walk forward
+        let v1 = eval_envelope(&envelope, 0.5, 0.0, &mut idx);
+        assert!((v1 - 0.25).abs() < 0.001, "t=0.5: expected 0.25, got {}", v1);
+        assert_eq!(idx, 0, "Pointer should be at segment 0");
+
+        let v2 = eval_envelope(&envelope, 1.5, 0.0, &mut idx);
+        assert!((v2 - 0.75).abs() < 0.001, "t=1.5: expected 0.75, got {}", v2);
+        assert_eq!(idx, 1, "Pointer should advance to segment 1");
+
+        // Walk backward (simulating reverse playback)
+        let v3 = eval_envelope(&envelope, 0.5, 0.0, &mut idx);
+        assert!((v3 - 0.25).abs() < 0.001, "t=0.5 (reverse): expected 0.25, got {}", v3);
+        assert_eq!(idx, 0, "Pointer should retreat to segment 0");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Group 7: Real-Data Regression Tests
+    // ══════════════════════════════════════════════════════════════════
+    // These tests load actual audio files from src-tauri/resources/.
+    // Files are gitignored and not included in builds — local testing only.
+    // If a file is missing, the test is skipped (not failed).
+
+    /// Helper: resolve path to a test resource file, returning None if missing
+    fn test_resource_path(name: &str) -> Option<String> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(name);
+        if path.exists() { Some(path.to_string_lossy().into_owned()) } else { None }
+    }
+
+    /// clone-me.wav: real int16 stereo 44100Hz file — the exact format that triggered v0.12.10
+    #[test]
+    fn test_real_data_int16_stereo_clone_me() {
+        let path = match test_resource_path("clone-me.wav") {
+            Some(p) => p,
+            None => { println!("SKIP: clone-me.wav not found in resources/"); return; }
+        };
+
+        let (pcm, sr, ch) = load_wav_mmap(&path).unwrap();
+        assert_eq!(sr, 44100, "Expected 44100 Hz");
+        assert_eq!(ch, 2, "Expected stereo");
+
+        let samples = pcm.samples();
+        assert!(samples.len() > 1000, "Expected substantial sample count, got {}", samples.len());
+
+        // Core regression check: int16 must NOT produce all-zero samples
+        let zero_count = samples.iter().filter(|&&s| s == 0.0).count();
+        let zero_pct = (zero_count as f64 / samples.len() as f64) * 100.0;
+        println!("clone-me.wav: {} samples, {} zeros ({:.1}%)", samples.len(), zero_count, zero_pct);
+        // Real audio shouldn't be more than ~20% zero (silence)
+        assert!(zero_pct < 50.0,
+            "REGRESSION: {:.1}% of samples are zero — likely hound int16→f32 silent-error bug", zero_pct);
+
+        // Verify samples are in valid range
+        let max_abs = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.001, "Max amplitude too low: {} — data may be corrupt", max_abs);
+        assert!(max_abs <= 1.0, "Max amplitude exceeds 1.0: {} — normalization error", max_abs);
+    }
+
+    /// princess-bride.wav: real float32 stereo 44100Hz file — mmap fast path
+    #[test]
+    fn test_real_data_float32_stereo_princess_bride() {
+        let path = match test_resource_path("princess-bride.wav") {
+            Some(p) => p,
+            None => { println!("SKIP: princess-bride.wav not found in resources/"); return; }
+        };
+
+        let (pcm, sr, ch) = load_wav_mmap(&path).unwrap();
+        assert_eq!(sr, 44100, "Expected 44100 Hz");
+        assert_eq!(ch, 2, "Expected stereo");
+
+        match &pcm {
+            PcmData::Mmap { data_offset, sample_count, .. } => {
+                assert!(*data_offset >= 44);
+                // ~2min 9sec at 44100Hz stereo = ~2*129.49*44100 ≈ 11.4M samples
+                assert!(*sample_count > 1_000_000,
+                    "Expected >1M samples for a 2-min file, got {}", sample_count);
+                println!("princess-bride.wav: Mmap path, offset={}, {} samples", data_offset, sample_count);
+            }
+            _ => panic!("Float32 WAV should use Mmap path"),
+        }
+
+        let samples = pcm.samples();
+        // Check first 100K samples for non-zero values (file may start with silence)
+        let check_len = 100_000.min(samples.len());
+        let nonzero = samples[..check_len].iter().filter(|&&s| s != 0.0).count();
+        assert!(nonzero > 1000,
+            "First {}  samples have only {} non-zero — data might be corrupt", check_len, nonzero);
+
+        let max_abs = samples.iter().take(100_000).map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.001 && max_abs <= 1.5,
+            "Sample range suspect: max_abs={}", max_abs);
+    }
+
+    /// mixed_export.wav: real float32 mono 44100Hz file — mono mmap path
+    #[test]
+    fn test_real_data_float32_mono_mixed_export() {
+        let path = match test_resource_path("mixed_export.wav") {
+            Some(p) => p,
+            None => { println!("SKIP: mixed_export.wav not found in resources/"); return; }
+        };
+
+        let (pcm, sr, ch) = load_wav_mmap(&path).unwrap();
+        assert_eq!(sr, 44100, "Expected 44100 Hz");
+        assert_eq!(ch, 1, "Expected mono");
+
+        match &pcm {
+            PcmData::Mmap { data_offset, sample_count, .. } => {
+                assert!(*data_offset >= 44);
+                // ~45sec at 44100Hz mono = ~1.99M samples
+                assert!(*sample_count > 500_000,
+                    "Expected >500K samples for a 45-sec file, got {}", sample_count);
+                println!("mixed_export.wav: Mmap path, offset={}, {} samples", data_offset, sample_count);
+            }
+            _ => panic!("Float32 mono WAV should use Mmap path"),
+        }
+
+        let samples = pcm.samples();
+        let nonzero = samples.iter().take(10_000).filter(|&&s| s != 0.0).count();
+        assert!(nonzero > 1000, "First 10K samples have only {} non-zero — suspect", nonzero);
+    }
 }
