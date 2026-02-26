@@ -73,6 +73,68 @@ export function encodeWav(buffer: AudioBuffer): Uint8Array {
 }
 
 /**
+ * Encode an AudioBuffer to WAV format (32-bit float).
+ * Used for temporary cached playback files (cut/delete) so Rust can mmap directly.
+ * Files are 2x larger than 16-bit but avoid the int→float conversion path.
+ */
+export function encodeWavFloat32(buffer: AudioBuffer): Uint8Array {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitsPerSample = 32;
+  const bytesPerSample = bitsPerSample / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = buffer.length * blockAlign;
+  const headerSize = 44;
+  const totalSize = headerSize + dataSize;
+
+  if (totalSize > MAX_WAV_BYTES) {
+    throw new Error(
+      `WAV encoding would require ${(totalSize / 1_073_741_824).toFixed(1)}GB — exceeds 1GB limit. ` +
+      `Try a shorter selection (${buffer.length} samples, ${numChannels} channels).`
+    );
+  }
+
+  const arrayBuffer = new ArrayBuffer(totalSize);
+  const view = new DataView(arrayBuffer);
+
+  // RIFF header
+  writeWavString(view, 0, 'RIFF');
+  view.setUint32(4, totalSize - 8, true);
+  writeWavString(view, 8, 'WAVE');
+
+  // fmt chunk (audioFormat = 3 for IEEE float)
+  writeWavString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 3, true); // IEEE float
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+
+  // data chunk
+  writeWavString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // Interleave channels and write float32 samples
+  let offset = 44;
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(buffer.getChannelData(ch));
+  }
+
+  for (let i = 0; i < buffer.length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      view.setFloat32(offset, channels[ch][i], true);
+      offset += 4;
+    }
+  }
+
+  return new Uint8Array(arrayBuffer);
+}
+
+/**
  * Mix a track's clips into a single AudioBuffer.
  * Throws if total duration exceeds 2 hours.
  * Returns null if no buffered clips are available.

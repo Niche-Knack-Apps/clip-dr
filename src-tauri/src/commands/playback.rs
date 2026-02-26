@@ -446,23 +446,37 @@ pub(crate) fn load_wav_mmap(path: &str) -> Result<(PcmData, u32, u16), String> {
             .map_err(|e| format!("Failed to parse WAV header: {}", e))?;
 
         let spec = reader.spec();
-
-        // Only support 32-bit float WAV for mmap (our recording format)
-        if spec.sample_format != hound::SampleFormat::Float || spec.bits_per_sample != 32 {
-            return Err("WAV is not 32-bit float, falling back to decode".to_string());
-        }
-
         let sample_rate = spec.sample_rate;
         let channels = spec.channels;
 
-        // Find data chunk offset by searching for 'data' marker
-        let data_offset = find_wav_data_offset(&mmap)
-            .ok_or_else(|| "Could not find WAV data chunk".to_string())?;
-
-        let data_bytes = mmap.len() - data_offset;
-        let sample_count = data_bytes / 4; // f32 = 4 bytes
-
-        Ok((PcmData::Mmap { mmap, data_offset, sample_count }, sample_rate, channels))
+        if spec.sample_format == hound::SampleFormat::Float && spec.bits_per_sample == 32 {
+            // 32-bit float: zero-copy mmap (fast path)
+            let data_offset = find_wav_data_offset(&mmap)
+                .ok_or_else(|| "Could not find WAV data chunk".to_string())?;
+            let data_bytes = mmap.len() - data_offset;
+            let sample_count = data_bytes / 4; // f32 = 4 bytes
+            Ok((PcmData::Mmap { mmap, data_offset, sample_count }, sample_rate, channels))
+        } else if spec.sample_format == hound::SampleFormat::Int {
+            // Integer formats (16-bit, 24-bit, etc.): read as i32 and normalize.
+            // hound preserves the original integer range (no widening), so we divide
+            // by 2^(bits_per_sample - 1) to normalize to [-1.0, 1.0).
+            // Note: hound's samples::<f32>() does NOT work on integer WAVs — it errors.
+            let mut reader = WavReader::new(std::io::Cursor::new(&mmap[..]))
+                .map_err(|e| format!("Failed to parse WAV: {}", e))?;
+            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            let samples: Vec<f32> = reader.samples::<i32>()
+                .map(|s| s.unwrap_or(0) as f32 / scale)
+                .collect();
+            Ok((PcmData::Vec(samples), sample_rate, channels))
+        } else {
+            // Non-32-bit float (rare): decode via hound
+            let mut reader = WavReader::new(std::io::Cursor::new(&mmap[..]))
+                .map_err(|e| format!("Failed to parse WAV: {}", e))?;
+            let samples: Vec<f32> = reader.samples::<f32>()
+                .map(|s| s.unwrap_or(0.0))
+                .collect();
+            Ok((PcmData::Vec(samples), sample_rate, channels))
+        }
     }
 }
 
@@ -1562,4 +1576,174 @@ pub fn playback_swap_to_cache(
         log::info!("[Playback] Hot-swap stream→mmap for track {} ({:.1}MB, {:.0}ms)", track_id, size_mb, swap_start.elapsed().as_secs_f64() * 1000.0);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Test A: hound writes 16-bit PCM WAV → load_wav_mmap reads via Vec path
+    #[test]
+    fn test_hound_int16_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_i16.wav");
+
+        // Write 16-bit PCM WAV with hound
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        // Write 100 stereo frames: L=0.5, R=-0.5 (as i16: 16383, -16384)
+        for _ in 0..100 {
+            writer.write_sample(16383i16).unwrap(); // L ≈ 0.5
+            writer.write_sample(-16384i16).unwrap(); // R ≈ -0.5
+        }
+        writer.finalize().unwrap();
+
+        let path_str = path.to_str().unwrap();
+        let (pcm, sample_rate, channels) = load_wav_mmap(path_str).unwrap();
+
+        assert_eq!(sample_rate, 44100);
+        assert_eq!(channels, 2);
+
+        let samples = pcm.samples();
+        println!("Test A: Vec len={}, first 6 samples: {:?}", samples.len(), &samples[..6.min(samples.len())]);
+        assert_eq!(samples.len(), 200, "Expected 200 interleaved samples (100 frames × 2 channels)");
+
+        // hound preserves i16 range, we divide by 2^15 = 32768
+        // 16383 / 32768 ≈ 0.49997
+        // -16384 / 32768 = -0.5
+        let expected_l = 16383.0f32 / 32768.0;
+        let expected_r = -16384.0f32 / 32768.0;
+        assert!((samples[0] - expected_l).abs() < 0.001, "L sample mismatch: got {}, expected {}", samples[0], expected_l);
+        assert!((samples[1] - expected_r).abs() < 0.001, "R sample mismatch: got {}, expected {}", samples[1], expected_r);
+    }
+
+    /// Test B: Construct WAV byte-for-byte matching encodeWav output, load with load_wav_mmap
+    #[test]
+    fn test_encode_wav_format_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_encode_format.wav");
+
+        // Build a 16-bit PCM WAV matching encodeWav's JS output
+        let num_channels: u16 = 2;
+        let sample_rate: u32 = 44100;
+        let bits_per_sample: u16 = 16;
+        let block_align = num_channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * block_align as u32;
+        let num_frames: u32 = 100;
+        let data_size = num_frames * block_align as u32;
+        let total_size = 44 + data_size;
+
+        let mut buf = vec![0u8; total_size as usize];
+        // RIFF header
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&(total_size - 8).to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+        // fmt chunk
+        buf[12..16].copy_from_slice(b"fmt ");
+        buf[16..20].copy_from_slice(&16u32.to_le_bytes());
+        buf[20..22].copy_from_slice(&1u16.to_le_bytes()); // audioFormat = PCM
+        buf[22..24].copy_from_slice(&num_channels.to_le_bytes());
+        buf[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+        buf[28..32].copy_from_slice(&byte_rate.to_le_bytes());
+        buf[32..34].copy_from_slice(&block_align.to_le_bytes());
+        buf[34..36].copy_from_slice(&bits_per_sample.to_le_bytes());
+        // data chunk
+        buf[36..40].copy_from_slice(b"data");
+        buf[40..44].copy_from_slice(&data_size.to_le_bytes());
+
+        // Write interleaved 16-bit samples: L=0.5→16383, R=-0.5→-16384
+        let mut offset = 44;
+        for _ in 0..num_frames {
+            buf[offset..offset + 2].copy_from_slice(&16383i16.to_le_bytes());
+            offset += 2;
+            buf[offset..offset + 2].copy_from_slice(&(-16384i16).to_le_bytes());
+            offset += 2;
+        }
+
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&buf).unwrap();
+        file.sync_all().unwrap();
+
+        let path_str = path.to_str().unwrap();
+        let (pcm, sample_rate, channels) = load_wav_mmap(path_str).unwrap();
+
+        assert_eq!(sample_rate, 44100);
+        assert_eq!(channels, 2);
+
+        let samples = pcm.samples();
+        println!("Test B: Vec len={}, first 6 samples: {:?}", samples.len(), &samples[..6.min(samples.len())]);
+        assert_eq!(samples.len(), 200, "Expected 200 interleaved samples");
+
+        let expected_l = 16383.0f32 / 32768.0;
+        let expected_r = -16384.0f32 / 32768.0;
+        assert!((samples[0] - expected_l).abs() < 0.001, "L={}, expected {}", samples[0], expected_l);
+        assert!((samples[1] - expected_r).abs() < 0.001, "R={}, expected {}", samples[1], expected_r);
+    }
+
+    /// Test C: 32-bit float WAV baseline — should use Mmap path
+    #[test]
+    fn test_float32_mmap_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_f32.wav");
+
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..100 {
+            writer.write_sample(0.5f32).unwrap();
+            writer.write_sample(-0.5f32).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let path_str = path.to_str().unwrap();
+        let (pcm, sample_rate, channels) = load_wav_mmap(path_str).unwrap();
+
+        assert_eq!(sample_rate, 44100);
+        assert_eq!(channels, 2);
+
+        match &pcm {
+            PcmData::Mmap { .. } => println!("Test C: Correctly using Mmap path"),
+            PcmData::Vec(_) => panic!("Float32 WAV should use Mmap, not Vec"),
+            PcmData::Stream(_) => panic!("Should not be Stream"),
+        }
+
+        let samples = pcm.samples();
+        println!("Test C: Mmap len={}, first 6 samples: {:?}", samples.len(), &samples[..6.min(samples.len())]);
+        assert_eq!(samples.len(), 200);
+        assert!((samples[0] - 0.5).abs() < 0.0001, "L={}, expected 0.5", samples[0]);
+        assert!((samples[1] - (-0.5)).abs() < 0.0001, "R={}, expected -0.5", samples[1]);
+    }
+
+    /// Test D: PcmData::Vec playback indexing — verify samples() and interleaved_idx math
+    #[test]
+    fn test_vec_playback_indexing() {
+        // Simulate stereo: L=0.25, R=0.75, L=0.5, R=1.0
+        let data = vec![0.25f32, 0.75, 0.5, 1.0];
+        let pcm = PcmData::Vec(data.clone());
+
+        let samples = pcm.samples();
+        assert_eq!(samples.len(), 4);
+        println!("Test D: Vec samples: {:?}", samples);
+
+        // Verify indexing matches playback callback logic
+        let channels: usize = 2;
+        for frame in 0..2 {
+            let interleaved_idx = frame * channels;
+            let l = samples[interleaved_idx];
+            let r = samples[interleaved_idx + 1];
+            println!("  Frame {}: L={}, R={}", frame, l, r);
+            assert_eq!(l, data[interleaved_idx]);
+            assert_eq!(r, data[interleaved_idx + 1]);
+        }
+    }
 }

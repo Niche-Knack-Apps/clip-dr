@@ -24,6 +24,18 @@ export const useTracksStore = defineStore('tracks', () => {
   // Gets expanded when dragging right, only resets when user manually zooms.
   const minTimelineDuration = ref(0);
 
+  // Pending WAV recache from cut/delete — play() awaits this before syncing to Rust
+  const pendingRecache = ref<Promise<void> | null>(null);
+
+  function setPendingRecache(promise: Promise<void>): void {
+    pendingRecache.value = promise;
+    promise.finally(() => {
+      if (pendingRecache.value === promise) {
+        pendingRecache.value = null;
+      }
+    });
+  }
+
   // Track color counter for automatic color assignment
   let colorIndex = 0;
 
@@ -1844,5 +1856,7 @@ export const useTracksStore = defineStore('tracks', () => {
     setImportCaching,
     setCachedAudioPath,
     setHasPeakPyramid,
+    pendingRecache,
+    setPendingRecache,
   };
 });

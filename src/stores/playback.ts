@@ -234,12 +234,13 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Set playing flag immediately to prevent race conditions
     isPlaying.value = true;
 
-    const playT0 = performance.now();
+    // Wait for any pending WAV recache from cut/delete to complete
+    if (tracksStore.pendingRecache) {
+      await tracksStore.pendingRecache;
+    }
 
     // Sync state to Rust engine (only reloads files if track list changed)
-    console.log('[Playback] syncTracksToRust starting');
     await syncTracksToRust();
-    console.log(`[Playback] syncTracksToRust complete in ${(performance.now() - playT0).toFixed(0)}ms`);
     await syncLoopToRust();
     await invoke('playback_set_speed', { speed: playbackSpeed.value });
     await invoke('playback_set_volume', { volume: volume.value });
@@ -255,7 +256,6 @@ export const usePlaybackStore = defineStore('playback', () => {
     await invoke('playback_seek', { position: playStart });
     await invoke('playback_play');
 
-    console.log(`[Playback] Audio started in ${(performance.now() - playT0).toFixed(0)}ms from play() call`);
     startPositionPoll();
     useMeterStore().startPolling();
   }

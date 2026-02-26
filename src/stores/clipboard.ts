@@ -8,7 +8,7 @@ import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { encodeWavFloat32, mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
 
@@ -49,9 +49,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
       };
       tracksStore.tracks = [...tracksStore.tracks];
 
-      // Write new cached WAV for Rust playback and set cachedAudioPath before returning
+      // Write 32-bit float WAV for Rust playback (mmap fast path, no int→float conversion)
       const trackId = track.id;
-      const wavData = encodeWav(merged);
+      const wavData = encodeWavFloat32(merged);
       const fileName = `cut_${trackId}_${Date.now()}.wav`;
       try {
         await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
@@ -63,7 +63,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
           tracksStore.setCachedAudioPath(trackId, cachedPath);
         }
       } catch (err) {
-        console.error('[Clipboard] Failed to cache cut audio:', err);
+        console.error('[Clipboard] Failed to write cached WAV:', err);
       }
     }
   }
@@ -184,7 +184,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
   }
 
   // Cut: selected clip > I/O region ripple delete > entire track
-  async function cut(): Promise<boolean> {
+  function cut(): boolean {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Cut');
     try {
@@ -276,7 +276,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
         }
 
         // Flatten clips back to single buffer and re-cache for Rust playback
-        await flattenAndRecacheClips(ctx);
+        const recachePromise = flattenAndRecacheClips(ctx);
+        tracksStore.setPendingRecache(recachePromise);
       }
 
       // Clear I/O points after cut
@@ -378,14 +379,13 @@ export const useClipboardStore = defineStore('clipboard', () => {
   }
 
   // Delete: selected clip > I/O points > entire track
-  async function deleteSelected(): Promise<boolean> {
+  function deleteSelected(): boolean {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Delete');
     try {
     // Priority 1: Selected clip
     const selClip = tracksStore.selectedClip;
     if (selClip) {
-      console.log(`[Clipboard] deleteSelected: deleting selected clip ${selClip.clip.id} from track ${selClip.trackId}`);
       tracksStore.deleteClipFromTrack(selClip.trackId, selClip.clip.id);
       tracksStore.clearClipSelection();
       return true;
@@ -395,7 +395,6 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const { inPoint, outPoint } = selectionStore.inOutPoints;
 
     if (inPoint !== null && outPoint !== null) {
-      console.log(`[Clipboard] deleteSelected: removing segment ${inPoint.toFixed(2)}-${outPoint.toFixed(2)}s from all overlapping tracks`);
       const ctx = audioStore.getAudioContext();
       let cutCount = 0;
 
@@ -422,19 +421,17 @@ export const useClipboardStore = defineStore('clipboard', () => {
           tracksStore.adjustVolumeEnvelopeForDelete(trackId, inPoint, outPoint);
         }
         // Flatten clips back to single buffer and re-cache for Rust playback
-        await flattenAndRecacheClips(ctx);
+        const recachePromise = flattenAndRecacheClips(ctx);
+        tracksStore.setPendingRecache(recachePromise);
         selectionStore.clearInOutPoints();
-        console.log(`[Clipboard] deleteSelected: removed segment from ${cutCount} track(s)`);
       }
       return cutCount > 0;
     } else {
       // Priority 3: Entire target track
       const selectedTrack = getTargetTrack();
       if (!selectedTrack) {
-        console.log('[Clipboard] deleteSelected: no target track, nothing to do');
-        return false;
+          return false;
       }
-      console.log(`[Clipboard] deleteSelected: deleting entire track "${selectedTrack.name}" (${selectedTrack.id})`);
       transcriptionStore.removeTranscription(selectedTrack.id);
       tracksStore.deleteTrack(selectedTrack.id);
       return true;
