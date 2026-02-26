@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::BufWriter;
 use std::path::Path;
 use std::num::{NonZeroU32, NonZeroU8};
 use symphonia::core::audio::SampleBuffer;
@@ -9,7 +9,6 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use hound::{WavSpec, WavWriter};
-use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm};
 use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 use serde::Deserialize;
 use tauri::Emitter;
@@ -165,145 +164,14 @@ fn export_audio_mp3_inner(
     end_time: f64,
     bitrate: u32,
 ) -> Result<(), String> {
-    let source = Path::new(source_path);
+    // Export as temp WAV first, then convert to MP3 via ffmpeg
+    let temp_wav = format!("{}.tmp.wav", output_path);
 
-    // Open and decode source file
-    let file = File::open(source).map_err(|e| format!("Failed to open source: {}", e))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = source.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let format_opts = FormatOptions::default();
-    let metadata_opts = MetadataOptions::default();
-    let decoder_opts = DecoderOptions::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|e| format!("Failed to probe format: {}", e))?;
-
-    let mut format = probed.format;
-
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-        .ok_or("No audio tracks found")?;
-
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2) as u16;
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &decoder_opts)
-        .map_err(|e| format!("Failed to create decoder: {}", e))?;
-
-    // Calculate sample positions
-    let start_sample = (start_time * sample_rate as f64) as u64;
-    let end_sample = (end_time * sample_rate as f64) as u64;
-
-    // Collect samples in the region (as interleaved i16 for LAME)
-    let mut all_samples: Vec<i16> = Vec::new();
-    let mut current_sample: u64 = 0;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(symphonia::core::errors::Error::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
-            Err(_) => continue,
-        };
-
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-
-        let mut sample_buf = SampleBuffer::<f32>::new(duration, spec);
-        sample_buf.copy_interleaved_ref(decoded);
-
-        let samples = sample_buf.samples();
-        let samples_per_frame = channels as u64;
-        let frame_count = samples.len() as u64 / samples_per_frame;
-
-        for i in 0..frame_count {
-            let frame_pos = current_sample + i;
-
-            if frame_pos >= start_sample && frame_pos < end_sample {
-                for ch in 0..channels as usize {
-                    let idx = (i as usize * channels as usize) + ch;
-                    if idx < samples.len() {
-                        // Convert f32 to i16
-                        let sample_f32 = samples[idx].clamp(-1.0, 1.0);
-                        let sample_i16 = (sample_f32 * 32767.0) as i16;
-                        all_samples.push(sample_i16);
-                    }
-                }
-            }
-        }
-
-        current_sample += frame_count;
-
-        if current_sample >= end_sample {
-            break;
-        }
-    }
-
-    // InterleavedPcm uses lame_encode_buffer_interleaved which always expects
-    // stereo interleaved data (divides sample count by 2). For mono audio,
-    // we must duplicate samples to stereo to avoid double-speed encoding.
-    let (encode_samples, encode_channels) = if channels == 1 {
-        log::info!("Converting mono ({} samples) to stereo for LAME encoding", all_samples.len());
-        let stereo: Vec<i16> = all_samples.iter().flat_map(|&s| [s, s]).collect();
-        (stereo, 2u16)
-    } else {
-        (all_samples, channels)
-    };
-
-    // Set up LAME encoder
-    let mut mp3_encoder = Builder::new().ok_or("Failed to create MP3 encoder")?;
-    mp3_encoder.set_num_channels(encode_channels as u8).map_err(|e| format!("Failed to set channels: {:?}", e))?;
-    mp3_encoder.set_sample_rate(sample_rate).map_err(|e| format!("Failed to set sample rate: {:?}", e))?;
-
-    // Map bitrate to enum variant (LAME supports specific bitrates)
-    let bitrate_enum = map_bitrate(bitrate);
-    mp3_encoder.set_brate(bitrate_enum).map_err(|e| format!("Failed to set bitrate: {:?}", e))?;
-    mp3_encoder.set_quality(mp3lame_encoder::Quality::Best).map_err(|e| format!("Failed to set quality: {:?}", e))?;
-
-    let mut mp3_encoder = mp3_encoder.build().map_err(|e| format!("Failed to build encoder: {:?}", e))?;
-
-    // Encode to MP3
-    // Pre-allocate buffer: LAME needs roughly 1.25x input + 7200 bytes for safety
-    let input = InterleavedPcm(&encode_samples);
-    let estimated_size = (encode_samples.len() * 5 / 4) + 7200;
-    let mut mp3_out: Vec<u8> = Vec::with_capacity(estimated_size);
-
-    // Encode - uses spare_capacity_mut which returns MaybeUninit slice
-    let encoded_size = mp3_encoder.encode(input, mp3_out.spare_capacity_mut())
-        .map_err(|e| format!("Failed to encode MP3: {:?}", e))?;
-    unsafe { mp3_out.set_len(encoded_size); }
-
-    // Flush encoder - reserve more capacity first
-    mp3_out.reserve(7200);
-    let flush_size = mp3_encoder.flush::<FlushNoGap>(mp3_out.spare_capacity_mut())
-        .map_err(|e| format!("Failed to flush encoder: {:?}", e))?;
-    unsafe { mp3_out.set_len(mp3_out.len() + flush_size); }
-
-    // Write to file
-    std::fs::write(output_path, &mp3_out)
-        .map_err(|e| format!("Failed to write MP3 file: {}", e))?;
+    export_audio_region_inner(source_path, &temp_wav, start_time, end_time)?;
+    wav_to_mp3(&temp_wav, output_path, bitrate)?;
+    let _ = std::fs::remove_file(&temp_wav);
 
     log::info!("Exported MP3 {} to {} ({}kbps)", source_path, output_path, bitrate);
-
     Ok(())
 }
 
@@ -508,108 +376,29 @@ fn export_edl_mp3(
     total_frames: usize,
     app: &tauri::AppHandle,
 ) -> Result<String, String> {
+    // Write a temporary WAV, then convert to MP3 via ffmpeg
+    let temp_wav = format!("{}.tmp.wav", edl.output_path);
+    let temp_edl = ExportEDL {
+        output_path: temp_wav.clone(),
+        format: "wav".to_string(),
+        ..edl.clone()
+    };
+
+    export_edl_wav(&temp_edl, sources, total_frames, app)?;
+
     let bitrate = edl.mp3_bitrate.unwrap_or(192);
-    let output_rate = edl.sample_rate;
-    let output_channels = edl.channels as usize;
+    wav_to_mp3(&temp_wav, &edl.output_path, bitrate)?;
 
-    // LAME always expects stereo interleaved data
-    let encode_channels = 2u8;
+    // Clean up temp WAV
+    let _ = std::fs::remove_file(&temp_wav);
 
-    let mut builder = Builder::new().ok_or("Failed to create MP3 encoder")?;
-    builder.set_num_channels(encode_channels)
-        .map_err(|e| format!("Set channels: {:?}", e))?;
-    builder.set_sample_rate(output_rate)
-        .map_err(|e| format!("Set sample rate: {:?}", e))?;
-    builder.set_brate(map_bitrate(bitrate))
-        .map_err(|e| format!("Set bitrate: {:?}", e))?;
-    builder.set_quality(mp3lame_encoder::Quality::Best)
-        .map_err(|e| format!("Set quality: {:?}", e))?;
-
-    let mut encoder = builder.build()
-        .map_err(|e| format!("Build encoder: {:?}", e))?;
-
-    let mut output_file = File::create(&edl.output_path)
-        .map_err(|e| format!("Create output: {}", e))?;
-
-    let output_rate_f64 = output_rate as f64;
-    let mut frames_written = 0usize;
-    let mut mix_buf: Vec<f32> = Vec::new();
-    let mut chunk_i16: Vec<i16> = Vec::with_capacity(CHUNK_FRAMES * 2);
-    // MP3 output buffer: 1.25x input + 7200 safety margin
-    let mp3_buf_capacity = CHUNK_FRAMES * 2 * 5 / 4 + 7200;
-    let mut mp3_out: Vec<u8> = Vec::with_capacity(mp3_buf_capacity);
-
-    while frames_written < total_frames {
-        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
-
-        mix_chunk(
-            sources, frames_written, chunk_size,
-            edl.start_time, output_rate_f64, output_channels, &mut mix_buf,
-        );
-
-        // Convert mix to stereo i16 for LAME
-        chunk_i16.clear();
-        for i in 0..chunk_size {
-            let base = i * output_channels;
-            let left = mix_buf[base].clamp(-1.0, 1.0);
-            let right = if output_channels >= 2 {
-                mix_buf[base + 1].clamp(-1.0, 1.0)
-            } else {
-                left
-            };
-            chunk_i16.push((left * 32767.0) as i16);
-            chunk_i16.push((right * 32767.0) as i16);
-        }
-
-        // Encode chunk to MP3
-        mp3_out.clear();
-        mp3_out.reserve(mp3_buf_capacity);
-        let input = InterleavedPcm(&chunk_i16);
-        let encoded = encoder.encode(input, mp3_out.spare_capacity_mut())
-            .map_err(|e| format!("Encode error: {:?}", e))?;
-        unsafe { mp3_out.set_len(encoded); }
-        output_file.write_all(&mp3_out)
-            .map_err(|e| format!("Write error: {}", e))?;
-
-        frames_written += chunk_size;
-
-        let progress = frames_written as f64 / total_frames as f64;
-        let _ = app.emit("export-progress", serde_json::json!({
-            "progress": progress,
-            "framesWritten": frames_written,
-            "totalFrames": total_frames,
-        }));
-    }
-
-    // Flush LAME encoder
-    mp3_out.clear();
-    mp3_out.reserve(7200);
-    let flush_size = encoder.flush::<FlushNoGap>(mp3_out.spare_capacity_mut())
-        .map_err(|e| format!("Flush error: {:?}", e))?;
-    unsafe { mp3_out.set_len(flush_size); }
-    output_file.write_all(&mp3_out)
-        .map_err(|e| format!("Write error: {}", e))?;
+    let _ = app.emit("export-progress", serde_json::json!({
+        "progress": 1.0,
+        "framesWritten": total_frames,
+        "totalFrames": total_frames,
+    }));
 
     Ok(edl.output_path.clone())
-}
-
-fn map_bitrate(bitrate: u32) -> mp3lame_encoder::Bitrate {
-    match bitrate {
-        0..=32 => mp3lame_encoder::Bitrate::Kbps32,
-        33..=40 => mp3lame_encoder::Bitrate::Kbps40,
-        41..=48 => mp3lame_encoder::Bitrate::Kbps48,
-        49..=64 => mp3lame_encoder::Bitrate::Kbps64,
-        65..=80 => mp3lame_encoder::Bitrate::Kbps80,
-        81..=96 => mp3lame_encoder::Bitrate::Kbps96,
-        97..=112 => mp3lame_encoder::Bitrate::Kbps112,
-        113..=128 => mp3lame_encoder::Bitrate::Kbps128,
-        129..=160 => mp3lame_encoder::Bitrate::Kbps160,
-        161..=192 => mp3lame_encoder::Bitrate::Kbps192,
-        193..=224 => mp3lame_encoder::Bitrate::Kbps224,
-        225..=256 => mp3lame_encoder::Bitrate::Kbps256,
-        257..=320 => mp3lame_encoder::Bitrate::Kbps320,
-        _ => mp3lame_encoder::Bitrate::Kbps192,
-    }
 }
 
 /// Convert a WAV file to FLAC using ffmpeg subprocess.
@@ -624,6 +413,23 @@ fn wav_to_flac(wav_path: &str, flac_path: &str) -> Result<(), String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffmpeg FLAC conversion failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
+/// Convert a WAV file to MP3 using ffmpeg subprocess.
+/// Replaces the mp3lame-encoder dependency which can't cross-compile to Windows.
+fn wav_to_mp3(wav_path: &str, mp3_path: &str, bitrate: u32) -> Result<(), String> {
+    let bitrate_str = format!("{}k", bitrate);
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-y", "-i", wav_path, "-c:a", "libmp3lame", "-b:a", &bitrate_str, mp3_path])
+        .output()
+        .map_err(|e| format!("Failed to run ffmpeg (is it installed?): {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg MP3 conversion failed: {}", stderr));
     }
 
     Ok(())
@@ -965,73 +771,20 @@ fn export_edl_mp3_no_progress(
     sources: &[EdlSource],
     total_frames: usize,
 ) -> Result<String, String> {
+    // Write a temporary WAV, then convert to MP3 via ffmpeg
+    let temp_wav = format!("{}.tmp.wav", edl.output_path);
+    let temp_edl = ExportEDL {
+        output_path: temp_wav.clone(),
+        format: "wav".to_string(),
+        ..edl.clone()
+    };
+
+    export_edl_wav_no_progress(&temp_edl, sources, total_frames)?;
+
     let bitrate = edl.mp3_bitrate.unwrap_or(192);
-    let output_rate = edl.sample_rate;
-    let output_channels = edl.channels as usize;
-    let encode_channels = 2u8;
+    wav_to_mp3(&temp_wav, &edl.output_path, bitrate)?;
 
-    let mut builder = Builder::new().ok_or("Failed to create MP3 encoder")?;
-    builder.set_num_channels(encode_channels)
-        .map_err(|e| format!("Set channels: {:?}", e))?;
-    builder.set_sample_rate(output_rate)
-        .map_err(|e| format!("Set sample rate: {:?}", e))?;
-    builder.set_brate(map_bitrate(bitrate))
-        .map_err(|e| format!("Set bitrate: {:?}", e))?;
-    builder.set_quality(mp3lame_encoder::Quality::Best)
-        .map_err(|e| format!("Set quality: {:?}", e))?;
-
-    let mut encoder = builder.build()
-        .map_err(|e| format!("Build encoder: {:?}", e))?;
-
-    let mut output_file = File::create(&edl.output_path)
-        .map_err(|e| format!("Create output: {}", e))?;
-
-    let output_rate_f64 = output_rate as f64;
-    let mut frames_written = 0usize;
-    let mut mix_buf: Vec<f32> = Vec::new();
-    let mut chunk_i16: Vec<i16> = Vec::with_capacity(CHUNK_FRAMES * 2);
-    let mp3_buf_capacity = CHUNK_FRAMES * 2 * 5 / 4 + 7200;
-    let mut mp3_out: Vec<u8> = Vec::with_capacity(mp3_buf_capacity);
-
-    while frames_written < total_frames {
-        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
-        mix_chunk(
-            sources, frames_written, chunk_size,
-            edl.start_time, output_rate_f64, output_channels, &mut mix_buf,
-        );
-
-        chunk_i16.clear();
-        for i in 0..chunk_size {
-            let base = i * output_channels;
-            let left = mix_buf[base].clamp(-1.0, 1.0);
-            let right = if output_channels >= 2 {
-                mix_buf[base + 1].clamp(-1.0, 1.0)
-            } else {
-                left
-            };
-            chunk_i16.push((left * 32767.0) as i16);
-            chunk_i16.push((right * 32767.0) as i16);
-        }
-
-        mp3_out.clear();
-        mp3_out.reserve(mp3_buf_capacity);
-        let input = InterleavedPcm(&chunk_i16);
-        let encoded = encoder.encode(input, mp3_out.spare_capacity_mut())
-            .map_err(|e| format!("Encode error: {:?}", e))?;
-        unsafe { mp3_out.set_len(encoded); }
-        output_file.write_all(&mp3_out)
-            .map_err(|e| format!("Write error: {}", e))?;
-
-        frames_written += chunk_size;
-    }
-
-    mp3_out.clear();
-    mp3_out.reserve(7200);
-    let flush_size = encoder.flush::<FlushNoGap>(mp3_out.spare_capacity_mut())
-        .map_err(|e| format!("Flush error: {:?}", e))?;
-    unsafe { mp3_out.set_len(flush_size); }
-    output_file.write_all(&mp3_out)
-        .map_err(|e| format!("Write error: {}", e))?;
+    let _ = std::fs::remove_file(&temp_wav);
 
     Ok(edl.output_path.clone())
 }
@@ -1173,8 +926,13 @@ mod tests {
     }
 
     /// Regression: MP3 export of edited source produces shorter file than original.
+    /// Requires ffmpeg — skips gracefully if unavailable.
     #[test]
     fn test_mp3_export_uses_edited_source() {
+        if !check_ffmpeg_available() {
+            eprintln!("Skipping MP3 test: ffmpeg not available");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let original_path = dir.path().join("original.wav");
         let edited_path = dir.path().join("edited.wav");
@@ -1418,8 +1176,13 @@ mod tests {
     }
 
     /// Regression: EDL MP3 export with edited source produces smaller file.
+    /// Requires ffmpeg — skips gracefully if unavailable.
     #[test]
     fn test_edl_mp3_export_edited_source() {
+        if !check_ffmpeg_available() {
+            eprintln!("Skipping EDL MP3 test: ffmpeg not available");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let original_path = dir.path().join("original.wav");
         let edited_path = dir.path().join("edited.wav");
