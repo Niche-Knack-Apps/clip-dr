@@ -263,6 +263,8 @@ pub struct PlaybackEngine {
     playing: Arc<AtomicBool>,
     /// Lock-free meter data (written by audio thread, read by polling command)
     meter: Arc<MeterData>,
+    /// Selected output device ID (None = system default)
+    output_device_id: Mutex<Option<String>>,
 }
 
 struct EngineInner {
@@ -409,6 +411,7 @@ impl PlaybackEngine {
             position: Arc::new(AtomicU64::new(0)),
             playing: Arc::new(AtomicBool::new(false)),
             meter: Arc::new(MeterData::new()),
+            output_device_id: Mutex::new(None),
         }
     }
 
@@ -1072,10 +1075,18 @@ fn build_output_stream(
     position: &Arc<AtomicU64>,
     playing: &Arc<AtomicBool>,
     meter: &Arc<MeterData>,
+    device_id: Option<&str>,
 ) -> Result<(cpal::Stream, u32, u16), String> {
     let host = cpal::default_host();
-    let device = host.default_output_device()
-        .ok_or("No output device available")?;
+    let device = if let Some(id) = device_id {
+        host.output_devices()
+            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?
+            .find(|d| d.name().ok().as_deref() == Some(id))
+            .ok_or_else(|| format!("Output device not found: {}", id))?
+    } else {
+        host.default_output_device()
+            .ok_or("No output device available")?
+    };
 
     let supported = device.default_output_config()
         .map_err(|e| format!("Failed to get output config: {}", e))?;
@@ -1358,7 +1369,8 @@ pub async fn playback_set_tracks(
 
     // Build output stream if not already running
     if !inner.stream_started {
-        match build_output_stream(&inner_arc, &position_arc, &playing_arc, &meter_arc) {
+        let device_id = state.output_device_id.lock().ok().and_then(|g| g.clone());
+        match build_output_stream(&inner_arc, &position_arc, &playing_arc, &meter_arc, device_id.as_deref()) {
             Ok((stream, sample_rate, channels)) => {
                 stream.play().map_err(|e| format!("Failed to start output: {}", e))?;
                 inner.output_sample_rate = sample_rate;
@@ -1438,6 +1450,80 @@ pub fn playback_set_volume(volume: f32, state: tauri::State<'_, PlaybackEngine>)
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     inner.master_volume = volume;
     Ok(())
+}
+
+/// Switch playback to a specific output device.
+/// Pauses, drops the current stream, rebuilds on the target device, seeks to the same position, and resumes.
+#[tauri::command]
+pub fn playback_set_output_device(
+    device_id: Option<String>,
+    state: tauri::State<'_, PlaybackEngine>,
+) -> Result<(), String> {
+    let was_playing = state.playing.load(Ordering::Relaxed);
+    let saved_position = state.get_position();
+
+    // Pause playback while switching
+    state.playing.store(false, Ordering::Relaxed);
+
+    // Update the stored device ID
+    if let Ok(mut guard) = state.output_device_id.lock() {
+        *guard = device_id.clone();
+    }
+
+    // Drop the current stream
+    if let Ok(mut guard) = PLAYBACK_STREAM.lock() {
+        *guard = None;
+    }
+
+    // Mark stream as not started so it will be rebuilt
+    {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        inner.stream_started = false;
+    }
+
+    // Rebuild the stream on the new device
+    match build_output_stream(
+        &state.inner,
+        &state.position,
+        &state.playing,
+        &state.meter,
+        device_id.as_deref(),
+    ) {
+        Ok((stream, sample_rate, channels)) => {
+            stream.play().map_err(|e| format!("Failed to start output on new device: {}", e))?;
+            let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+            inner.output_sample_rate = sample_rate;
+            inner.output_channels = channels;
+            inner.stream_started = true;
+            if let Ok(mut guard) = PLAYBACK_STREAM.lock() {
+                *guard = Some(StreamHolder::new(stream));
+            }
+            log::info!(
+                "Output device switched to {:?}: {}Hz {}ch",
+                device_id.as_deref().unwrap_or("default"),
+                sample_rate,
+                channels,
+            );
+        }
+        Err(e) => {
+            log::error!("Failed to switch output device: {}", e);
+            return Err(e);
+        }
+    }
+
+    // Restore position and playback state
+    state.set_position(saved_position);
+    if was_playing {
+        state.playing.store(true, Ordering::Relaxed);
+    }
+
+    Ok(())
+}
+
+/// Get the current output device ID (None = system default).
+#[tauri::command]
+pub fn playback_get_output_device(state: tauri::State<'_, PlaybackEngine>) -> Option<String> {
+    state.output_device_id.lock().ok().and_then(|g| g.clone())
 }
 
 #[tauri::command]

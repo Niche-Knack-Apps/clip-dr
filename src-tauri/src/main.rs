@@ -99,6 +99,8 @@ fn main() {
             playback::playback_seek,
             playback::playback_set_speed,
             playback::playback_set_volume,
+            playback::playback_set_output_device,
+            playback::playback_get_output_device,
             playback::playback_set_track_volume,
             playback::playback_set_track_envelope,
             playback::playback_set_track_muted,

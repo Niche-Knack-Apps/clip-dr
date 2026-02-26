@@ -584,6 +584,31 @@ export const usePlaybackStore = defineStore('playback', () => {
     }
   );
 
+  // ── Output device routing ──
+  const outputDeviceId = ref<string | null>(null);
+
+  async function setOutputDevice(deviceId: string | null): Promise<void> {
+    try {
+      await invoke('playback_set_output_device', { deviceId });
+      outputDeviceId.value = deviceId;
+      console.log('[Playback] Output device set to:', deviceId || 'default');
+    } catch (e) {
+      console.error('[Playback] Failed to set output device:', e);
+    }
+  }
+
+  async function loadOutputDevice(): Promise<void> {
+    try {
+      const id = await invoke<string | null>('playback_get_output_device');
+      outputDeviceId.value = id;
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Load stored output device on init
+  loadOutputDevice();
+
   return {
     isPlaying,
     currentTime,
@@ -629,5 +654,8 @@ export const usePlaybackStore = defineStore('playback', () => {
     jklStop,
     jumpToNextMarker,
     jumpToPreviousMarker,
+    // Output device routing
+    outputDeviceId,
+    setOutputDevice,
   };
 });
