@@ -588,6 +588,7 @@ export const useTracksStore = defineStore('tracks', () => {
         clips: newClips,
         trackStart: firstClipStart,
         duration: lastClipEnd - firstClipStart,
+        hasPeakPyramid: false,
       };
       tracks.value = [...tracks.value];
     }
@@ -747,6 +748,7 @@ export const useTracksStore = defineStore('tracks', () => {
       clips: newClips,
       trackStart: firstClipStart,
       duration: lastClipEnd - firstClipStart,
+      hasPeakPyramid: false,
     };
     tracks.value = [...tracks.value];
 

@@ -122,7 +122,7 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   function computeTrackHash(): string {
     return getPlayableTracks()
-      .map(t => `${t.id}:${t.cachedAudioPath || t.sourcePath}`)
+      .map(t => `${t.id}:${t.cachedAudioPath || t.sourcePath}:${t.trackStart.toFixed(4)}:${t.duration.toFixed(4)}`)
       .sort()
       .join('|');
   }

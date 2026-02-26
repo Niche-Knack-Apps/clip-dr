@@ -8,6 +8,9 @@ import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
+import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { tempDir } from '@tauri-apps/api/path';
 
 export interface AudioClipboard {
   samples: Float32Array[];
@@ -26,6 +29,43 @@ export const useClipboardStore = defineStore('clipboard', () => {
   const playbackStore = usePlaybackStore();
   const settingsStore = useSettingsStore();
   const transcriptionStore = useTranscriptionStore();
+
+  // Flatten clips back to single buffer and re-cache WAV for Rust playback
+  function flattenAndRecacheClips(ctx: AudioContext): void {
+    for (const track of tracksStore.tracks) {
+      if (!track.clips || track.clips.length === 0) continue;
+      const merged = mixTrackClipsToBuffer(track.clips, ctx);
+      if (!merged) continue;
+
+      const waveformData = tracksStore.generateWaveformFromBuffer(merged);
+      const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
+      if (trackIdx === -1) continue;
+
+      const currentDuration = track.duration;
+      tracksStore.tracks[trackIdx] = {
+        ...track,
+        audioData: { ...track.audioData, buffer: merged, waveformData },
+        clips: undefined,
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Write new cached WAV for Rust playback (async, fire-and-forget with guard)
+      const trackId = track.id;
+      const wavData = encodeWav(merged);
+      const fileName = `cut_${trackId}_${Date.now()}.wav`;
+      writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp })
+        .then(() => tempDir())
+        .then((tmpDir) => {
+          const cachedPath = `${tmpDir}${tmpDir.endsWith('/') ? '' : '/'}${fileName}`;
+          // Guard: only update if track still exists with same duration (user didn't undo)
+          const current = tracksStore.tracks.find(t => t.id === trackId);
+          if (current && Math.abs(current.duration - currentDuration) < 0.001) {
+            tracksStore.setCachedAudioPath(trackId, cachedPath);
+          }
+        })
+        .catch((err: unknown) => console.error('[Clipboard] Failed to cache cut audio:', err));
+    }
+  }
 
   const clipboard = ref<AudioClipboard | null>(null);
   const clipboardBuffer = ref<AudioBuffer | null>(null);
@@ -233,6 +273,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
         for (const track of tracksStore.tracks) {
           transcriptionStore.adjustForCut(track.id, inPoint, outPoint);
         }
+
+        // Flatten clips back to single buffer and re-cache for Rust playback
+        flattenAndRecacheClips(ctx);
       }
 
       // Clear I/O points after cut
@@ -377,6 +420,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
           tracksStore.adjustTimemarksForDelete(trackId, inPoint, outPoint);
           tracksStore.adjustVolumeEnvelopeForDelete(trackId, inPoint, outPoint);
         }
+        // Flatten clips back to single buffer and re-cache for Rust playback
+        flattenAndRecacheClips(ctx);
         selectionStore.clearInOutPoints();
         console.log(`[Clipboard] deleteSelected: removed segment from ${cutCount} track(s)`);
       }
