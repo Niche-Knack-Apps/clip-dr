@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import Button from '@/components/ui/Button.vue';
 import LevelMeter from './LevelMeter.vue';
 import LiveWaveform from '@/components/waveform/LiveWaveform.vue';
 import DevicePicker from './DevicePicker.vue';
+import ActiveSessions from './ActiveSessions.vue';
 import { useRecordingStore } from '@/stores/recording';
 import { useSettingsStore } from '@/stores/settings';
 import { formatTime } from '@/shared/utils';
@@ -57,8 +58,14 @@ async function handleDeviceSelect(deviceId: string) {
   }
 }
 
-// Start recording with the currently selected device
+// Start recording with the currently selected device(s)
 async function handleStartRecording() {
+  if (recordingStore.multiSourceMode && recordingStore.selectedDeviceIds.length > 0) {
+    // Multi-source recording
+    await recordingStore.startMultiRecording();
+    return;
+  }
+
   if (!recordingStore.selectedDeviceId) return;
 
   const device = recordingStore.selectedDevice;
@@ -66,6 +73,13 @@ async function handleStartRecording() {
   settingsStore.setLastRecordingSource(src);
   await recordingStore.quickStart(src);
 }
+
+const canRecord = computed(() => {
+  if (recordingStore.multiSourceMode) {
+    return recordingStore.selectedDeviceIds.length > 0;
+  }
+  return !!recordingStore.selectedDeviceId;
+});
 
 // Auto-start monitoring when panel opens (use last source)
 watch(
@@ -112,7 +126,11 @@ function startHold() {
   holdTimer = window.setTimeout(async () => {
     holdProgress.value = 1;
     closing.value = true;
-    await recordingStore.stopRecording();
+    if (recordingStore.sessions.length > 1) {
+      await recordingStore.stopMultiRecording();
+    } else {
+      await recordingStore.stopRecording();
+    }
     emit('close');
     cancelHold();
   }, HOLD_TO_STOP_DURATION);
@@ -136,7 +154,11 @@ async function handleStop() {
     return;
   }
   closing.value = true;
-  await recordingStore.stopRecording();
+  if (recordingStore.sessions.length > 1) {
+    await recordingStore.stopMultiRecording();
+  } else {
+    await recordingStore.stopRecording();
+  }
   emit('close');
 }
 
@@ -185,13 +207,13 @@ async function handleCancel() {
         variant="primary"
         size="sm"
         class="w-full"
-        :disabled="!recordingStore.selectedDeviceId"
+        :disabled="!canRecord"
         @click="handleStartRecording"
       >
         <svg class="w-4 h-4 mr-1.5" fill="currentColor" viewBox="0 0 24 24">
           <circle cx="12" cy="12" r="8" />
         </svg>
-        Record
+        {{ recordingStore.multiSourceMode && recordingStore.selectedDeviceIds.length > 1 ? `Record ${recordingStore.selectedDeviceIds.length} Sources` : 'Record' }}
       </Button>
 
       <!-- Hint text -->
@@ -246,6 +268,11 @@ async function handleCancel() {
           </svg>
           {{ recordingStore.isLocked ? 'Locked' : 'Lock' }}
         </button>
+      </div>
+
+      <!-- Active sessions (multi-source only) -->
+      <div v-if="recordingStore.sessions.length > 1" class="mb-3">
+        <ActiveSessions />
       </div>
 
       <!-- Live waveform -->

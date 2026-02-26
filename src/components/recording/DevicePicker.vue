@@ -17,9 +17,22 @@ const loopbackDev = computed(() => recordingStore.loopbackDevices);
 const hoveredDeviceId = ref<string | null>(null);
 let hoverTimeout: number | null = null;
 
+const isMulti = computed(() => recordingStore.multiSourceMode);
+
+function isSelected(deviceId: string): boolean {
+  if (isMulti.value) {
+    return recordingStore.selectedDeviceIds.includes(deviceId);
+  }
+  return recordingStore.selectedDeviceId === deviceId;
+}
+
 function handleDeviceClick(deviceId: string) {
-  recordingStore.selectDevice(deviceId);
-  emit('select', deviceId);
+  if (isMulti.value) {
+    recordingStore.toggleDeviceSelection(deviceId);
+  } else {
+    recordingStore.selectDevice(deviceId);
+    emit('select', deviceId);
+  }
 }
 
 function handleDeviceHover(deviceId: string) {
@@ -62,6 +75,20 @@ function formatChannels(ch: number): string {
 
 <template>
   <div class="space-y-1">
+    <!-- Multi-source toggle -->
+    <div class="flex items-center justify-between px-1 py-0.5">
+      <button
+        class="text-[9px] px-1.5 py-0.5 rounded transition-colors"
+        :class="isMulti ? 'bg-amber-500/20 text-amber-400' : 'text-gray-500 hover:text-gray-400'"
+        @click="recordingStore.setMultiSourceMode(!isMulti)"
+      >
+        {{ isMulti ? 'Multi-source ON' : 'Multi-source' }}
+      </button>
+      <span v-if="isMulti && recordingStore.selectedDeviceIds.length > 0" class="text-[9px] text-amber-400/70">
+        {{ recordingStore.selectedDeviceIds.length }} selected
+      </span>
+    </div>
+
     <!-- Microphones group -->
     <div v-if="micDevices.length > 0">
       <div class="flex items-center gap-1.5 px-1 py-1">
@@ -76,7 +103,7 @@ function formatChannels(ch: number): string {
           :key="device.id"
           class="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors"
           :class="[
-            recordingStore.selectedDeviceId === device.id
+            isSelected(device.id)
               ? 'bg-cyan-500/15 border border-cyan-500/40'
               : 'hover:bg-gray-700/60 border border-transparent',
           ]"
@@ -84,6 +111,14 @@ function formatChannels(ch: number): string {
           @mouseenter="handleDeviceHover(device.id)"
           @mouseleave="handleDeviceLeave"
         >
+          <!-- Multi-select checkbox -->
+          <div v-if="isMulti" class="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0"
+            :class="isSelected(device.id) ? 'border-cyan-500 bg-cyan-500/30' : 'border-gray-600'"
+          >
+            <svg v-if="isSelected(device.id)" class="w-2.5 h-2.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-1.5">
               <span class="text-xs text-gray-200 truncate">{{ device.name }}</span>
@@ -119,7 +154,7 @@ function formatChannels(ch: number): string {
           :key="device.id"
           class="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors"
           :class="[
-            recordingStore.selectedDeviceId === device.id
+            isSelected(device.id)
               ? 'bg-purple-500/15 border border-purple-500/40'
               : 'hover:bg-gray-700/60 border border-transparent',
           ]"
@@ -127,6 +162,13 @@ function formatChannels(ch: number): string {
           @mouseenter="handleDeviceHover(device.id)"
           @mouseleave="handleDeviceLeave"
         >
+          <div v-if="isMulti" class="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0"
+            :class="isSelected(device.id) ? 'border-purple-500 bg-purple-500/30' : 'border-gray-600'"
+          >
+            <svg v-if="isSelected(device.id)" class="w-2.5 h-2.5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-1.5">
               <span class="text-xs text-gray-200 truncate">{{ device.name }}</span>

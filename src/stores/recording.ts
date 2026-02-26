@@ -61,6 +61,25 @@ export interface RecordingSession {
   duration: number;
 }
 
+export interface SessionConfig {
+  device_id: string;
+  channel_mode: string | null;
+  large_file_format: string | null;
+}
+
+export interface SessionResult {
+  session_id: string;
+  device_id: string;
+  result: RecordingResult;
+  start_offset_us: number;
+}
+
+export interface SessionLevel {
+  session_id: string;
+  device_id: string;
+  level: number;
+}
+
 export type RecordingSource = 'microphone' | 'system';
 
 export interface SystemAudioInfo {
@@ -85,6 +104,10 @@ export const useRecordingStore = defineStore('recording', () => {
   const recordingPath = ref<string | null>(null);
   const devices = ref<AudioDevice[]>([]);
   const selectedDeviceId = ref<string | null>(null);
+  /** Multi-select mode: multiple device IDs selected for simultaneous recording */
+  const selectedDeviceIds = ref<string[]>([]);
+  /** Whether multi-source recording mode is active */
+  const multiSourceMode = ref(false);
   const source = ref<RecordingSource>('microphone');
   const error = ref<string | null>(null);
   const isMuted = ref(false);
@@ -676,6 +699,142 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  // ── Multi-source recording ──
+
+  function toggleDeviceSelection(deviceId: string): void {
+    const idx = selectedDeviceIds.value.indexOf(deviceId);
+    if (idx >= 0) {
+      selectedDeviceIds.value = selectedDeviceIds.value.filter(id => id !== deviceId);
+    } else {
+      selectedDeviceIds.value = [...selectedDeviceIds.value, deviceId];
+    }
+  }
+
+  function setMultiSourceMode(enabled: boolean): void {
+    multiSourceMode.value = enabled;
+    if (!enabled) {
+      selectedDeviceIds.value = [];
+    }
+  }
+
+  async function startMultiRecording(): Promise<void> {
+    if (isRecording.value || isPreparing.value) return;
+    if (selectedDeviceIds.value.length === 0) {
+      error.value = 'No devices selected for multi-source recording';
+      return;
+    }
+
+    error.value = null;
+    isPreparing.value = true;
+    clearTimemarks();
+
+    if (isMonitoring.value) {
+      await stopMonitoring();
+    }
+
+    try {
+      const outputDir = await settingsStore.getProjectFolder();
+      const configs: SessionConfig[] = selectedDeviceIds.value.map(deviceId => ({
+        device_id: deviceId,
+        channel_mode: settingsStore.settings.recordingChannelMode,
+        large_file_format: settingsStore.settings.recordingLargeFileFormat,
+      }));
+
+      console.log('[Recording] Starting multi-source recording:', configs.length, 'devices');
+
+      const sessionIds = await invoke<string[]>('start_multi_recording', {
+        configs,
+        outputDir,
+      });
+
+      isRecording.value = true;
+      recordingStartTime = Date.now();
+      recordingDuration.value = 0;
+
+      // Build session tracking
+      sessions.value = sessionIds.map((sessionId, idx) => ({
+        sessionId,
+        deviceId: selectedDeviceIds.value[idx],
+        deviceName: devices.value.find(d => d.id === selectedDeviceIds.value[idx])?.name || selectedDeviceIds.value[idx],
+        active: true,
+        level: 0,
+        path: null,
+        startTime: recordingStartTime,
+        duration: 0,
+      }));
+
+      // Poll per-session levels
+      levelPollInterval = window.setInterval(async () => {
+        try {
+          const levels = await invoke<SessionLevel[]>('get_session_levels');
+          for (const sl of levels) {
+            const session = sessions.value.find(s => s.sessionId === sl.session_id);
+            if (session) session.level = sl.level;
+          }
+          // Update shared level to max of all sessions
+          currentLevel.value = levels.length > 0
+            ? Math.max(...levels.map(l => l.level))
+            : 0;
+        } catch {
+          // Ignore polling errors
+        }
+      }, 100);
+
+      durationInterval = window.setInterval(() => {
+        recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
+        for (const s of sessions.value) {
+          s.duration = recordingDuration.value;
+        }
+      }, 100);
+
+      console.log('[Recording] Multi-source started:', sessionIds);
+    } catch (e) {
+      if (levelPollInterval) { clearInterval(levelPollInterval); levelPollInterval = null; }
+      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+      console.error('[Recording] Failed to start multi-source:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      isPreparing.value = false;
+    }
+  }
+
+  async function stopMultiRecording(): Promise<SessionResult[] | null> {
+    if (!isRecording.value) return null;
+
+    if (levelPollInterval) { clearInterval(levelPollInterval); levelPollInterval = null; }
+    if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+
+    try {
+      const results = await invoke<SessionResult[]>('stop_all_recordings');
+
+      isRecording.value = false;
+      isLocked.value = false;
+      currentLevel.value = 0;
+      sessions.value = [];
+
+      console.log('[Recording] Multi-source stopped:', results.length, 'sessions');
+
+      // Brief delay for OS file flush
+      await new Promise(r => setTimeout(r, 200));
+
+      // Import each session result as a track
+      for (const sr of results) {
+        const wrappedResult: RecordingResult = sr.result;
+        createTrackFromRecording(wrappedResult).catch(e => {
+          console.error('[Recording] Background import failed for session:', sr.session_id, e);
+        });
+      }
+
+      return results;
+    } catch (e) {
+      console.error('[Recording] Failed to stop multi-source:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+      isRecording.value = false;
+      isLocked.value = false;
+      return null;
+    }
+  }
+
   // Initialize devices on store creation
   refreshDevices();
 
@@ -688,6 +847,8 @@ export const useRecordingStore = defineStore('recording', () => {
     recordingPath,
     devices,
     selectedDeviceId,
+    selectedDeviceIds,
+    multiSourceMode,
     source,
     error,
     placement,
@@ -735,5 +896,10 @@ export const useRecordingStore = defineStore('recording', () => {
     stopMonitoring,
     checkMuted,
     unmute,
+    // Multi-source
+    toggleDeviceSelection,
+    setMultiSourceMode,
+    startMultiRecording,
+    stopMultiRecording,
   };
 });
