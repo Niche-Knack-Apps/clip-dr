@@ -82,6 +82,11 @@ export interface SessionLevel {
   level: number;
 }
 
+export interface PreviewLevel {
+  device_id: string;
+  level: number;
+}
+
 export interface OrphanedRecording {
   path: string;
   size_bytes: number;
@@ -146,10 +151,14 @@ export const useRecordingStore = defineStore('recording', () => {
   let durationInterval: number | null = null;
   let recordingStartTime = 0;
 
-  // Device preview state
+  // Device preview state (single)
   const previewLevel = ref(0);
   const previewDeviceId = ref<string | null>(null);
   let previewPollInterval: number | null = null;
+
+  // Multi-device preview levels (device_id → level)
+  const previewLevels = ref<Map<string, number>>(new Map());
+  let multiPreviewPollInterval: number | null = null;
 
   // All devices ref (includes both input and output)
   const allDevices = ref<AudioDevice[]>([]);
@@ -844,6 +853,152 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  // ── Per-device preview (multi-device VU meters) ──
+
+  /** Start previewing multiple devices for concurrent VU meters */
+  async function startDevicePreviews(deviceIds: string[]): Promise<void> {
+    try {
+      await invoke('start_device_previews', { deviceIds });
+
+      // Start polling preview levels
+      if (multiPreviewPollInterval) clearInterval(multiPreviewPollInterval);
+      multiPreviewPollInterval = window.setInterval(async () => {
+        try {
+          const levels = await invoke<PreviewLevel[]>('get_preview_levels');
+          const map = new Map<string, number>();
+          for (const l of levels) {
+            map.set(l.device_id, l.level);
+          }
+          previewLevels.value = map;
+        } catch {
+          // Ignore polling errors
+        }
+      }, 80);
+    } catch (e) {
+      console.error('[Recording] Failed to start device previews:', e);
+    }
+  }
+
+  /** Stop all device previews and level polling */
+  async function stopDevicePreviews(): Promise<void> {
+    if (multiPreviewPollInterval) {
+      clearInterval(multiPreviewPollInterval);
+      multiPreviewPollInterval = null;
+    }
+    previewLevels.value = new Map();
+    try {
+      await invoke('stop_all_previews');
+    } catch {
+      // Ignore
+    }
+  }
+
+  /** Get the preview/recording level for a specific device */
+  function getDeviceLevel(deviceId: string): number {
+    return previewLevels.value.get(deviceId) ?? 0;
+  }
+
+  // ── Independent per-device recording ──
+
+  /** Start recording from a single device. Does not affect other active sessions. */
+  async function startDeviceSession(deviceId: string, sessionId: string): Promise<string | null> {
+    error.value = null;
+    try {
+      const outputDir = await settingsStore.getProjectFolder();
+      const path = await invoke<string>('start_session', {
+        sessionId,
+        deviceId,
+        outputDir,
+        channelMode: settingsStore.settings.recordingChannelMode,
+        largeFileFormat: settingsStore.settings.recordingLargeFileFormat,
+      });
+
+      const device = devices.value.find(d => d.id === deviceId);
+      const session: RecordingSession = {
+        sessionId,
+        deviceId,
+        deviceName: device?.name || deviceId,
+        active: true,
+        level: 0,
+        path,
+        startTime: Date.now(),
+        duration: 0,
+      };
+      sessions.value = [...sessions.value, session];
+      isRecording.value = true;
+
+      // Start duration tracking if not already running
+      if (!durationInterval) {
+        durationInterval = window.setInterval(() => {
+          for (const s of sessions.value) {
+            if (s.active) {
+              s.duration = (Date.now() - s.startTime) / 1000;
+            }
+          }
+          // Update global duration to max of all sessions
+          const maxDuration = Math.max(0, ...sessions.value.filter(s => s.active).map(s => s.duration));
+          recordingDuration.value = maxDuration;
+        }, 100);
+      }
+
+      console.log('[Recording] Session started:', sessionId, path);
+      return path;
+    } catch (e) {
+      console.error('[Recording] Failed to start session:', sessionId, e);
+      error.value = e instanceof Error ? e.message : String(e);
+      return null;
+    }
+  }
+
+  /** Stop a single recording session by ID. Other sessions continue. */
+  async function stopDeviceSession(sessionId: string): Promise<SessionResult | null> {
+    try {
+      const result = await invoke<SessionResult>('stop_session', { sessionId });
+
+      // Remove from sessions list
+      sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
+
+      // If no more active sessions, clear global recording state
+      if (sessions.value.filter(s => s.active).length === 0) {
+        isRecording.value = false;
+        isLocked.value = false;
+        currentLevel.value = 0;
+        if (durationInterval) {
+          clearInterval(durationInterval);
+          durationInterval = null;
+        }
+      }
+
+      console.log(`[Recording] Session '${sessionId}' stopped: ${result.result.duration.toFixed(1)}s`);
+
+      // Brief delay for OS file flush
+      await new Promise(r => setTimeout(r, 200));
+
+      // Import the recording as a track
+      if (result.result.path) {
+        createTrackFromRecording(result.result).catch(e => {
+          console.error('[Recording] Background import failed for session:', sessionId, e);
+        });
+      }
+
+      return result;
+    } catch (e) {
+      console.error('[Recording] Failed to stop session:', sessionId, e);
+      error.value = e instanceof Error ? e.message : String(e);
+      return null;
+    }
+  }
+
+  /** Check if a specific device is currently recording */
+  function isDeviceRecording(deviceId: string): boolean {
+    return sessions.value.some(s => s.deviceId === deviceId && s.active);
+  }
+
+  /** Get the session for a specific device */
+  function getDeviceSession(deviceId: string): RecordingSession | undefined {
+    return sessions.value.find(s => s.deviceId === deviceId && s.active);
+  }
+
   // ── Crash recovery ──
   const orphanedRecordings = ref<OrphanedRecording[]>([]);
 
@@ -950,6 +1105,15 @@ export const useRecordingStore = defineStore('recording', () => {
     setMultiSourceMode,
     startMultiRecording,
     stopMultiRecording,
+    // Per-device preview + independent recording
+    previewLevels,
+    startDevicePreviews,
+    stopDevicePreviews,
+    getDeviceLevel,
+    startDeviceSession,
+    stopDeviceSession,
+    isDeviceRecording,
+    getDeviceSession,
     // Crash recovery
     orphanedRecordings,
     scanOrphanedRecordings,

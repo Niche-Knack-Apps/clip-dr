@@ -86,6 +86,9 @@ pub struct RecordingManager {
     preview_active: Arc<AtomicBool>,
     preview_level: Arc<AtomicU32>,
 
+    // ── Multi-device preview (concurrent VU meters) ──
+    preview_sessions: Mutex<HashMap<String, PreviewSession>>,
+
     // ── Pre-record buffer (filled during monitoring) ──
     pre_record_buffer: Mutex<Option<Arc<PreRecordBuffer>>>,
 
@@ -109,6 +112,14 @@ pub struct RecordingManager {
 // The Mutex wrappers ensure safe concurrent access.
 unsafe impl Send for RecordingSession {}
 
+/// A preview session for live VU metering (no recording).
+struct PreviewSession {
+    stream: Option<StreamHolder>,
+    active: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+}
+unsafe impl Send for PreviewSession {}
+
 impl RecordingManager {
     pub fn new() -> Self {
         Self {
@@ -119,6 +130,7 @@ impl RecordingManager {
             preview_stream: Mutex::new(None),
             preview_active: Arc::new(AtomicBool::new(false)),
             preview_level: Arc::new(AtomicU32::new(0)),
+            preview_sessions: Mutex::new(HashMap::new()),
             current_level: Arc::new(AtomicU32::new(0)),
             system_monitor_active: Arc::new(AtomicBool::new(false)),
             system_monitor_child: Arc::new(Mutex::new(None)),
@@ -233,6 +245,13 @@ pub struct SessionResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionLevel {
     pub session_id: String,
+    pub device_id: String,
+    pub level: f32,
+}
+
+/// Level info for a device preview (returned by get_preview_levels).
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewLevel {
     pub device_id: String,
     pub level: f32,
 }
@@ -2053,6 +2072,392 @@ pub fn get_session_levels(mgr: State<'_, RecordingManager>) -> Vec<SessionLevel>
         }
     }
     levels
+}
+
+// ── Independent session start/stop (for per-device recording UI) ──
+
+/// Start a single recording session. Does NOT reset other active sessions,
+/// so multiple sessions can run concurrently for independent per-device recording.
+#[tauri::command]
+pub async fn start_session(
+    session_id: String,
+    device_id: String,
+    output_dir: String,
+    channel_mode: Option<String>,
+    large_file_format: Option<String>,
+    mgr: State<'_, RecordingManager>,
+) -> Result<String, String> {
+    // Reject if session ID already in use
+    if let Ok(sessions) = mgr.sessions.lock() {
+        if sessions.contains_key(&session_id) {
+            return Err(format!("Session '{}' already active", session_id));
+        }
+    }
+
+    // Stop preview for this device (can't preview and record simultaneously)
+    if let Ok(mut previews) = mgr.preview_sessions.lock() {
+        if let Some(preview) = previews.remove(&device_id) {
+            preview.active.store(false, Ordering::SeqCst);
+        }
+    }
+
+    let output_dir_path = PathBuf::from(&output_dir);
+    std::fs::create_dir_all(&output_dir_path)
+        .map_err(|e| format!("Failed to create output directory: {}", e))?;
+
+    let host = cpal::default_host();
+    let device = host.input_devices()
+        .map_err(|e| format!("Failed to enumerate devices: {}", e))?
+        .find(|d| d.name().ok().as_ref() == Some(&device_id))
+        .ok_or_else(|| format!("Device not found: {}", device_id))?;
+
+    let device_name = device.name().unwrap_or_default();
+    log::info!("Starting session '{}': device '{}'", session_id, device_name);
+
+    let default_config = device
+        .default_input_config()
+        .map_err(|e| format!("Failed to get input config for '{}': {}", device_name, e))?;
+
+    let supported_configs: Vec<_> = device.supported_input_configs()
+        .map_err(|e| format!("Failed to get supported configs: {}", e))?
+        .collect();
+
+    fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
+        let mut score = 0;
+        if cfg.channels() == 2 { score += 100; }
+        else if cfg.channels() == 1 { score += 50; }
+        match cfg.sample_format() {
+            SampleFormat::F32 => score += 50,
+            SampleFormat::I16 => score += 40,
+            SampleFormat::I32 => score += 30,
+            SampleFormat::F64 => score += 25,
+            SampleFormat::U16 => score += 20,
+            _ => {}
+        }
+        let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
+        if rate_range.contains(&target_rate) { score += 10; }
+        if rate_range.contains(&44100) { score += 5; }
+        score
+    }
+
+    let target_rate = default_config.sample_rate().0;
+    let best_supported = supported_configs.iter()
+        .max_by_key(|c| config_score(c, target_rate));
+
+    let config = if let Some(best) = best_supported {
+        let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
+        let sample_rate = if rate_range.contains(&target_rate) {
+            target_rate
+        } else if rate_range.contains(&44100) {
+            44100
+        } else {
+            best.max_sample_rate().0.min(48000)
+        };
+        best.clone().with_sample_rate(cpal::SampleRate(sample_rate))
+    } else {
+        default_config
+    };
+
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels();
+    let sample_format = config.sample_format();
+
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let safe_name: String = device_name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(30)
+        .collect();
+    let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
+    let output_path = output_dir_path.join(&filename);
+
+    let target_mono = channel_mode.as_deref() == Some("mono");
+    let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
+    let use_rf64 = lff == "rf64";
+
+    let spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    let audio_writer = if use_rf64 {
+        AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+            .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+    } else {
+        let file = File::create(&output_path)
+            .map_err(|e| format!("Failed to create output file: {}", e))?;
+        AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
+            .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+    };
+
+    let session_active = Arc::new(AtomicBool::new(true));
+    let session_level = Arc::new(AtomicU32::new(0));
+    let session_debug = Arc::new(AtomicUsize::new(0));
+
+    let ring = Arc::new(RecordingRingBuffer::new(
+        sample_rate as usize * channels as usize * 10,
+    ).with_channels(channels));
+
+    let writer_handle = spawn_wav_writer_thread(
+        ring.clone(), audio_writer, channels, target_mono,
+        output_path.clone(), spec, use_rf64,
+    );
+
+    let stream_config: cpal::StreamConfig = config.into();
+    let shared_level = mgr.current_level.clone();
+    let stream = match sample_format {
+        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+        fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
+    };
+
+    stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
+
+    let session = RecordingSession {
+        stream: Some(StreamHolder::new(stream)),
+        ring_buffer: Some(ring),
+        writer_handle: Some(writer_handle),
+        active: session_active,
+        level: session_level,
+        debug_count: session_debug,
+        device_id: device_id.clone(),
+        sample_rate,
+        channels,
+        output_path: output_path.clone(),
+        target_mono,
+        large_file_format: lff,
+        use_system_buffer: false,
+        start_offset_us: 0,
+        pre_record_seconds: 0.0,
+    };
+
+    if let Ok(mut sessions) = mgr.sessions.lock() {
+        sessions.insert(session_id.clone(), session);
+    }
+
+    log::info!("Session '{}' started: {}", session_id, output_path.display());
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+/// Stop a single recording session by its ID. Other sessions continue running.
+#[tauri::command]
+pub async fn stop_session(
+    session_id: String,
+    mgr: State<'_, RecordingManager>,
+) -> Result<SessionResult, String> {
+    let mut session = {
+        let mut sessions = mgr.sessions.lock().map_err(|_| "Session lock poisoned".to_string())?;
+        sessions.remove(&session_id)
+            .ok_or_else(|| format!("Session '{}' not found", session_id))?
+    };
+
+    // Signal session to stop
+    session.active.store(false, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Drop the stream
+    session.stream = None;
+
+    let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
+        (session.ring_buffer.take(), session.writer_handle.take())
+    {
+        let overruns = ring.overrun_count.load(Ordering::Relaxed);
+        if overruns > 0 {
+            log::warn!("Session '{}': {} ring buffer overruns", session_id, overruns);
+        }
+        ring.active.store(false, Ordering::Release);
+        match handle.join() {
+            Ok((w, count, segments)) => (Some(w), count, segments),
+            Err(_) => {
+                log::error!("Session '{}': writer thread panicked", session_id);
+                return Err(format!("Session '{}': writer thread panicked", session_id));
+            }
+        }
+    } else {
+        (None, 0usize, Vec::new())
+    };
+
+    if sample_count == 0 {
+        return Err(format!("Session '{}': no audio recorded", session_id));
+    }
+
+    let samples_per_channel = sample_count / session.channels as usize;
+    let duration = samples_per_channel as f64 / session.sample_rate as f64;
+
+    if let Some(w) = writer {
+        if let Err(e) = w.finalize() {
+            return Err(format!("Session '{}': finalize failed: {}", session_id, e));
+        }
+    }
+
+    let use_rf64 = session.large_file_format == "rf64";
+    let last_seg_path = segment_path(&session.output_path, completed_segments.len() + 1);
+    if !use_rf64 {
+        let _ = patch_wav_header_if_needed(&last_seg_path);
+    }
+
+    if let Ok(f) = File::open(&last_seg_path) {
+        let _ = f.sync_all();
+    }
+
+    let extra_segments: Vec<String> = if !completed_segments.is_empty() {
+        for seg in &completed_segments {
+            if !use_rf64 { let _ = patch_wav_header_if_needed(seg); }
+        }
+        let mut extras: Vec<String> = completed_segments.iter()
+            .skip(1)
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        extras.push(last_seg_path.to_string_lossy().to_string());
+        extras
+    } else {
+        Vec::new()
+    };
+
+    let final_channels = if session.target_mono && session.channels == 2 && extra_segments.is_empty() {
+        stereo_wav_to_mono_streaming(&session.output_path, session.sample_rate)?;
+        1u16
+    } else {
+        session.channels
+    };
+
+    log::info!("Session '{}' stopped: {:.2}s, {} samples", session_id, duration, sample_count);
+
+    // Clear shared level if no more sessions are active
+    if !mgr.is_any_recording() {
+        mgr.current_level.store(0, Ordering::SeqCst);
+    }
+
+    // Restart preview for this device (nice-to-have: re-enable VU after stop)
+    // The frontend will call start_device_previews to re-enable as needed.
+
+    Ok(SessionResult {
+        session_id: session_id.clone(),
+        device_id: session.device_id.clone(),
+        result: RecordingResult {
+            path: session.output_path.to_string_lossy().to_string(),
+            duration,
+            sample_rate: session.sample_rate,
+            channels: final_channels,
+            extra_segments,
+            pre_record_seconds: session.pre_record_seconds,
+        },
+        start_offset_us: session.start_offset_us,
+    })
+}
+
+// ── Multi-device preview (concurrent VU meters for all listed devices) ──
+
+/// Start preview streams for multiple devices simultaneously (for VU meters).
+/// Skips devices that are currently recording.
+#[tauri::command]
+pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, RecordingManager>) -> Result<(), String> {
+    stop_all_previews_internal(&mgr);
+    std::thread::sleep(Duration::from_millis(50));
+
+    let host = cpal::default_host();
+
+    for device_id in &device_ids {
+        // Skip devices that are already recording
+        if let Ok(sessions) = mgr.sessions.lock() {
+            if sessions.values().any(|s| s.device_id == *device_id && s.active.load(Ordering::SeqCst)) {
+                continue;
+            }
+        }
+
+        let device = match host.input_devices()
+            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
+            .find(|d| d.name().ok().as_ref() == Some(device_id))
+        {
+            Some(d) => d,
+            None => { log::warn!("Preview: device not found: {}", device_id); continue; }
+        };
+
+        let config = match device.default_input_config() {
+            Ok(c) => c,
+            Err(e) => { log::warn!("Preview: config failed for '{}': {}", device_id, e); continue; }
+        };
+
+        let active = Arc::new(AtomicBool::new(true));
+        let level = Arc::new(AtomicU32::new(0));
+
+        let stream_result = match config.sample_format() {
+            SampleFormat::F32 => build_preview_stream::<f32>(&device, &config.into(), active.clone(), level.clone()),
+            SampleFormat::I16 => build_preview_stream::<i16>(&device, &config.into(), active.clone(), level.clone()),
+            SampleFormat::U16 => build_preview_stream::<u16>(&device, &config.into(), active.clone(), level.clone()),
+            SampleFormat::I32 => build_preview_stream::<i32>(&device, &config.into(), active.clone(), level.clone()),
+            SampleFormat::U8 => build_preview_stream::<u8>(&device, &config.into(), active.clone(), level.clone()),
+            fmt => { log::warn!("Preview: unsupported format {:?} for '{}'", fmt, device_id); continue; }
+        };
+
+        match stream_result {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    log::warn!("Preview: failed to start for '{}': {}", device_id, e);
+                    continue;
+                }
+                if let Ok(mut guard) = mgr.preview_sessions.lock() {
+                    guard.insert(device_id.clone(), PreviewSession {
+                        stream: Some(StreamHolder::new(s)),
+                        active,
+                        level,
+                    });
+                }
+            }
+            Err(e) => { log::warn!("Preview: build failed for '{}': {}", device_id, e); continue; }
+        }
+    }
+
+    let count = mgr.preview_sessions.lock().map(|g| g.len()).unwrap_or(0);
+    log::info!("Started {} device previews", count);
+    Ok(())
+}
+
+/// Get level meters for all active previews AND recording sessions.
+#[tauri::command]
+pub fn get_preview_levels(mgr: State<'_, RecordingManager>) -> Vec<PreviewLevel> {
+    let mut levels = Vec::new();
+    if let Ok(guard) = mgr.preview_sessions.lock() {
+        for (device_id, session) in guard.iter() {
+            if session.active.load(Ordering::SeqCst) {
+                levels.push(PreviewLevel {
+                    device_id: device_id.clone(),
+                    level: session.level.load(Ordering::SeqCst) as f32 / 1000.0,
+                });
+            }
+        }
+    }
+    // Also include levels from active recording sessions
+    if let Ok(sessions) = mgr.sessions.lock() {
+        for (_, session) in sessions.iter() {
+            if session.active.load(Ordering::SeqCst) {
+                levels.push(PreviewLevel {
+                    device_id: session.device_id.clone(),
+                    level: session.level.load(Ordering::SeqCst) as f32 / 1000.0,
+                });
+            }
+        }
+    }
+    levels
+}
+
+/// Stop all device previews.
+#[tauri::command]
+pub fn stop_all_previews(mgr: State<'_, RecordingManager>) {
+    stop_all_previews_internal(&mgr);
+}
+
+fn stop_all_previews_internal(mgr: &RecordingManager) {
+    if let Ok(mut guard) = mgr.preview_sessions.lock() {
+        for (id, session) in guard.drain() {
+            session.active.store(false, Ordering::SeqCst);
+            log::info!("Preview stopped: {}", id);
+        }
+    }
 }
 
 #[tauri::command]
