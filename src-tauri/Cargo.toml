@@ -41,6 +41,11 @@ cpal = "0.15"
 lazy_static = "1.4"
 chrono = "0.4"
 
+# Linux-specific PulseAudio device enumeration & capture
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.30"
+libpulse-simple-binding = "2.29"
+
 # Windows-specific loopback capture
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.13"
