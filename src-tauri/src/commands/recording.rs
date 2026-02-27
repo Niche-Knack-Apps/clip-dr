@@ -195,6 +195,21 @@ pub struct AudioDevice {
     /// Platform-specific device identifier (e.g., ALSA hw:x,y)
     #[serde(default)]
     pub platform_id: String,
+    /// Device source classification: "hardware", "virtual", "monitor"
+    #[serde(default)]
+    pub device_source: String,
+    /// Pulse source/sink name (for capture routing on Linux)
+    #[serde(default)]
+    pub pulse_name: String,
+    /// Pulse source/sink index
+    #[serde(default)]
+    pub pulse_index: u32,
+    /// Hardware bus: "usb", "pci", "bluetooth", ""
+    #[serde(default)]
+    pub hw_bus: String,
+    /// Device serial for stable re-identification
+    #[serde(default)]
+    pub serial: String,
 }
 
 /// Detailed capabilities for a specific device
@@ -930,6 +945,11 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
                     channels,
                     sample_rates,
                     platform_id: name.clone(),
+                    device_source: String::new(),
+                    pulse_name: String::new(),
+                    pulse_index: 0,
+                    hw_bus: String::new(),
+                    serial: String::new(),
                 });
             }
         }
@@ -970,6 +990,11 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
                                     channels: 2,
                                     sample_rates: vec![44100, 48000],
                                     platform_id: monitor_name,
+                                    device_source: "monitor".to_string(),
+                                    pulse_name: String::new(),
+                                    pulse_index: 0,
+                                    hw_bus: String::new(),
+                                    serial: String::new(),
                                 });
                             }
                         }
@@ -1090,6 +1115,11 @@ pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
                     channels,
                     sample_rates,
                     platform_id: name.clone(),
+                    device_source: String::new(),
+                    pulse_name: String::new(),
+                    pulse_index: 0,
+                    hw_bus: String::new(),
+                    serial: String::new(),
                 });
             }
         }
@@ -1121,6 +1151,7 @@ pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
                         channels,
                         sample_rates,
                         platform_id: name.clone(),
+                        device_source: String::new(),
                     });
                 }
             }
@@ -1158,6 +1189,11 @@ pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
                                     channels: 2,
                                     sample_rates: vec![44100, 48000],
                                     platform_id: monitor_name,
+                                    device_source: "monitor".to_string(),
+                                    pulse_name: String::new(),
+                                    pulse_index: 0,
+                                    hw_bus: String::new(),
+                                    serial: String::new(),
                                 });
                             }
                         }
