@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::num::{NonZeroU32, NonZeroU8};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -13,6 +13,7 @@ use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 use serde::Deserialize;
 use tauri::Emitter;
 
+use crate::audio_util::Rf64Writer;
 use super::playback::{PcmData, AutomationPoint, load_wav_mmap, load_compressed};
 
 #[tauri::command]
@@ -122,24 +123,41 @@ fn export_audio_region_inner(
         }
     }
 
-    // Write WAV file
-    let spec = WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
+    // Write WAV file — use RF64 if output would exceed 3.9GB
+    let expected_bytes = all_samples.len() as u64 * 4;
+    let use_rf64 = expected_bytes > 3_900_000_000;
 
-    let mut writer = WavWriter::create(output, spec)
-        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+    if use_rf64 {
+        let mut writer = Rf64Writer::new(
+            output.to_path_buf(), sample_rate, channels,
+        ).map_err(|e| format!("Failed to create RF64: {}", e))?;
 
-    for sample in all_samples {
-        writer.write_sample(sample)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
+        for &sample in &all_samples {
+            writer.write_sample(sample)
+                .map_err(|e| format!("Failed to write sample: {}", e))?;
+        }
+
+        writer.finalize()
+            .map_err(|e| format!("Failed to finalize RF64: {}", e))?;
+    } else {
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let mut writer = WavWriter::create(output, spec)
+            .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+
+        for &sample in &all_samples {
+            writer.write_sample(sample)
+                .map_err(|e| format!("Failed to write sample: {}", e))?;
+        }
+
+        writer.finalize()
+            .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
     }
-
-    writer.finalize()
-        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
 
     log::info!("Exported {} to {}", source_path, output_path);
 
@@ -326,46 +344,80 @@ fn export_edl_wav(
     total_frames: usize,
     app: &tauri::AppHandle,
 ) -> Result<String, String> {
-    let spec = WavSpec {
-        channels: edl.channels,
-        sample_rate: edl.sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-
-    let mut writer = WavWriter::create(&edl.output_path, spec)
-        .map_err(|e| format!("Failed to create WAV: {}", e))?;
+    let expected_bytes = total_frames as u64 * edl.channels as u64 * 4;
+    let use_rf64 = expected_bytes > 3_900_000_000;
 
     let output_rate = edl.sample_rate as f64;
     let output_channels = edl.channels as usize;
     let mut frames_written = 0usize;
     let mut mix_buf: Vec<f32> = Vec::new();
 
-    while frames_written < total_frames {
-        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+    if use_rf64 {
+        log::info!("EDL WAV export: using RF64 (expected {:.2}GB)", expected_bytes as f64 / 1e9);
+        let mut writer = Rf64Writer::new(
+            PathBuf::from(&edl.output_path), edl.sample_rate, edl.channels,
+        ).map_err(|e| format!("Failed to create RF64: {}", e))?;
 
-        mix_chunk(
-            sources, frames_written, chunk_size,
-            edl.start_time, output_rate, output_channels, &mut mix_buf,
-        );
+        while frames_written < total_frames {
+            let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
 
-        for &sample in &mix_buf {
-            writer.write_sample(sample)
-                .map_err(|e| format!("Write error: {}", e))?;
+            mix_chunk(
+                sources, frames_written, chunk_size,
+                edl.start_time, output_rate, output_channels, &mut mix_buf,
+            );
+
+            for &sample in &mix_buf {
+                writer.write_sample(sample)
+                    .map_err(|e| format!("Write error: {}", e))?;
+            }
+
+            frames_written += chunk_size;
+
+            let progress = frames_written as f64 / total_frames as f64;
+            let _ = app.emit("export-progress", serde_json::json!({
+                "progress": progress,
+                "framesWritten": frames_written,
+                "totalFrames": total_frames,
+            }));
         }
 
-        frames_written += chunk_size;
+        writer.finalize().map_err(|e| format!("Failed to finalize RF64: {}", e))?;
+    } else {
+        let spec = WavSpec {
+            channels: edl.channels,
+            sample_rate: edl.sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
 
-        // Emit progress every chunk
-        let progress = frames_written as f64 / total_frames as f64;
-        let _ = app.emit("export-progress", serde_json::json!({
-            "progress": progress,
-            "framesWritten": frames_written,
-            "totalFrames": total_frames,
-        }));
+        let mut writer = WavWriter::create(&edl.output_path, spec)
+            .map_err(|e| format!("Failed to create WAV: {}", e))?;
+
+        while frames_written < total_frames {
+            let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+
+            mix_chunk(
+                sources, frames_written, chunk_size,
+                edl.start_time, output_rate, output_channels, &mut mix_buf,
+            );
+
+            for &sample in &mix_buf {
+                writer.write_sample(sample)
+                    .map_err(|e| format!("Write error: {}", e))?;
+            }
+
+            frames_written += chunk_size;
+
+            let progress = frames_written as f64 / total_frames as f64;
+            let _ = app.emit("export-progress", serde_json::json!({
+                "progress": progress,
+                "framesWritten": frames_written,
+                "totalFrames": total_frames,
+            }));
+        }
+
+        writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
     }
-
-    writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
 
     Ok(edl.output_path.clone())
 }
@@ -749,35 +801,60 @@ fn export_edl_wav_no_progress(
     sources: &[EdlSource],
     total_frames: usize,
 ) -> Result<String, String> {
-    let spec = WavSpec {
-        channels: edl.channels,
-        sample_rate: edl.sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-
-    let mut writer = WavWriter::create(&edl.output_path, spec)
-        .map_err(|e| format!("Failed to create WAV: {}", e))?;
+    let expected_bytes = total_frames as u64 * edl.channels as u64 * 4;
+    let use_rf64 = expected_bytes > 3_900_000_000;
 
     let output_rate = edl.sample_rate as f64;
     let output_channels = edl.channels as usize;
     let mut frames_written = 0usize;
     let mut mix_buf: Vec<f32> = Vec::new();
 
-    while frames_written < total_frames {
-        let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
-        mix_chunk(
-            sources, frames_written, chunk_size,
-            edl.start_time, output_rate, output_channels, &mut mix_buf,
-        );
-        for &sample in &mix_buf {
-            writer.write_sample(sample)
-                .map_err(|e| format!("Write error: {}", e))?;
+    if use_rf64 {
+        let mut writer = Rf64Writer::new(
+            PathBuf::from(&edl.output_path), edl.sample_rate, edl.channels,
+        ).map_err(|e| format!("Failed to create RF64: {}", e))?;
+
+        while frames_written < total_frames {
+            let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+            mix_chunk(
+                sources, frames_written, chunk_size,
+                edl.start_time, output_rate, output_channels, &mut mix_buf,
+            );
+            for &sample in &mix_buf {
+                writer.write_sample(sample)
+                    .map_err(|e| format!("Write error: {}", e))?;
+            }
+            frames_written += chunk_size;
         }
-        frames_written += chunk_size;
+
+        writer.finalize().map_err(|e| format!("Failed to finalize RF64: {}", e))?;
+    } else {
+        let spec = WavSpec {
+            channels: edl.channels,
+            sample_rate: edl.sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let mut writer = WavWriter::create(&edl.output_path, spec)
+            .map_err(|e| format!("Failed to create WAV: {}", e))?;
+
+        while frames_written < total_frames {
+            let chunk_size = CHUNK_FRAMES.min(total_frames - frames_written);
+            mix_chunk(
+                sources, frames_written, chunk_size,
+                edl.start_time, output_rate, output_channels, &mut mix_buf,
+            );
+            for &sample in &mix_buf {
+                writer.write_sample(sample)
+                    .map_err(|e| format!("Write error: {}", e))?;
+            }
+            frames_written += chunk_size;
+        }
+
+        writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
     }
 
-    writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
     Ok(edl.output_path.clone())
 }
 

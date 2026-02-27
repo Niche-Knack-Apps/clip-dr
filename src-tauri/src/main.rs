@@ -2,6 +2,7 @@
 
 mod commands;
 mod audio_clean;
+mod audio_util;
 mod services;
 
 use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, import, playback};
