@@ -49,6 +49,9 @@ export interface KeyboardActions {
   onQuickExport?: () => void;
   // Loop mode shortcuts (Q/W/E/R/T)
   onSetLoopMode?: (mode: LoopMode) => void;
+  // Project save/open
+  onSaveProject?: () => void;
+  onOpenProject?: () => void;
   // Help modal
   onShowHelp?: () => void;
 }
@@ -147,6 +150,16 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
             console.log('[Keyboard] Ctrl+Shift+E (quick re-export)');
             actions.onQuickExport?.();
           }
+          return;
+        case 's':
+          event.preventDefault();
+          console.log('[Keyboard] Ctrl+S (save project)');
+          actions.onSaveProject?.();
+          return;
+        case 'o':
+          event.preventDefault();
+          console.log('[Keyboard] Ctrl+O (open project)');
+          actions.onOpenProject?.();
           return;
       }
     }

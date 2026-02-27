@@ -8,3 +8,4 @@ pub mod metadata;
 pub mod recording;
 pub mod import;
 pub mod playback;
+pub mod project;

@@ -561,6 +561,17 @@ export const useSilenceStore = defineStore('silence', () => {
     compressionEnabled.value = false;
   }
 
+  // Clear without pushing history (for project load)
+  function clearWithoutHistory(): void {
+    silenceRegions.value = [];
+    compressionEnabled.value = false;
+  }
+
+  // Set silence regions directly (for project load)
+  function setSilenceRegions(regions: SilenceRegion[]): void {
+    silenceRegions.value = regions;
+  }
+
   // Clear cut audio data
   function clearCutAudio(): void {
     cutAudioFiles.value.clear();
@@ -606,6 +617,8 @@ export const useSilenceStore = defineStore('silence', () => {
     mapCutTimeToOriginal,
     mapOriginalToCutTime,
     clear,
+    clearWithoutHistory,
+    setSilenceRegions,
     clearCutAudio,
   };
 });

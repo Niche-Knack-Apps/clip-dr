@@ -23,6 +23,7 @@ import { usePlaybackStore } from '@/stores/playback';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useTracksStore } from '@/stores/tracks';
 import { useRecordingStore } from '@/stores/recording';
+import { useProjectStore } from '@/stores/project';
 import MasterMeter from '@/components/tracks/MasterMeter.vue';
 import { formatTime } from '@/shared/utils';
 import { SUPPORTED_FORMATS, TOOLBAR_ROW_HEIGHT, TOOLBAR_HEIGHT, LOOP_MODES } from '@/shared/constants';
@@ -73,6 +74,7 @@ const exportStore = useExportStore();
 const transcriptionStore = useTranscriptionStore();
 const tracksStore = useTracksStore();
 const recordingStore = useRecordingStore();
+const projectStore = useProjectStore();
 const searchBarRef = ref<InstanceType<typeof SearchBar> | null>(null);
 const showVadSettings = ref(false);
 const showCleaningPanel = ref(false);
@@ -249,6 +251,36 @@ defineExpose({ focusSearch });
 
         <span v-if="fileName" class="text-xs text-gray-400 max-w-[100px] truncate">
           {{ fileName }}
+        </span>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          title="Open Project (Ctrl+O)"
+          @click="projectStore.openProject()"
+        >
+          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
+          </svg>
+          Open
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          :disabled="!hasFile"
+          :loading="projectStore.saving"
+          title="Save Project (Ctrl+S)"
+          @click="projectStore.saveProject()"
+        >
+          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+          </svg>
+          Save
+        </Button>
+
+        <span v-if="projectStore.projectPath" class="text-xs text-gray-400 max-w-[120px] truncate">
+          {{ projectStore.projectName }}<span v-if="projectStore.dirty" class="text-yellow-400">*</span>
         </span>
       </div>
 

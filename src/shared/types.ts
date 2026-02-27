@@ -377,6 +377,34 @@ export interface SilenceRegion {
 }
 
 /** EDL (Edit Decision List) for Rust-side streaming export */
+/** A track as serialized in a .clipdr project file */
+export interface ProjectTrack {
+  id: string;
+  name: string;
+  sourcePath: string;
+  trackStart: number;
+  duration: number;
+  color: string;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+  tag?: string;
+  timemarks?: TimeMark[];
+  volumeEnvelope?: VolumeAutomationPoint[];
+  cachedAudioPath?: string | null;
+}
+
+/** .clipdr project file format */
+export interface ProjectFile {
+  version: 1;
+  name: string;
+  createdAt: string;
+  modifiedAt: string;
+  tracks: ProjectTrack[];
+  selection: { inPoint: number | null; outPoint: number | null };
+  silenceRegions: SilenceRegion[];
+}
+
 export interface ExportEDL {
   tracks: ExportEDLTrack[];
   output_path: string;

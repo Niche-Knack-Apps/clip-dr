@@ -15,6 +15,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import { useHistoryStore } from '@/stores/history';
 import { useRecordingStore } from '@/stores/recording';
 import { useExportStore } from '@/stores/export';
+import { useProjectStore } from '@/stores/project';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useClipping } from '@/composables/useClipping';
 import { useKeyboardShortcuts } from '@/services/keyboard-shortcuts';
@@ -34,7 +35,11 @@ const transcriptionStore = useTranscriptionStore();
 const historyStore = useHistoryStore();
 const recordingStore = useRecordingStore();
 const exportStore = useExportStore();
+const projectStore = useProjectStore();
 const uiStore = useUIStore();
+
+// Set up dirty tracking for project state
+projectStore.setupDirtyTracking();
 
 const focusSearch = inject<() => void>('focusSearch');
 
@@ -332,6 +337,9 @@ useKeyboardShortcuts({
   },
   // Quick Re-Export (Ctrl+Shift+E)
   onQuickExport: () => exportStore.quickReExport(),
+  // Project save/open (Ctrl+S / Ctrl+O)
+  onSaveProject: () => projectStore.saveProject(),
+  onOpenProject: () => projectStore.openProject(),
   // Help modal
   onShowHelp: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   // Loop mode shortcuts (Q/W/E/R/T) — also enables looping if disabled

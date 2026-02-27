@@ -5,7 +5,7 @@ mod audio_clean;
 mod audio_util;
 mod services;
 
-use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, import, playback};
+use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, import, playback, project};
 use std::panic;
 
 fn main() {
@@ -119,6 +119,8 @@ fn main() {
             playback::prepare_audio_cache,
             playback::playback_swap_to_cache,
             export::check_ffmpeg_available,
+            project::save_project,
+            project::load_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
