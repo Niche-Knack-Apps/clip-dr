@@ -95,6 +95,7 @@ fn main() {
             recording::probe_system_audio,
             recording::scan_orphaned_recordings,
             recording::recover_recording,
+            recording::delete_orphaned_recording,
             transcribe::get_bundled_model_info,
             import::import_audio_start,
             import::import_audio_cancel,

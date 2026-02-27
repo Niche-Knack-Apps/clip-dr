@@ -18,6 +18,10 @@ function formatDuration(seconds: number): string {
 async function handleRecover(path: string) {
   await recordingStore.recoverRecording(path);
 }
+
+async function handleDelete(path: string) {
+  await recordingStore.deleteOrphanedRecording(path);
+}
 </script>
 
 <template>
@@ -59,6 +63,12 @@ async function handleRecover(path: string) {
           @click="handleRecover(orphan.path)"
         >
           Recover
+        </button>
+        <button
+          class="px-2 py-0.5 bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded text-[10px] transition-colors shrink-0"
+          @click="handleDelete(orphan.path)"
+        >
+          Delete
         </button>
       </div>
     </div>

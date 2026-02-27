@@ -4247,6 +4247,18 @@ pub fn scan_orphaned_recordings(project_dir: String) -> Result<Vec<OrphanedRecor
     Ok(orphans)
 }
 
+/// Delete an orphaned recording file from disk.
+#[tauri::command]
+pub fn delete_orphaned_recording(path: String) -> Result<(), String> {
+    let file_path = std::path::PathBuf::from(&path);
+    if !file_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+    log::info!("Deleting orphaned recording: {}", path);
+    std::fs::remove_file(&file_path)
+        .map_err(|e| format!("Failed to delete file: {}", e))
+}
+
 /// Recover a recording with a truncated WAV header.
 #[tauri::command]
 pub fn recover_recording(path: String) -> Result<RecordingResult, String> {

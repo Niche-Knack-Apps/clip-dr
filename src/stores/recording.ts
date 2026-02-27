@@ -1064,6 +1064,19 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  async function deleteOrphanedRecording(path: string): Promise<boolean> {
+    try {
+      await invoke('delete_orphaned_recording', { path });
+      orphanedRecordings.value = orphanedRecordings.value.filter(o => o.path !== path);
+      console.log('[Recording] Deleted orphaned recording:', path);
+      return true;
+    } catch (e) {
+      console.error('[Recording] Failed to delete orphaned recording:', e);
+      error.value = e instanceof Error ? e.message : String(e);
+      return false;
+    }
+  }
+
   function dismissOrphans(): void {
     orphanedRecordings.value = [];
   }
@@ -1147,6 +1160,7 @@ export const useRecordingStore = defineStore('recording', () => {
     orphanedRecordings,
     scanOrphanedRecordings,
     recoverRecording,
+    deleteOrphanedRecording,
     dismissOrphans,
   };
 });

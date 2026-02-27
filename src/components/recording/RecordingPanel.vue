@@ -112,6 +112,37 @@ function getHoldProgress(deviceId: string): number {
 }
 
 const anyRecording = computed(() => recordingStore.sessions.some(s => s.active));
+const activeSessionCount = computed(() => recordingStore.sessions.filter(s => s.active).length);
+
+// Hide unused devices toggle
+const hideUnused = ref(false);
+
+const visibleMicDevices = computed(() => {
+  if (!hideUnused.value) return recordingStore.microphoneDevices;
+  return recordingStore.microphoneDevices.filter(d =>
+    recordingStore.isDeviceRecording(d.id) || recordingStore.getDeviceLevel(d.id) > 0
+  );
+});
+
+const visibleLoopbackDevices = computed(() => {
+  if (!hideUnused.value) return recordingStore.loopbackDevices;
+  return recordingStore.loopbackDevices.filter(d =>
+    recordingStore.isDeviceRecording(d.id) || recordingStore.getDeviceLevel(d.id) > 0
+  );
+});
+
+const hiddenCount = computed(() => {
+  if (!hideUnused.value) return 0;
+  return (recordingStore.microphoneDevices.length - visibleMicDevices.value.length)
+    + (recordingStore.loopbackDevices.length - visibleLoopbackDevices.value.length);
+});
+
+async function handleStopAll() {
+  const activeSessions = recordingStore.sessions.filter(s => s.active);
+  for (const session of activeSessions) {
+    await handleStop(session.deviceId);
+  }
+}
 
 // Start previews for all devices on mount
 onMounted(async () => {
@@ -139,7 +170,35 @@ onUnmounted(() => {
 
 <template>
   <div class="p-4 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[320px] max-h-[calc(100vh-6rem)] overflow-y-auto">
-    <h3 class="text-sm font-medium text-gray-200 mb-3">Record Audio</h3>
+    <div class="flex items-center gap-2 mb-3">
+      <h3 class="text-sm font-medium text-gray-200">Record Audio</h3>
+      <div class="ml-auto flex items-center gap-2">
+        <!-- Stop All button (when 2+ sources recording) -->
+        <button
+          v-if="activeSessionCount > 1"
+          class="flex items-center gap-1 px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white text-[10px] font-medium transition-colors"
+          @click="handleStopAll"
+        >
+          <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+          Stop All
+        </button>
+        <!-- Hide unused toggle -->
+        <button
+          class="flex items-center gap-1 text-[10px] transition-colors"
+          :class="hideUnused ? 'text-cyan-400' : 'text-gray-500 hover:text-gray-400'"
+          @click="hideUnused = !hideUnused"
+        >
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path v-if="!hideUnused" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            <path v-if="!hideUnused" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            <path v-if="hideUnused" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21" />
+          </svg>
+          <span v-if="hideUnused && hiddenCount > 0">{{ hiddenCount }} hidden</span>
+          <span v-else-if="hideUnused">Hide unused</span>
+          <span v-else>Hide unused</span>
+        </button>
+      </div>
+    </div>
 
     <!-- Orphaned recording recovery banner -->
     <OrphanRecovery />
@@ -154,7 +213,7 @@ onUnmounted(() => {
       </div>
       <div class="space-y-1">
         <div
-          v-for="device in recordingStore.microphoneDevices"
+          v-for="device in visibleMicDevices"
           :key="device.id"
           :class="[
             'rounded-lg border px-3 py-2 transition-colors',
@@ -252,7 +311,7 @@ onUnmounted(() => {
       </div>
       <div class="space-y-1">
         <div
-          v-for="device in recordingStore.loopbackDevices"
+          v-for="device in visibleLoopbackDevices"
           :key="device.id"
           :class="[
             'rounded-lg border px-3 py-2 transition-colors',
