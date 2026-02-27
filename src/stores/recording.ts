@@ -130,6 +130,10 @@ export const useRecordingStore = defineStore('recording', () => {
   // Session tracking (Phase 4: per-stream architecture, single-session for now)
   const sessions = ref<RecordingSession[]>([]);
 
+  // Multi-source timeline sync: epoch tracks when the first session started
+  const recordingEpoch = ref<number | null>(null);
+  const recordingBasePosition = ref<number | null>(null);
+
   const activeSessions = computed(() =>
     sessions.value.filter(s => s.active)
   );
@@ -548,7 +552,7 @@ export const useRecordingStore = defineStore('recording', () => {
   }
 
   // Create track(s) from recorded audio file(s) using the progressive import pipeline
-  async function createTrackFromRecording(result: RecordingResult): Promise<void> {
+  async function createTrackFromRecording(result: RecordingResult, trackStart?: number): Promise<void> {
     try {
       const allPaths = [result.path, ...(result.extra_segments || [])];
       const segmentCount = allPaths.length;
@@ -562,7 +566,9 @@ export const useRecordingStore = defineStore('recording', () => {
         const trackCountBefore = tracksStore.tracks.length;
 
         // Use the progressive import pipeline (3-phase: metadata, waveform, browser decode)
-        await audioStore.importFile(segPath);
+        // First segment uses computed trackStart; extras increment by segment duration
+        const segTrackStart = (i === 0) ? trackStart : undefined;
+        await audioStore.importFile(segPath, segTrackStart);
 
         // Find the newly created track (last track added)
         if (tracksStore.tracks.length > trackCountBefore) {
@@ -904,6 +910,12 @@ export const useRecordingStore = defineStore('recording', () => {
   async function startDeviceSession(deviceId: string, sessionId: string): Promise<string | null> {
     error.value = null;
     try {
+      // Set recording epoch on first session start (for timeline sync)
+      if (recordingEpoch.value === null) {
+        recordingEpoch.value = Date.now();
+        recordingBasePosition.value = tracksStore.timelineDuration;
+      }
+
       const outputDir = await settingsStore.getProjectFolder();
       const path = await invoke<string>('start_session', {
         sessionId,
@@ -953,16 +965,24 @@ export const useRecordingStore = defineStore('recording', () => {
   /** Stop a single recording session by ID. Other sessions continue. */
   async function stopDeviceSession(sessionId: string): Promise<SessionResult | null> {
     try {
+      // Capture session timing BEFORE it gets removed
+      const session = sessions.value.find(s => s.sessionId === sessionId);
+      const sessionStartTime = session?.startTime ?? Date.now();
+      const epochVal = recordingEpoch.value;
+      const basePos = recordingBasePosition.value;
+
       const result = await invoke<SessionResult>('stop_session', { sessionId });
 
       // Remove from sessions list
       sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
 
-      // If no more active sessions, clear global recording state
+      // If no more active sessions, clear global recording state + epoch
       if (sessions.value.filter(s => s.active).length === 0) {
         isRecording.value = false;
         isLocked.value = false;
         currentLevel.value = 0;
+        recordingEpoch.value = null;
+        recordingBasePosition.value = null;
         if (durationInterval) {
           clearInterval(durationInterval);
           durationInterval = null;
@@ -974,9 +994,15 @@ export const useRecordingStore = defineStore('recording', () => {
       // Brief delay for OS file flush
       await new Promise(r => setTimeout(r, 200));
 
-      // Import the recording as a track
+      // Compute timeline position: base + offset from epoch
+      const offsetSeconds = (epochVal !== null)
+        ? (sessionStartTime - epochVal) / 1000
+        : 0;
+      const trackStart = (basePos ?? tracksStore.timelineDuration) + offsetSeconds;
+
+      // Import the recording as a track at the computed position
       if (result.result.path) {
-        createTrackFromRecording(result.result).catch(e => {
+        createTrackFromRecording(result.result, trackStart).catch(e => {
           console.error('[Recording] Background import failed for session:', sessionId, e);
         });
       }
@@ -1001,8 +1027,11 @@ export const useRecordingStore = defineStore('recording', () => {
 
   // ── Crash recovery ──
   const orphanedRecordings = ref<OrphanedRecording[]>([]);
+  const orphanScanDone = ref(false);
 
   async function scanOrphanedRecordings(): Promise<OrphanedRecording[]> {
+    if (orphanScanDone.value) return orphanedRecordings.value;
+    orphanScanDone.value = true;
     try {
       const projectDir = await settingsStore.getProjectFolder();
       const orphans = await invoke<OrphanedRecording[]>('scan_orphaned_recordings', { projectDir });

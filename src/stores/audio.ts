@@ -139,7 +139,7 @@ export const useAudioStore = defineStore('audio', () => {
   // Playback is enabled as soon as buffer arrives (Phase 3).
   // Transcription only starts after import is fully complete.
   // The loading flag (import button spinner) stays active until fully complete.
-  async function importFile(path: string): Promise<void> {
+  async function importFile(path: string, overrideTrackStart?: number): Promise<void> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Import file');
     loading.value = true;
@@ -169,7 +169,7 @@ export const useAudioStore = defineStore('audio', () => {
       console.log(`[Audio] [${ms()}] Phase 1 complete: metadata probe — ${metadata.format} ${metadata.channels}ch ${metadata.sampleRate}Hz ${metadata.duration.toFixed(1)}s${cacheHit ? ' (PEAK CACHE HIT)' : ''}`);
 
       const fileName = getFileName(path);
-      const trackStart = tracksStore.timelineDuration;
+      const trackStart = overrideTrackStart ?? tracksStore.timelineDuration;
       const newTrack = tracksStore.createImportingTrack(
         fileName,
         metadata,

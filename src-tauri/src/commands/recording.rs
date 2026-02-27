@@ -69,6 +69,8 @@ struct RecordingSession {
     start_offset_us: i64,
     /// Seconds of pre-record buffer audio prepended
     pre_record_seconds: f64,
+    /// Subprocess handle for monitor device capture (when CPAL can't open the device)
+    child: Option<std::process::Child>,
 }
 
 /// Managed state for all recording, monitoring, and preview operations.
@@ -117,6 +119,8 @@ struct PreviewSession {
     stream: Option<StreamHolder>,
     active: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    /// Subprocess handle for monitor device preview (when CPAL can't open the device)
+    child: Option<std::process::Child>,
 }
 unsafe impl Send for PreviewSession {}
 
@@ -893,6 +897,165 @@ fn patch_wav_header_if_needed(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if a CPAL device name corresponds to a PipeWire sink name.
+/// Tokenizes the sink name, extracts meaningful words (skipping "alsa", "output", "pci",
+/// and hex segments), then checks if the CPAL device name contains all meaningful tokens.
+/// Example: sink `alsa_output.pci_0000_00_1f_3.analog_stereo` → tokens `["analog", "stereo"]`
+///          → matches CPAL device `"Monitor of Built-in Audio Analog Stereo"`
+fn matches_monitor_sink(device_name: &str, sink_name: &str) -> bool {
+    let lower_device = device_name.to_lowercase();
+    let skip_words: &[&str] = &["alsa", "output", "input", "pci", "monitor"];
+
+    let tokens: Vec<&str> = sink_name
+        .split(|c: char| c == '.' || c == '_' || c == '-')
+        .filter(|t| {
+            if t.is_empty() || t.len() <= 1 { return false; }
+            if skip_words.contains(&t.to_lowercase().as_str()) { return false; }
+            // Skip hex-like segments (e.g., "0000", "00", "1f", "3")
+            if t.chars().all(|c| c.is_ascii_hexdigit()) { return false; }
+            true
+        })
+        .collect();
+
+    if tokens.is_empty() {
+        return false;
+    }
+
+    tokens.iter().all(|token| lower_device.contains(&token.to_lowercase()))
+}
+
+/// Spawn a subprocess to capture audio from a PipeWire monitor source.
+/// Tries `parec` first, then `pw-record`. Returns the child process with stdout piped.
+#[cfg(target_os = "linux")]
+fn spawn_monitor_capture(device_id: &str, sample_rate: u32, channels: u16) -> Result<std::process::Child, String> {
+    let pa_monitor = if device_id.ends_with(".monitor") {
+        device_id.to_string()
+    } else {
+        format!("{}.monitor", device_id)
+    };
+    // For pw-record --target, strip .monitor suffix to get the sink name
+    let pw_target = device_id.trim_end_matches(".monitor");
+
+    let child = if which_exists("parec") {
+        log::info!("Monitor capture: using parec -d {}", pa_monitor);
+        std::process::Command::new("parec")
+            .args([
+                "-d", &pa_monitor,
+                "--format=float32le",
+                &format!("--rate={}", sample_rate),
+                &format!("--channels={}", channels),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    } else if which_exists("pw-record") {
+        log::info!("Monitor capture: using pw-record --target {}", pw_target);
+        std::process::Command::new("pw-record")
+            .args([
+                "-P", "{ stream.capture.sink = true }",
+                "--target", pw_target,
+                "--format", "f32",
+                "--rate", &sample_rate.to_string(),
+                "--channels", &channels.to_string(),
+                "-",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    } else {
+        return Err("No audio capture tool available (need parec or pw-record)".to_string());
+    };
+
+    child.map_err(|e| format!("Failed to spawn monitor capture: {}", e))
+}
+
+/// Reader thread for subprocess-based monitor preview (level metering only).
+#[cfg(target_os = "linux")]
+fn monitor_preview_reader(stdout: ChildStdout, active: Arc<AtomicBool>, level: Arc<AtomicU32>) {
+    let mut reader = BufReader::with_capacity(8192, stdout);
+    let mut buffer = [0u8; 8192];
+
+    while active.load(Ordering::SeqCst) {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut max_level: f32 = 0.0;
+                for chunk in buffer[..n].chunks_exact(4) {
+                    let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    max_level = max_level.max(s.abs());
+                }
+                level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
+            }
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    log::warn!("Monitor preview reader error: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+    log::info!("Monitor preview reader thread exiting");
+}
+
+/// Reader thread for subprocess-based monitor recording.
+/// Reads f32le from stdout, pushes samples into ring buffer (same as CPAL callback path).
+#[cfg(target_os = "linux")]
+fn monitor_session_reader(
+    stdout: ChildStdout,
+    ring: Arc<RecordingRingBuffer>,
+    active: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+    shared_level: Arc<AtomicU32>,
+) {
+    let mut reader = BufReader::with_capacity(8192, stdout);
+    let mut buffer = [0u8; 8192];
+
+    while active.load(Ordering::SeqCst) {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                let samples: Vec<f32> = buffer[..n]
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+
+                if samples.is_empty() {
+                    continue;
+                }
+
+                // Update level meter
+                let max_level = samples.iter()
+                    .map(|s| s.abs())
+                    .fold(0.0f32, f32::max);
+                let level_val = (max_level * 1000.0) as u32;
+                level.store(level_val, Ordering::SeqCst);
+                shared_level.store(level_val, Ordering::SeqCst);
+
+                // Push into ring buffer (same path as CPAL callback)
+                let wp = ring.write_pos.load(Ordering::Relaxed);
+                let rp = ring.read_pos.load(Ordering::Relaxed);
+                let used = wp.wrapping_sub(rp);
+                if used + samples.len() <= ring.capacity {
+                    for (i, &s) in samples.iter().enumerate() {
+                        let idx = (wp + i) % ring.capacity;
+                        unsafe { *ring.data_ptr.add(idx) = s; }
+                    }
+                    ring.write_pos.store(wp + samples.len(), Ordering::Release);
+                } else {
+                    ring.overrun_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    log::warn!("Monitor session reader error: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+    log::info!("Monitor session reader thread exiting");
+}
+
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
     let host = cpal::default_host();
@@ -988,8 +1151,11 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
                             let monitor_name = format!("{}.monitor", sink_name);
                             let display_name = format!("Monitor of {}", sink_name.replace("alsa_output.", "").replace(".", " "));
 
-                            // Check if we already have this device
-                            if !devices.iter().any(|d| d.id == monitor_name) {
+                            // Check if we already have this device (exact ID match or fuzzy CPAL match)
+                            let already_exists = devices.iter().any(|d| {
+                                d.id == monitor_name || (d.is_loopback && matches_monitor_sink(&d.name, sink_name))
+                            });
+                            if !already_exists {
                                 devices.push(AudioDevice {
                                     id: monitor_name.clone(),
                                     name: display_name,
@@ -1174,7 +1340,10 @@ pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
                             let monitor_name = format!("{}.monitor", sink_name);
                             let display_name = format!("Monitor of {}", sink_name.replace("alsa_output.", "").replace(".", " "));
 
-                            if !devices.iter().any(|d| d.id == monitor_name) {
+                            let already_exists = devices.iter().any(|d| {
+                                d.id == monitor_name || (d.is_loopback && matches_monitor_sink(&d.name, sink_name))
+                            });
+                            if !already_exists {
                                 devices.push(AudioDevice {
                                     id: monitor_name.clone(),
                                     name: display_name,
@@ -1566,6 +1735,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         use_system_buffer: false,
         start_offset_us: 0,
         pre_record_seconds: pre_record_secs,
+        child: None,
     };
 
     if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1934,6 +2104,7 @@ pub async fn start_multi_recording(
             use_system_buffer: false,
             start_offset_us: offset_us,
             pre_record_seconds: 0.0,
+            child: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -2106,141 +2277,271 @@ pub async fn start_session(
         .map_err(|e| format!("Failed to create output directory: {}", e))?;
 
     let host = cpal::default_host();
-    let device = host.input_devices()
+
+    // Three-stage device lookup:
+    // 1. Exact CPAL match by name
+    // 2. Fuzzy CPAL match for monitor devices
+    // 3. Subprocess fallback for monitor devices CPAL can't open
+    let cpal_device = host.input_devices()
         .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-        .find(|d| d.name().ok().as_ref() == Some(&device_id))
-        .ok_or_else(|| format!("Device not found: {}", device_id))?;
+        .find(|d| d.name().ok().as_ref() == Some(&device_id));
 
-    let device_name = device.name().unwrap_or_default();
-    log::info!("Starting session '{}': device '{}'", session_id, device_name);
-
-    let default_config = device
-        .default_input_config()
-        .map_err(|e| format!("Failed to get input config for '{}': {}", device_name, e))?;
-
-    let supported_configs: Vec<_> = device.supported_input_configs()
-        .map_err(|e| format!("Failed to get supported configs: {}", e))?
-        .collect();
-
-    fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
-        let mut score = 0;
-        if cfg.channels() == 2 { score += 100; }
-        else if cfg.channels() == 1 { score += 50; }
-        match cfg.sample_format() {
-            SampleFormat::F32 => score += 50,
-            SampleFormat::I16 => score += 40,
-            SampleFormat::I32 => score += 30,
-            SampleFormat::F64 => score += 25,
-            SampleFormat::U16 => score += 20,
-            _ => {}
+    let cpal_device = if cpal_device.is_some() {
+        cpal_device
+    } else if device_id.ends_with(".monitor") {
+        // Stage 2: fuzzy match for monitor devices
+        let sink = device_id.trim_end_matches(".monitor");
+        let fuzzy = host.input_devices()
+            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
+            .find(|d| {
+                if let Ok(name) = d.name() {
+                    let lower = name.to_lowercase();
+                    (lower.contains("monitor") || lower.contains("loopback"))
+                        && matches_monitor_sink(&name, sink)
+                } else {
+                    false
+                }
+            });
+        if fuzzy.is_some() {
+            log::info!("Session '{}': resolved monitor '{}' via fuzzy CPAL match", session_id, device_id);
         }
-        let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
-        if rate_range.contains(&target_rate) { score += 10; }
-        if rate_range.contains(&44100) { score += 5; }
-        score
-    }
-
-    let target_rate = default_config.sample_rate().0;
-    let best_supported = supported_configs.iter()
-        .max_by_key(|c| config_score(c, target_rate));
-
-    let config = if let Some(best) = best_supported {
-        let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
-        let sample_rate = if rate_range.contains(&target_rate) {
-            target_rate
-        } else if rate_range.contains(&44100) {
-            44100
-        } else {
-            best.max_sample_rate().0.min(48000)
-        };
-        best.clone().with_sample_rate(cpal::SampleRate(sample_rate))
+        fuzzy
     } else {
-        default_config
+        None
     };
-
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels();
-    let sample_format = config.sample_format();
-
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let safe_name: String = device_name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .take(30)
-        .collect();
-    let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
-    let output_path = output_dir_path.join(&filename);
 
     let target_mono = channel_mode.as_deref() == Some("mono");
     let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
     let use_rf64 = lff == "rf64";
 
-    let spec = WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
+    if let Some(device) = cpal_device {
+        // ── CPAL path (stages 1 & 2) ──
+        let device_name = device.name().unwrap_or_default();
+        log::info!("Starting session '{}': device '{}'", session_id, device_name);
 
-    let audio_writer = if use_rf64 {
-        AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
-            .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+        let default_config = device
+            .default_input_config()
+            .map_err(|e| format!("Failed to get input config for '{}': {}", device_name, e))?;
+
+        let supported_configs: Vec<_> = device.supported_input_configs()
+            .map_err(|e| format!("Failed to get supported configs: {}", e))?
+            .collect();
+
+        fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
+            let mut score = 0;
+            if cfg.channels() == 2 { score += 100; }
+            else if cfg.channels() == 1 { score += 50; }
+            match cfg.sample_format() {
+                SampleFormat::F32 => score += 50,
+                SampleFormat::I16 => score += 40,
+                SampleFormat::I32 => score += 30,
+                SampleFormat::F64 => score += 25,
+                SampleFormat::U16 => score += 20,
+                _ => {}
+            }
+            let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
+            if rate_range.contains(&target_rate) { score += 10; }
+            if rate_range.contains(&44100) { score += 5; }
+            score
+        }
+
+        let target_rate = default_config.sample_rate().0;
+        let best_supported = supported_configs.iter()
+            .max_by_key(|c| config_score(c, target_rate));
+
+        let config = if let Some(best) = best_supported {
+            let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
+            let sample_rate = if rate_range.contains(&target_rate) {
+                target_rate
+            } else if rate_range.contains(&44100) {
+                44100
+            } else {
+                best.max_sample_rate().0.min(48000)
+            };
+            best.clone().with_sample_rate(cpal::SampleRate(sample_rate))
+        } else {
+            default_config
+        };
+
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
+        let sample_format = config.sample_format();
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let safe_name: String = device_name.chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .take(30)
+            .collect();
+        let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
+        let output_path = output_dir_path.join(&filename);
+
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let audio_writer = if use_rf64 {
+            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+        } else {
+            let file = File::create(&output_path)
+                .map_err(|e| format!("Failed to create output file: {}", e))?;
+            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
+                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+        };
+
+        let session_active = Arc::new(AtomicBool::new(true));
+        let session_level = Arc::new(AtomicU32::new(0));
+        let session_debug = Arc::new(AtomicUsize::new(0));
+
+        let ring = Arc::new(RecordingRingBuffer::new(
+            sample_rate as usize * channels as usize * 10,
+        ).with_channels(channels));
+
+        let writer_handle = spawn_wav_writer_thread(
+            ring.clone(), audio_writer, channels, target_mono,
+            output_path.clone(), spec, use_rf64,
+        );
+
+        let stream_config: cpal::StreamConfig = config.into();
+        let shared_level = mgr.current_level.clone();
+        let stream = match sample_format {
+            SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+            SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+            SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+            SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+            SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
+            fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
+        };
+
+        stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
+
+        let session = RecordingSession {
+            stream: Some(StreamHolder::new(stream)),
+            ring_buffer: Some(ring),
+            writer_handle: Some(writer_handle),
+            active: session_active,
+            level: session_level,
+            debug_count: session_debug,
+            device_id: device_id.clone(),
+            sample_rate,
+            channels,
+            output_path: output_path.clone(),
+            target_mono,
+            large_file_format: lff,
+            use_system_buffer: false,
+            start_offset_us: 0,
+            pre_record_seconds: 0.0,
+            child: None,
+        };
+
+        if let Ok(mut sessions) = mgr.sessions.lock() {
+            sessions.insert(session_id.clone(), session);
+        }
+
+        log::info!("Session '{}' started: {}", session_id, output_path.display());
+        Ok(output_path.to_string_lossy().to_string())
+    } else if device_id.ends_with(".monitor") {
+        // ── Stage 3: Subprocess fallback for monitor devices ──
+        #[cfg(target_os = "linux")]
+        {
+            let sample_rate: u32 = 48000;
+            let channels: u16 = 2;
+
+            log::info!("Session '{}': using subprocess capture for monitor '{}'", session_id, device_id);
+
+            let mut child = spawn_monitor_capture(&device_id, sample_rate, channels)?;
+            let stdout = child.stdout.take()
+                .ok_or_else(|| "Failed to capture subprocess stdout".to_string())?;
+
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let safe_name: String = device_id.chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .take(30)
+                .collect();
+            let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
+            let output_path = output_dir_path.join(&filename);
+
+            let spec = WavSpec {
+                channels,
+                sample_rate,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+
+            let audio_writer = if use_rf64 {
+                AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+                    .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+            } else {
+                let file = File::create(&output_path)
+                    .map_err(|e| format!("Failed to create output file: {}", e))?;
+                AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
+                    .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+            };
+
+            let session_active = Arc::new(AtomicBool::new(true));
+            let session_level = Arc::new(AtomicU32::new(0));
+            let session_debug = Arc::new(AtomicUsize::new(0));
+
+            let ring = Arc::new(RecordingRingBuffer::new(
+                sample_rate as usize * channels as usize * 10,
+            ).with_channels(channels));
+
+            let writer_handle = spawn_wav_writer_thread(
+                ring.clone(), audio_writer, channels, target_mono,
+                output_path.clone(), spec, use_rf64,
+            );
+
+            // Spawn reader thread: subprocess stdout → ring buffer
+            let shared_level = mgr.current_level.clone();
+            {
+                let ring_clone = ring.clone();
+                let active_clone = session_active.clone();
+                let level_clone = session_level.clone();
+                let shared_clone = shared_level;
+                std::thread::Builder::new()
+                    .name("monitor-session-reader".into())
+                    .spawn(move || {
+                        monitor_session_reader(stdout, ring_clone, active_clone, level_clone, shared_clone);
+                    })
+                    .map_err(|e| format!("Failed to spawn monitor reader thread: {}", e))?;
+            }
+
+            let session = RecordingSession {
+                stream: None,
+                ring_buffer: Some(ring),
+                writer_handle: Some(writer_handle),
+                active: session_active,
+                level: session_level,
+                debug_count: session_debug,
+                device_id: device_id.clone(),
+                sample_rate,
+                channels,
+                output_path: output_path.clone(),
+                target_mono,
+                large_file_format: lff,
+                use_system_buffer: false,
+                start_offset_us: 0,
+                pre_record_seconds: 0.0,
+                child: Some(child),
+            };
+
+            if let Ok(mut sessions) = mgr.sessions.lock() {
+                sessions.insert(session_id.clone(), session);
+            }
+
+            log::info!("Session '{}' started (subprocess): {}", session_id, output_path.display());
+            Ok(output_path.to_string_lossy().to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(format!("Monitor device '{}' not found (subprocess fallback only on Linux)", device_id))
+        }
     } else {
-        let file = File::create(&output_path)
-            .map_err(|e| format!("Failed to create output file: {}", e))?;
-        AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
-            .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
-    };
-
-    let session_active = Arc::new(AtomicBool::new(true));
-    let session_level = Arc::new(AtomicU32::new(0));
-    let session_debug = Arc::new(AtomicUsize::new(0));
-
-    let ring = Arc::new(RecordingRingBuffer::new(
-        sample_rate as usize * channels as usize * 10,
-    ).with_channels(channels));
-
-    let writer_handle = spawn_wav_writer_thread(
-        ring.clone(), audio_writer, channels, target_mono,
-        output_path.clone(), spec, use_rf64,
-    );
-
-    let stream_config: cpal::StreamConfig = config.into();
-    let shared_level = mgr.current_level.clone();
-    let stream = match sample_format {
-        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
-    };
-
-    stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
-
-    let session = RecordingSession {
-        stream: Some(StreamHolder::new(stream)),
-        ring_buffer: Some(ring),
-        writer_handle: Some(writer_handle),
-        active: session_active,
-        level: session_level,
-        debug_count: session_debug,
-        device_id: device_id.clone(),
-        sample_rate,
-        channels,
-        output_path: output_path.clone(),
-        target_mono,
-        large_file_format: lff,
-        use_system_buffer: false,
-        start_offset_us: 0,
-        pre_record_seconds: 0.0,
-    };
-
-    if let Ok(mut sessions) = mgr.sessions.lock() {
-        sessions.insert(session_id.clone(), session);
+        Err(format!("Device not found: {}", device_id))
     }
-
-    log::info!("Session '{}' started: {}", session_id, output_path.display());
-    Ok(output_path.to_string_lossy().to_string())
 }
 
 /// Stop a single recording session by its ID. Other sessions continue running.
@@ -2258,6 +2559,14 @@ pub async fn stop_session(
     // Signal session to stop
     session.active.store(false, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(50));
+
+    // Kill subprocess if this was a monitor capture session
+    if let Some(ref mut child) = session.child {
+        log::info!("Session '{}': killing monitor subprocess", session_id);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    session.child = None;
 
     // Drop the stream
     session.stream = None;
@@ -2374,7 +2683,66 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
             .find(|d| d.name().ok().as_ref() == Some(device_id))
         {
             Some(d) => d,
-            None => { log::warn!("Preview: device not found: {}", device_id); continue; }
+            None => {
+                // Fallback for pw-cli monitor IDs: find a CPAL loopback device matching the sink
+                if device_id.ends_with(".monitor") {
+                    let sink = device_id.trim_end_matches(".monitor");
+                    match host.input_devices()
+                        .map_err(|e| format!("Failed to enumerate devices: {}", e))?
+                        .find(|d| {
+                            if let Ok(name) = d.name() {
+                                let lower = name.to_lowercase();
+                                (lower.contains("monitor") || lower.contains("loopback"))
+                                    && matches_monitor_sink(&name, sink)
+                            } else {
+                                false
+                            }
+                        })
+                    {
+                        Some(d) => {
+                            log::info!("Preview: resolved pw-cli '{}' to CPAL device", device_id);
+                            d
+                        }
+                        None => {
+                            // CPAL can't find the monitor device — use subprocess fallback
+                            #[cfg(target_os = "linux")]
+                            {
+                                log::info!("Preview: CPAL fallback failed for '{}', trying subprocess", device_id);
+                                match spawn_monitor_capture(device_id, 44100, 2) {
+                                    Ok(mut child) => {
+                                        let active = Arc::new(AtomicBool::new(true));
+                                        let level = Arc::new(AtomicU32::new(0));
+                                        if let Some(stdout) = child.stdout.take() {
+                                            let a = active.clone();
+                                            let l = level.clone();
+                                            std::thread::spawn(move || {
+                                                monitor_preview_reader(stdout, a, l);
+                                            });
+                                            if let Ok(mut guard) = mgr.preview_sessions.lock() {
+                                                guard.insert(device_id.clone(), PreviewSession {
+                                                    stream: None,
+                                                    active,
+                                                    level,
+                                                    child: Some(child),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(e) => { log::warn!("Preview: subprocess fallback failed for '{}': {}", device_id, e); }
+                                }
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                log::warn!("Preview: device not found (pw-cli fallback failed): {}", device_id);
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    log::warn!("Preview: device not found: {}", device_id);
+                    continue;
+                }
+            }
         };
 
         let config = match device.default_input_config() {
@@ -2405,6 +2773,7 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
                         stream: Some(StreamHolder::new(s)),
                         active,
                         level,
+                        child: None,
                     });
                 }
             }
@@ -2453,8 +2822,13 @@ pub fn stop_all_previews(mgr: State<'_, RecordingManager>) {
 
 fn stop_all_previews_internal(mgr: &RecordingManager) {
     if let Ok(mut guard) = mgr.preview_sessions.lock() {
-        for (id, session) in guard.drain() {
+        for (id, mut session) in guard.drain() {
             session.active.store(false, Ordering::SeqCst);
+            if let Some(ref mut child) = session.child {
+                log::info!("Preview: killing subprocess for '{}'", id);
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             log::info!("Preview stopped: {}", id);
         }
     }
@@ -3218,6 +3592,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
             use_system_buffer: true,
             start_offset_us: 0,
             pre_record_seconds: 0.0,
+            child: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
