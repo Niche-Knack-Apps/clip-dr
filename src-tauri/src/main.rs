@@ -94,6 +94,7 @@ fn main() {
             recording::start_system_audio_monitoring,
             recording::stop_system_audio_monitoring,
             recording::probe_system_audio,
+            recording::check_system_deps,
             recording::scan_orphaned_recordings,
             recording::recover_recording,
             recording::delete_orphaned_recording,

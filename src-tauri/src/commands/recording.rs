@@ -4512,6 +4512,75 @@ fn read_wav_format(path: &Path) -> Result<(u32, u16), String> {
     Ok((sample_rate, channels))
 }
 
+// ── System dependency check ──
+
+/// Result of a system dependency check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemDepsResult {
+    /// Operating system: "linux", "windows", "macos"
+    pub os: String,
+    /// Missing dependencies that should be installed
+    pub missing: Vec<MissingDep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingDep {
+    /// Library/package name
+    pub name: String,
+    /// What it's needed for
+    pub reason: String,
+    /// Install instructions per distro family
+    pub install_hint: String,
+}
+
+/// Check for required system dependencies and return any that are missing.
+#[tauri::command]
+pub fn check_system_deps() -> SystemDepsResult {
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "unknown"
+    };
+
+    let mut missing = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        // Check for libpulse (required for PulseAudio device enumeration)
+        if !libpulse_available() {
+            missing.push(MissingDep {
+                name: "libpulse".to_string(),
+                reason: "Required for audio device enumeration and recording on Linux".to_string(),
+                install_hint: "Ubuntu/Debian: sudo apt install libpulse0\nFedora: sudo dnf install pulseaudio-libs\nArch: sudo pacman -S libpulse".to_string(),
+            });
+        }
+    }
+
+    if !missing.is_empty() {
+        log::warn!("Missing system dependencies:");
+        for dep in &missing {
+            log::warn!("  {} — {}", dep.name, dep.reason);
+        }
+    }
+
+    SystemDepsResult {
+        os: os.to_string(),
+        missing,
+    }
+}
+
+/// Check if libpulse is usable by attempting to connect.
+#[cfg(target_os = "linux")]
+fn libpulse_available() -> bool {
+    use libpulse_binding::mainloop::standard::Mainloop;
+    // If we can create a mainloop, the shared library is loaded
+    Mainloop::new().is_some()
+}
+
 // ── Tests ──
 
 #[cfg(test)]

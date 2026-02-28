@@ -8,9 +8,22 @@ import { DEFAULT_SETTINGS, DEFAULT_EXPORT_PROFILES } from '@/shared/constants';
 
 const STORAGE_KEY = 'clip-doctor-settings';
 
+export interface MissingDep {
+  name: string;
+  reason: string;
+  install_hint: string;
+}
+
+export interface SystemDepsResult {
+  os: string;
+  missing: MissingDep[];
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
   const ffmpegAvailable = ref(true); // optimistic default
+  const systemDeps = ref<SystemDepsResult | null>(null);
+  const systemDepsWarningDismissed = ref(false);
 
   async function checkFfmpeg(): Promise<void> {
     try {
@@ -18,6 +31,19 @@ export const useSettingsStore = defineStore('settings', () => {
     } catch {
       ffmpegAvailable.value = false;
     }
+  }
+
+  async function checkSystemDeps(): Promise<void> {
+    try {
+      systemDeps.value = await invoke<SystemDepsResult>('check_system_deps');
+    } catch {
+      // If the command doesn't exist (older backend), skip
+      systemDeps.value = null;
+    }
+  }
+
+  function dismissSystemDepsWarning(): void {
+    systemDepsWarningDismissed.value = true;
   }
 
   function loadSettings(): void {
@@ -297,10 +323,14 @@ export const useSettingsStore = defineStore('settings', () => {
 
   loadSettings();
   checkFfmpeg();
+  checkSystemDeps();
 
   return {
     settings,
     ffmpegAvailable,
+    systemDeps,
+    systemDepsWarningDismissed,
+    dismissSystemDepsWarning,
     setLoopByDefault,
     setAutoNavigateAfterWords,
     setWaveformColor,
