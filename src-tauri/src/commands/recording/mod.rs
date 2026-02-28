@@ -4,6 +4,8 @@ pub mod wav_writer;
 pub mod error;
 pub mod backend;
 pub mod cpal_backend;
+#[cfg(target_os = "linux")]
+pub mod pulse_backend;
 
 // Re-export all public types so external callers remain unchanged
 pub use types::*;
@@ -19,6 +21,8 @@ pub use backend::{
     InputHandle, NegotiatedConfig, StreamConfigRequest,
 };
 pub use cpal_backend::CpalBackend;
+#[cfg(target_os = "linux")]
+pub use pulse_backend::PulseBackend;
 use cpal_backend::StreamHolder;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
