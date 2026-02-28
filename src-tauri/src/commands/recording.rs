@@ -281,25 +281,25 @@ pub struct PreviewLevel {
 
 /// SPSC ring buffer: audio callback (producer) writes samples lock-free,
 /// dedicated writer thread (consumer) drains to disk.
-struct RecordingRingBuffer {
+pub struct RecordingRingBuffer {
     #[allow(dead_code)] // Keeps allocation alive; data_ptr points into it
     data: Box<[f32]>,
-    data_ptr: *mut f32,
-    capacity: usize,
+    pub data_ptr: *mut f32,
+    pub capacity: usize,
     /// Total samples written by producer (monotonically increasing)
-    write_pos: AtomicUsize,
+    pub write_pos: AtomicUsize,
     /// Total samples read by consumer (monotonically increasing)
-    read_pos: AtomicUsize,
+    pub read_pos: AtomicUsize,
     /// False = writer thread should drain remaining samples and exit
-    active: AtomicBool,
+    pub active: AtomicBool,
     /// Number of input channels (for bad-channel detection)
-    channels: u16,
+    pub channels: u16,
     /// Bad channel detected: 0=none, 1=ch0 bad, 2=ch1 bad
-    bad_channel: AtomicUsize,
+    pub bad_channel: AtomicUsize,
     /// Number of times the audio callback dropped a batch due to full buffer
-    overrun_count: AtomicUsize,
+    pub overrun_count: AtomicUsize,
     /// High-water mark of ring buffer usage (samples)
-    max_fill_level: AtomicUsize,
+    pub max_fill_level: AtomicUsize,
 }
 
 unsafe impl Send for RecordingRingBuffer {}
@@ -1152,6 +1152,10 @@ pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
                         sample_rates,
                         platform_id: name.clone(),
                         device_source: String::new(),
+                        pulse_name: String::new(),
+                        pulse_index: 0,
+                        hw_bus: String::new(),
+                        serial: String::new(),
                     });
                 }
             }

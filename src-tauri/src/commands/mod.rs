@@ -6,6 +6,8 @@ pub mod vad;
 pub mod clean;
 pub mod metadata;
 pub mod recording;
+#[cfg(target_os = "linux")]
+pub mod pulse_devices;
 pub mod import;
 pub mod playback;
 pub mod project;
