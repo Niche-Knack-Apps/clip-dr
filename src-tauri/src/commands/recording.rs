@@ -880,21 +880,30 @@ fn monitor_session_reader(
 
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
+    log::info!("[DeviceList] list_audio_devices() called");
+
     // On Linux, try PulseAudio API first (works reliably on PipeWire via pw-pulse)
     #[cfg(target_os = "linux")]
     {
+        log::debug!("[DeviceList] Linux detected, trying PulseAudio enumeration first...");
         match super::pulse_devices::enumerate_pulse_sources() {
             Ok(devices) if !devices.is_empty() => {
-                log::info!("Found {} devices via PulseAudio API", devices.len());
+                log::info!("[DeviceList] PulseAudio returned {} input devices — using Pulse path", devices.len());
+                for (i, d) in devices.iter().enumerate() {
+                    log::debug!("[DeviceList]   [{}] id='{}' name='{}' type={} source={} default={} loopback={} ch={} rates={:?}",
+                        i, d.id, d.name, d.device_type, d.device_source, d.is_default, d.is_loopback, d.channels, d.sample_rates);
+                }
                 return Ok(devices);
             }
-            Ok(_) => log::warn!("Pulse returned 0 devices, falling back to cpal"),
-            Err(e) => log::warn!("Pulse enumeration failed: {}, falling back to cpal", e),
+            Ok(_) => log::warn!("[DeviceList] Pulse returned 0 devices, falling back to cpal"),
+            Err(e) => log::warn!("[DeviceList] Pulse enumeration failed: '{}', falling back to cpal", e),
         }
     }
 
     // cpal path (fallback on Linux, primary on Windows/macOS)
+    log::debug!("[DeviceList] Using cpal device enumeration");
     let host = cpal::default_host();
+    log::debug!("[DeviceList] cpal host: {:?}", host.id());
     let mut devices = Vec::new();
 
     // Get default input device name for comparison
@@ -904,7 +913,10 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
 
     // List input devices from cpal
     if let Ok(input_devices) = host.input_devices() {
+        let mut cpal_total = 0u32;
+        let mut cpal_skipped = 0u32;
         for device in input_devices {
+            cpal_total += 1;
             if let Ok(name) = device.name() {
                 // Skip problematic ALSA devices that cause issues
                 let name_lower = name.to_lowercase();
@@ -914,14 +926,19 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
                     || name_lower.contains("spdif")
                     || name == "null"
                 {
+                    log::debug!("[DeviceList] cpal: Skipping '{}' (filtered name)", name);
+                    cpal_skipped += 1;
                     continue;
                 }
 
                 // Try to verify the device can actually be opened for input
                 let has_input_config = device.default_input_config().is_ok();
                 if !has_input_config {
+                    log::debug!("[DeviceList] cpal: Skipping '{}' (no valid input config)", name);
+                    cpal_skipped += 1;
                     continue;
                 }
+                log::debug!("[DeviceList] cpal: Accepting '{}' (has valid input config)", name);
 
                 let is_default = default_input_name.as_ref() == Some(&name);
                 let is_loopback = name_lower.contains("monitor")
@@ -971,6 +988,10 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
                 });
             }
         }
+        log::info!("[DeviceList] cpal: enumerated {} devices total, {} skipped, {} accepted",
+            cpal_total, cpal_skipped, cpal_total - cpal_skipped);
+    } else {
+        log::error!("[DeviceList] cpal: host.input_devices() returned error");
     }
 
     // On Linux, try to get PipeWire/PulseAudio monitor devices for system audio capture
@@ -1022,9 +1043,13 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
         }
     }
 
-    log::info!("Found {} audio devices", devices.len());
-    for d in &devices {
-        log::info!("  Device: {} (loopback: {})", d.name, d.is_loopback);
+    log::info!("[DeviceList] Final result: {} devices via cpal fallback", devices.len());
+    for (i, d) in devices.iter().enumerate() {
+        log::debug!("[DeviceList]   [{}] id='{}' name='{}' type={} default={} loopback={} ch={} rates={:?}",
+            i, d.id, d.name, d.device_type, d.is_default, d.is_loopback, d.channels, d.sample_rates);
+    }
+    if devices.is_empty() {
+        log::error!("[DeviceList] WARNING: Returning 0 devices! No devices found via any method.");
     }
 
     Ok(devices)
@@ -1034,27 +1059,41 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
 /// Returns a unified list with is_input/is_output flags.
 #[tauri::command]
 pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
+    log::info!("[DeviceListAll] list_all_audio_devices() called");
+
     // On Linux, try PulseAudio API first — sources + sinks merged
     #[cfg(target_os = "linux")]
     {
+        log::debug!("[DeviceListAll] Linux detected, trying PulseAudio sources + sinks...");
         let sources = super::pulse_devices::enumerate_pulse_sources();
         let sinks = super::pulse_devices::enumerate_pulse_sinks();
+        match (&sources, &sinks) {
+            (Ok(src), Ok(snk)) => {
+                log::debug!("[DeviceListAll] Pulse returned {} sources, {} sinks", src.len(), snk.len());
+            }
+            (Err(e), _) => log::warn!("[DeviceListAll] Pulse sources failed: {}", e),
+            (_, Err(e)) => log::warn!("[DeviceListAll] Pulse sinks failed: {}", e),
+        }
         if let (Ok(mut src_list), Ok(sink_list)) = (sources, sinks) {
             if !src_list.is_empty() || !sink_list.is_empty() {
                 // Merge sinks: if a source already has the same base name, mark it bidirectional
+                let pre_merge = src_list.len();
                 for sink in sink_list {
                     let base = sink.id.trim_end_matches(".monitor");
                     if let Some(existing) = src_list.iter_mut().find(|d| d.id == base || d.id == sink.id) {
+                        log::debug!("[DeviceListAll] Merging sink '{}' into existing source '{}'", sink.id, existing.id);
                         existing.is_output = true;
                     } else {
+                        log::debug!("[DeviceListAll] Adding sink-only device '{}'", sink.id);
                         src_list.push(sink);
                     }
                 }
-                log::info!("Found {} total devices via PulseAudio API", src_list.len());
+                log::info!("[DeviceListAll] PulseAudio: {} sources + sinks merged → {} total devices (was {} before sink merge)",
+                    src_list.len(), src_list.len(), pre_merge);
                 return Ok(src_list);
             }
         }
-        log::warn!("Pulse enumeration returned no devices, falling back to cpal");
+        log::warn!("[DeviceListAll] Pulse enumeration returned no devices, falling back to cpal");
     }
 
     // cpal path (fallback on Linux, primary on Windows/macOS)
@@ -1336,9 +1375,11 @@ pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingMan
     // On Linux, try Pulse capture for Pulse-enumerated devices
     #[cfg(target_os = "linux")]
     if super::pulse_devices::is_pulse_source(&device_id) {
+        log::debug!("[Preview] start_device_preview: Pulse source '{}', opening capture...", device_id);
         let active = mgr.preview_active.clone();
         let level = mgr.preview_level.clone();
         let (simple, spec) = super::pulse_devices::open_pulse_capture(&device_id, 48000, 2)?;
+        log::debug!("[Preview] Pulse capture opened for preview: format={:?} rate={} ch={}", spec.format, spec.rate, spec.channels);
         let handle = std::thread::Builder::new()
             .name("pulse-preview".into())
             .spawn(move || {
@@ -1348,7 +1389,7 @@ pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingMan
         // Store handle — we don't have a dedicated field for single preview pulse handle,
         // but the preview_active flag controls shutdown. The thread handle is fire-and-forget.
         drop(handle);
-        log::info!("Device preview started (Pulse): {}", device_id);
+        log::info!("[Preview] Device preview started (Pulse): {}", device_id);
         return Ok(());
     }
 
@@ -1449,7 +1490,9 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     #[cfg(target_os = "linux")]
     if device_id.as_ref().map_or(false, |id| super::pulse_devices::is_pulse_source(id)) {
         let device_id_str = device_id.as_ref().unwrap();
+        log::info!("[Recording] start_recording: Pulse source detected, device='{}'", device_id_str);
         let (simple, spec) = super::pulse_devices::open_pulse_capture(device_id_str, 48000, 2)?;
+        log::debug!("[Recording] Pulse capture opened: format={:?} rate={} ch={}", spec.format, spec.rate, spec.channels);
         let sample_rate = spec.rate;
         let channels = spec.channels as u16;
 
@@ -2289,11 +2332,13 @@ pub async fn start_session(
     // On Linux, use Pulse capture for Pulse-enumerated devices
     #[cfg(target_os = "linux")]
     if super::pulse_devices::is_pulse_source(&device_id) {
+        log::info!("[Session] start_session '{}': Pulse source detected, device='{}'", session_id, device_id);
         let (simple, spec) = super::pulse_devices::open_pulse_capture(
             &device_id,
             48000, // will be overridden by Pulse negotiation
             2,
         )?;
+        log::debug!("[Session] Pulse capture opened for '{}': format={:?} rate={} ch={}", session_id, spec.format, spec.rate, spec.channels);
         let sample_rate = spec.rate;
         let channels = spec.channels as u16;
         let use_rf64 = lff_early == "rf64";
@@ -2792,10 +2837,13 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
         // On Linux, use Pulse capture for Pulse-enumerated devices
         #[cfg(target_os = "linux")]
         if super::pulse_devices::is_pulse_source(device_id) {
+            log::debug!("[PreviewMulti] Pulse source '{}', opening capture for preview...", device_id);
             let active = Arc::new(AtomicBool::new(true));
             let level = Arc::new(AtomicU32::new(0));
             match super::pulse_devices::open_pulse_capture(device_id, 48000, 2) {
                 Ok((simple, spec)) => {
+                    log::debug!("[PreviewMulti] Pulse preview opened for '{}': format={:?} rate={} ch={}",
+                        device_id, spec.format, spec.rate, spec.channels);
                     let a = active.clone();
                     let l = level.clone();
                     let handle = std::thread::Builder::new()
@@ -2813,10 +2861,13 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
                                 pulse_capture: Some(h),
                             });
                         }
+                        log::debug!("[PreviewMulti] Preview session stored for '{}'", device_id);
+                    } else {
+                        log::error!("[PreviewMulti] Failed to spawn preview thread for '{}'", device_id);
                     }
                 }
                 Err(e) => {
-                    log::warn!("Preview: Pulse capture failed for '{}': {}", device_id, e);
+                    log::warn!("[PreviewMulti] Pulse capture failed for '{}': {}", device_id, e);
                 }
             }
             continue;
@@ -4546,25 +4597,52 @@ pub fn check_system_deps() -> SystemDepsResult {
         "unknown"
     };
 
+    log::info!("[SysDeps] check_system_deps() called, os='{}'", os);
+
     let mut missing = Vec::new();
 
     #[cfg(target_os = "linux")]
     {
         // Check for libpulse (required for PulseAudio device enumeration)
-        if !libpulse_available() {
+        log::debug!("[SysDeps] Checking libpulse availability...");
+        let pulse_ok = libpulse_available();
+        log::info!("[SysDeps] libpulse available: {}", pulse_ok);
+        if !pulse_ok {
             missing.push(MissingDep {
                 name: "libpulse".to_string(),
                 reason: "Required for audio device enumeration and recording on Linux".to_string(),
                 install_hint: "Ubuntu/Debian: sudo apt install libpulse0\nFedora: sudo dnf install pulseaudio-libs\nArch: sudo pacman -S libpulse".to_string(),
             });
         }
+
+        // Log additional system info for diagnostics
+        if let Ok(output) = std::process::Command::new("pactl").arg("info").output() {
+            let info = String::from_utf8_lossy(&output.stdout);
+            for line in info.lines() {
+                if line.starts_with("Server Name:") || line.starts_with("Server Version:") || line.starts_with("Default Source:") || line.starts_with("Default Sink:") {
+                    log::debug!("[SysDeps] pactl: {}", line.trim());
+                }
+            }
+        } else {
+            log::debug!("[SysDeps] pactl not available (this is OK if using PipeWire without pactl)");
+        }
+
+        // Check PipeWire
+        if let Ok(output) = std::process::Command::new("pw-cli").arg("--version").output() {
+            let version = String::from_utf8_lossy(&output.stdout);
+            log::debug!("[SysDeps] PipeWire: {}", version.trim());
+        } else {
+            log::debug!("[SysDeps] pw-cli not available");
+        }
     }
 
     if !missing.is_empty() {
-        log::warn!("Missing system dependencies:");
+        log::warn!("[SysDeps] Missing {} system dependencies:", missing.len());
         for dep in &missing {
-            log::warn!("  {} — {}", dep.name, dep.reason);
+            log::warn!("[SysDeps]   {} — {}", dep.name, dep.reason);
         }
+    } else {
+        log::info!("[SysDeps] All system dependencies satisfied");
     }
 
     SystemDepsResult {
@@ -4573,12 +4651,14 @@ pub fn check_system_deps() -> SystemDepsResult {
     }
 }
 
-/// Check if libpulse is usable by attempting to connect.
+/// Check if libpulse is usable by attempting to create a mainloop.
 #[cfg(target_os = "linux")]
 fn libpulse_available() -> bool {
     use libpulse_binding::mainloop::standard::Mainloop;
     // If we can create a mainloop, the shared library is loaded
-    Mainloop::new().is_some()
+    let result = Mainloop::new().is_some();
+    log::debug!("[SysDeps] libpulse_available(): Mainloop::new() = {}", result);
+    result
 }
 
 // ── Tests ──
