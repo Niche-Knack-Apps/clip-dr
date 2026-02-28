@@ -101,9 +101,8 @@ pub struct RecordingManager {
     pub(super) monitoring_active: Arc<AtomicBool>,
 
     // ── Preview state (not per-session) ──
-    preview_stream: Mutex<Option<StreamHolder>>,
-    preview_active: Arc<AtomicBool>,
-    preview_level: Arc<AtomicU32>,
+    preview_handle: Mutex<Option<Box<dyn InputHandle>>>,
+    pub(super) preview_level: Arc<AtomicU32>,
 
     // ── Multi-device preview (concurrent VU meters) ──
     preview_sessions: Mutex<HashMap<String, PreviewSession>>,
@@ -133,15 +132,9 @@ unsafe impl Send for RecordingSession {}
 
 /// A preview session for live VU metering (no recording).
 struct PreviewSession {
-    stream: Option<StreamHolder>,
-    active: Arc<AtomicBool>,
+    handle: Box<dyn InputHandle>,
     level: Arc<AtomicU32>,
-    /// Subprocess handle for monitor device preview (when CPAL can't open the device)
-    child: Option<std::process::Child>,
-    /// Pulse preview thread handle (Linux only)
-    pulse_capture: Option<JoinHandle<()>>,
 }
-unsafe impl Send for PreviewSession {}
 
 impl RecordingManager {
     pub fn new() -> Self {
@@ -151,8 +144,7 @@ impl RecordingManager {
             monitor_stream: Mutex::new(None),
             monitoring_active: Arc::new(AtomicBool::new(false)),
             pre_record_buffer: Mutex::new(None),
-            preview_stream: Mutex::new(None),
-            preview_active: Arc::new(AtomicBool::new(false)),
+            preview_handle: Mutex::new(None),
             preview_level: Arc::new(AtomicU32::new(0)),
             preview_sessions: Mutex::new(HashMap::new()),
             current_level: Arc::new(AtomicU32::new(0)),
@@ -690,63 +682,34 @@ pub fn get_device_capabilities(device_id: String) -> Result<DeviceCapabilities, 
 
 /// Start a preview stream on a specific device (for inline VU meter in device picker).
 /// Only one preview stream can be active at a time.
+/// Uses the AudioBackend trait — no inline #[cfg] branching.
 #[tauri::command]
 pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingManager>) -> Result<(), String> {
     // Stop any existing preview
     stop_device_preview_internal(&mgr);
     std::thread::sleep(Duration::from_millis(50));
 
-    mgr.preview_active.store(true, Ordering::SeqCst);
     mgr.preview_level.store(0, Ordering::SeqCst);
 
-    // On Linux, try Pulse capture for Pulse-enumerated devices
-    #[cfg(target_os = "linux")]
-    if super::pulse_devices::is_pulse_source(&device_id) {
-        log::debug!("[Preview] start_device_preview: Pulse source '{}', opening capture...", device_id);
-        let active = mgr.preview_active.clone();
-        let level = mgr.preview_level.clone();
-        let (simple, spec) = super::pulse_devices::open_pulse_capture(&device_id, 48000, 2)?;
-        log::debug!("[Preview] Pulse capture opened for preview: format={:?} rate={} ch={}", spec.format, spec.rate, spec.channels);
-        let handle = std::thread::Builder::new()
-            .name("pulse-preview".into())
-            .spawn(move || {
-                super::pulse_devices::pulse_preview_thread(simple, spec, active, level);
-            })
-            .map_err(|e| format!("Failed to spawn pulse preview thread: {}", e))?;
-        // Store handle — we don't have a dedicated field for single preview pulse handle,
-        // but the preview_active flag controls shutdown. The thread handle is fire-and-forget.
-        drop(handle);
-        log::info!("[Preview] Device preview started (Pulse): {}", device_id);
-        return Ok(());
-    }
+    let key = DeviceKey {
+        backend: mgr.registry.kind(),
+        opaque_id: device_id.clone(),
+    };
 
-    let host = cpal::default_host();
-
-    let device = host.input_devices()
-        .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-        .find(|d| d.name().ok().as_ref() == Some(&device_id))
-        .ok_or_else(|| format!("Device not found: {}", device_id))?;
-
-    let config = device.default_input_config()
-        .map_err(|e| format!("Failed to get input config: {}", e))?;
-
-    let active = mgr.preview_active.clone();
     let level = mgr.preview_level.clone();
+    let mut handle = mgr.registry.backend()
+        .open_preview(&key, level)
+        .map_err(|e| format!("Failed to open preview: {}", e))?;
 
-    let sample_format = config.sample_format();
-    let stream = cpal_backend::build_preview_stream_dispatch(&device, &config.into(), sample_format, active, level)?;
+    handle.start().map_err(|e| format!("Failed to start preview: {}", e))?;
 
-    stream.play().map_err(|e| format!("Failed to start preview stream: {}", e))?;
-
-    if let Ok(mut guard) = mgr.preview_stream.lock() {
-        *guard = Some(StreamHolder::new(stream));
+    if let Ok(mut guard) = mgr.preview_handle.lock() {
+        *guard = Some(handle);
     }
 
-    log::info!("Device preview started: {}", device_id);
+    log::info!("Device preview started ({:?}): {}", mgr.registry.kind(), device_id);
     Ok(())
 }
-
-// build_preview_stream moved to cpal_backend.rs
 
 /// Get the current preview level (0.0 - 1.0)
 #[tauri::command]
@@ -762,9 +725,10 @@ pub fn stop_device_preview(mgr: State<'_, RecordingManager>) {
 }
 
 fn stop_device_preview_internal(mgr: &RecordingManager) {
-    mgr.preview_active.store(false, Ordering::SeqCst);
-    if let Ok(mut guard) = mgr.preview_stream.lock() {
-        *guard = None;
+    if let Ok(mut guard) = mgr.preview_handle.lock() {
+        if let Some(mut handle) = guard.take() {
+            let _ = handle.stop();
+        }
     }
     mgr.preview_level.store(0, Ordering::SeqCst);
 }
@@ -1447,8 +1411,8 @@ pub async fn start_session(
 
     // Stop preview for this device (can't preview and record simultaneously)
     if let Ok(mut previews) = mgr.preview_sessions.lock() {
-        if let Some(preview) = previews.remove(&device_id) {
-            preview.active.store(false, Ordering::SeqCst);
+        if let Some(mut preview) = previews.remove(&device_id) {
+            let _ = preview.handle.stop();
         }
     }
 
@@ -1908,12 +1872,13 @@ pub async fn stop_session(
 
 /// Start preview streams for multiple devices simultaneously (for VU meters).
 /// Skips devices that are currently recording.
+/// Uses the AudioBackend trait — no inline #[cfg] branching.
 #[tauri::command]
 pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, RecordingManager>) -> Result<(), String> {
     stop_all_previews_internal(&mgr);
     std::thread::sleep(Duration::from_millis(50));
 
-    let host = cpal::default_host();
+    let backend_kind = mgr.registry.kind();
 
     for device_id in &device_ids {
         // Skip devices that are already recording
@@ -1923,146 +1888,31 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
             }
         }
 
-        // On Linux, use Pulse capture for Pulse-enumerated devices
-        #[cfg(target_os = "linux")]
-        if super::pulse_devices::is_pulse_source(device_id) {
-            log::debug!("[PreviewMulti] Pulse source '{}', opening capture for preview...", device_id);
-            let active = Arc::new(AtomicBool::new(true));
-            let level = Arc::new(AtomicU32::new(0));
-            match super::pulse_devices::open_pulse_capture(device_id, 48000, 2) {
-                Ok((simple, spec)) => {
-                    log::debug!("[PreviewMulti] Pulse preview opened for '{}': format={:?} rate={} ch={}",
-                        device_id, spec.format, spec.rate, spec.channels);
-                    let a = active.clone();
-                    let l = level.clone();
-                    let handle = std::thread::Builder::new()
-                        .name(format!("pulse-preview-{}", device_id))
-                        .spawn(move || {
-                            super::pulse_devices::pulse_preview_thread(simple, spec, a, l);
-                        });
-                    if let Ok(h) = handle {
-                        if let Ok(mut guard) = mgr.preview_sessions.lock() {
-                            guard.insert(device_id.clone(), PreviewSession {
-                                stream: None,
-                                active,
-                                level,
-                                child: None,
-                                pulse_capture: Some(h),
-                            });
-                        }
-                        log::debug!("[PreviewMulti] Preview session stored for '{}'", device_id);
-                    } else {
-                        log::error!("[PreviewMulti] Failed to spawn preview thread for '{}'", device_id);
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[PreviewMulti] Pulse capture failed for '{}': {}", device_id, e);
-                }
-            }
-            continue;
-        }
-
-        let device = match host.input_devices()
-            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-            .find(|d| d.name().ok().as_ref() == Some(device_id))
-        {
-            Some(d) => d,
-            None => {
-                // Fallback for pw-cli monitor IDs: find a CPAL loopback device matching the sink
-                if device_id.ends_with(".monitor") {
-                    let sink = device_id.trim_end_matches(".monitor");
-                    match host.input_devices()
-                        .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-                        .find(|d| {
-                            if let Ok(name) = d.name() {
-                                let lower = name.to_lowercase();
-                                (lower.contains("monitor") || lower.contains("loopback"))
-                                    && matches_monitor_sink(&name, sink)
-                            } else {
-                                false
-                            }
-                        })
-                    {
-                        Some(d) => {
-                            log::info!("Preview: resolved pw-cli '{}' to CPAL device", device_id);
-                            d
-                        }
-                        None => {
-                            // CPAL can't find the monitor device — use subprocess fallback
-                            #[cfg(target_os = "linux")]
-                            {
-                                log::info!("Preview: CPAL fallback failed for '{}', trying subprocess", device_id);
-                                match spawn_monitor_capture(device_id, 44100, 2) {
-                                    Ok(mut child) => {
-                                        let active = Arc::new(AtomicBool::new(true));
-                                        let level = Arc::new(AtomicU32::new(0));
-                                        if let Some(stdout) = child.stdout.take() {
-                                            let a = active.clone();
-                                            let l = level.clone();
-                                            std::thread::spawn(move || {
-                                                monitor_preview_reader(stdout, a, l);
-                                            });
-                                            if let Ok(mut guard) = mgr.preview_sessions.lock() {
-                                                guard.insert(device_id.clone(), PreviewSession {
-                                                    stream: None,
-                                                    active,
-                                                    level,
-                                                    child: Some(child),
-                                                    pulse_capture: None,
-                                                });
-                                            }
-                                        }
-                                    }
-                                    Err(e) => { log::warn!("Preview: subprocess fallback failed for '{}': {}", device_id, e); }
-                                }
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            {
-                                log::warn!("Preview: device not found (pw-cli fallback failed): {}", device_id);
-                            }
-                            continue;
-                        }
-                    }
-                } else {
-                    log::warn!("Preview: device not found: {}", device_id);
-                    continue;
-                }
-            }
+        let key = DeviceKey {
+            backend: backend_kind,
+            opaque_id: device_id.clone(),
         };
-
-        let config = match device.default_input_config() {
-            Ok(c) => c,
-            Err(e) => { log::warn!("Preview: config failed for '{}': {}", device_id, e); continue; }
-        };
-
-        let active = Arc::new(AtomicBool::new(true));
         let level = Arc::new(AtomicU32::new(0));
 
-        let sample_format = config.sample_format();
-        let stream_result = cpal_backend::build_preview_stream_dispatch(&device, &config.into(), sample_format, active.clone(), level.clone());
-
-        match stream_result {
-            Ok(s) => {
-                if let Err(e) = s.play() {
+        match mgr.registry.backend().open_preview(&key, level.clone()) {
+            Ok(mut handle) => {
+                if let Err(e) = handle.start() {
                     log::warn!("Preview: failed to start for '{}': {}", device_id, e);
                     continue;
                 }
                 if let Ok(mut guard) = mgr.preview_sessions.lock() {
-                    guard.insert(device_id.clone(), PreviewSession {
-                        stream: Some(StreamHolder::new(s)),
-                        active,
-                        level,
-                        child: None,
-                        pulse_capture: None,
-                    });
+                    guard.insert(device_id.clone(), PreviewSession { handle, level });
                 }
+                log::debug!("Preview started ({:?}): {}", backend_kind, device_id);
             }
-            Err(e) => { log::warn!("Preview: build failed for '{}': {}", device_id, e); continue; }
+            Err(e) => {
+                log::warn!("Preview: open failed for '{}': {}", device_id, e);
+            }
         }
     }
 
     let count = mgr.preview_sessions.lock().map(|g| g.len()).unwrap_or(0);
-    log::info!("Started {} device previews", count);
+    log::info!("Started {} device previews ({:?} backend)", count, backend_kind);
     Ok(())
 }
 
@@ -2072,7 +1922,7 @@ pub fn get_preview_levels(mgr: State<'_, RecordingManager>) -> Vec<PreviewLevel>
     let mut levels = Vec::new();
     if let Ok(guard) = mgr.preview_sessions.lock() {
         for (device_id, session) in guard.iter() {
-            if session.active.load(Ordering::SeqCst) {
+            if session.handle.is_running() {
                 levels.push(PreviewLevel {
                     device_id: device_id.clone(),
                     level: session.level.load(Ordering::SeqCst) as f32 / 1000.0,
@@ -2103,15 +1953,7 @@ pub fn stop_all_previews(mgr: State<'_, RecordingManager>) {
 fn stop_all_previews_internal(mgr: &RecordingManager) {
     if let Ok(mut guard) = mgr.preview_sessions.lock() {
         for (id, mut session) in guard.drain() {
-            session.active.store(false, Ordering::SeqCst);
-            if let Some(ref mut child) = session.child {
-                log::info!("Preview: killing subprocess for '{}'", id);
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            if let Some(handle) = session.pulse_capture.take() {
-                let _ = handle.join();
-            }
+            let _ = session.handle.stop();
             log::info!("Preview stopped: {}", id);
         }
     }
