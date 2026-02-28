@@ -24,6 +24,16 @@ export interface AudioDevice {
   sample_rates: number[];
   /** Platform-specific identifier */
   platform_id: string;
+  /** Device source classification: "hardware", "virtual", "monitor" */
+  device_source: string;
+  /** Pulse source/sink name (Linux) */
+  pulse_name: string;
+  /** Pulse source/sink index (Linux) */
+  pulse_index: number;
+  /** Hardware bus: "usb", "pci", "bluetooth", "" */
+  hw_bus: string;
+  /** Device serial for stable re-identification */
+  serial: string;
 }
 
 export interface DeviceCapabilities {

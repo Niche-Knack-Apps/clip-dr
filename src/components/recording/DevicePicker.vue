@@ -121,6 +121,16 @@ function formatChannels(ch: number): string {
           </div>
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-1.5">
+              <span
+                v-if="device.device_source === 'hardware'"
+                class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"
+                title="Hardware device"
+              />
+              <span
+                v-else-if="device.device_source === 'virtual'"
+                class="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"
+                title="Virtual device"
+              />
               <span class="text-xs text-gray-200 truncate">{{ device.name }}</span>
               <span v-if="device.is_default" class="text-[9px] text-cyan-500/70 shrink-0">default</span>
             </div>
