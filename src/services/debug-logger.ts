@@ -202,7 +202,7 @@ export class DebugLogger {
     try {
       const logs = await this.getLogs({ limit: this.config.maxEntries });
       const content = this._formatLogsForExport(logs);
-      const filename = `${this.config.appName.toLowerCase().replace(/\s+/g, '-')}-logs-${this._formatDate()}.log`;
+      const filename = `${this.config.appName.toLowerCase().replace(/[.\s]+/g, '-').replace(/-+$/, '')}-logs-${this._formatDate()}.log`;
 
       if (this.isTauri) {
         // Use Tauri's file dialog and fs API
