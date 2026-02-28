@@ -17,7 +17,7 @@ pub use wav_writer::{
 };
 pub use error::AudioError;
 pub use backend::{
-    AudioBackend, AudioSink, BackendKind, DeviceKey,
+    AudioBackend, AudioSink, BackendKind, DeviceKey, DeviceRegistry,
     InputHandle, NegotiatedConfig, StreamConfigRequest,
 };
 pub use cpal_backend::CpalBackend;
@@ -79,6 +79,9 @@ struct RecordingSession {
 /// Managed state for all recording, monitoring, and preview operations.
 /// Holds Arc-wrapped atomics so audio threads can access them without statics.
 pub struct RecordingManager {
+    /// The chosen audio backend (Pulse or cpal), selected once at startup.
+    pub registry: DeviceRegistry,
+
     /// Active recording sessions keyed by session ID ("default" for single-session)
     sessions: Mutex<HashMap<String, RecordingSession>>,
 
@@ -132,6 +135,7 @@ unsafe impl Send for PreviewSession {}
 impl RecordingManager {
     pub fn new() -> Self {
         Self {
+            registry: DeviceRegistry::new(),
             sessions: Mutex::new(HashMap::new()),
             monitor_stream: Mutex::new(None),
             monitoring_active: Arc::new(AtomicBool::new(false)),

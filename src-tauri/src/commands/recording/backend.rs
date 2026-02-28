@@ -1,11 +1,15 @@
 use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use super::error::AudioError;
 use super::ring_buffer::RecordingRingBuffer;
 use super::types::AudioDevice;
+
+#[cfg(target_os = "linux")]
+use super::pulse_backend::PulseBackend;
+use super::cpal_backend::CpalBackend;
 
 // ── Backend kind & stable device identity ──
 
@@ -103,4 +107,71 @@ pub trait InputHandle: Send {
 
     /// Whether capture is currently active.
     fn is_running(&self) -> bool;
+}
+
+// ── DeviceRegistry ──
+
+/// Holds the chosen audio backend (selected once at startup) and a cached
+/// device list.  On Linux, defaults to PulseBackend; falls back to CpalBackend
+/// if Pulse init fails.  On other platforms, uses CpalBackend directly.
+pub struct DeviceRegistry {
+    backend: Arc<dyn AudioBackend>,
+    devices: Mutex<Vec<AudioDevice>>,
+}
+
+impl DeviceRegistry {
+    /// Create a new registry, selecting the best available backend.
+    pub fn new() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            match PulseBackend::try_new() {
+                Ok(pulse) => {
+                    log::info!("DeviceRegistry: using PulseBackend");
+                    return Self {
+                        backend: Arc::new(pulse),
+                        devices: Mutex::new(Vec::new()),
+                    };
+                }
+                Err(e) => {
+                    log::warn!(
+                        "DeviceRegistry: PulseBackend unavailable ({}), falling back to cpal",
+                        e
+                    );
+                }
+            }
+        }
+
+        log::info!("DeviceRegistry: using CpalBackend");
+        Self {
+            backend: Arc::new(CpalBackend),
+            devices: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Refresh the cached device list from the backend.
+    pub fn refresh(&self) -> Result<Vec<AudioDevice>, AudioError> {
+        let devices = self.backend.list_devices()?;
+        if let Ok(mut cache) = self.devices.lock() {
+            *cache = devices.clone();
+        }
+        Ok(devices)
+    }
+
+    /// Get a reference to the active backend.
+    pub fn backend(&self) -> &dyn AudioBackend {
+        &*self.backend
+    }
+
+    /// Which backend is active.
+    pub fn kind(&self) -> BackendKind {
+        self.backend.kind()
+    }
+
+    /// Get the last cached device list (without querying the backend).
+    pub fn cached_devices(&self) -> Vec<AudioDevice> {
+        self.devices
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
 }
