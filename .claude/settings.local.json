@@ -63,7 +63,21 @@
       "Bash(npx eslint:*)",
       "Bash(git -C /mnt/files/Documents/Business/Niche-Knack_Apps/Applications/clip-dr log --oneline -5)",
       "Bash(printf:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:manpages.ubuntu.com)",
+      "Bash(dpkg:*)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:gitlab.freedesktop.org)",
+      "Bash(pw-dump:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cat:*)",
+      "Bash(cargo generate-lockfile:*)",
+      "WebFetch(domain:docs.ardour.org)",
+      "WebFetch(domain:ardour.org)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:discourse.ardour.org)",
+      "WebFetch(domain:community.ardour.org)",
+      "Bash(wc:*)"
     ]
   }
 }
