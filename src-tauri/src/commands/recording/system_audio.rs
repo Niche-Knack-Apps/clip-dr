@@ -2,23 +2,28 @@
 //!
 //! Extracted from mod.rs to keep the module manageable.
 //! Uses parec / pw-record subprocesses to capture system audio output.
+//!
+//! Recording uses the same ring-buffer → wav_writer_thread path as mic
+//! recording.  The reader thread always updates the level meter, and
+//! when a ring buffer is available (recording active), it pushes
+//! interleaved f32 samples there for the writer thread to drain.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read};
 use std::path::PathBuf;
 use std::process::{ChildStdout, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hound::{WavSpec, WavWriter};
 use tauri::State;
 
-use crate::audio_util::{AudioWriter, Rf64Writer, WAV_SEGMENT_MAX_DATA_BYTES};
+use crate::audio_util::{AudioWriter, Rf64Writer};
 
 use super::{
-    RecordingManager, RecordingSession,
-    segment_path, patch_wav_header_if_needed, stereo_wav_to_mono_streaming,
-    estimate_wav_duration, read_wav_format,
+    RecordingManager, RecordingSession, RecordingRingBuffer,
+    segment_path, spawn_wav_writer_thread, patch_wav_header_if_needed,
+    stereo_wav_to_mono_streaming, estimate_wav_duration, read_wav_format,
     RecordingResult,
 };
 
@@ -48,7 +53,6 @@ pub(crate) fn get_default_monitor_source() -> Result<String, String> {
                     if let Some(name) = line.split('=').nth(1) {
                         let sink_name = name.trim().trim_matches('"');
                         log::info!("Found default sink via wpctl: {}", sink_name);
-                        // For pw-record, we use the sink name directly with --target
                         return Ok(sink_name.to_string());
                     }
                 }
@@ -92,17 +96,15 @@ pub(crate) fn get_default_monitor_source() -> Result<String, String> {
 
 // ── Context struct for system audio reader thread ──
 
+/// Minimal context for the reader thread.  Level metering always runs;
+/// when `ring` contains `Some(ring_buf)`, samples are also pushed there
+/// for the writer thread to drain.
 struct SysAudioReaderCtx {
     monitor_active: Arc<AtomicBool>,
-    recording_active: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
-    sample_count: Arc<AtomicUsize>,
-    wav_writer: Arc<Mutex<Option<AudioWriter>>>,
-    seg_data_bytes: Arc<AtomicUsize>,
-    seg_index: Arc<AtomicUsize>,
-    debug_count: Arc<AtomicUsize>,
-    seg_base_path: Arc<Mutex<Option<PathBuf>>>,
-    seg_completed: Arc<Mutex<Vec<PathBuf>>>,
+    /// Shared with RecordingManager.system_ring.
+    /// Some(ring) when recording is active; None otherwise.
+    ring: Arc<Mutex<Option<Arc<RecordingRingBuffer>>>>,
 }
 
 // ── Internal helpers ──
@@ -121,9 +123,8 @@ fn kill_all_stale_processes() {
 
 /// Internal implementation for starting system audio monitoring.
 /// Uses parec (preferred) or pw-record as fallback to capture system audio.
-/// The reader thread handles both level metering (always) and sample
-/// accumulation (when system_recording_active is true), so a single process
-/// serves both monitoring and recording.
+/// The reader thread handles level metering (always) and pushes samples
+/// into the shared ring buffer when recording is active.
 #[cfg(target_os = "linux")]
 fn start_system_audio_monitoring_impl(mgr: &RecordingManager) -> Result<(), String> {
     stop_system_audio_monitoring_internal(mgr);
@@ -175,37 +176,10 @@ fn start_system_audio_monitoring_impl(mgr: &RecordingManager) -> Result<(), Stri
     mgr.system_monitor_active.store(true, Ordering::SeqCst);
     mgr.current_level.store(0, Ordering::SeqCst);
 
-    // Clone Arcs for the reader thread
-    let sys_active = mgr.system_monitor_active.clone();
-    let sys_rec_active = mgr.system_recording_active.clone();
-    let level = mgr.current_level.clone();
-    let sample_count = mgr.system_audio_sample_count.clone();
-    let wav_writer = mgr.system_wav_writer.clone();
-    let seg_data_bytes = mgr.system_segment_data_bytes.clone();
-    let seg_index = mgr.system_segment_index.clone();
-    let debug_count = mgr.debug_callback_count.clone();
-
-    // Create Arc-wrapped copies of segment state for the reader thread
-    let thread_seg_base = Arc::new(Mutex::new(
-        mgr.system_segment_base_path.lock().ok().and_then(|g| g.clone())
-    ));
-    let thread_seg_completed = Arc::new(Mutex::new(
-        mgr.system_completed_segments.lock().ok()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    ));
-
     let ctx = SysAudioReaderCtx {
-        monitor_active: sys_active,
-        recording_active: sys_rec_active,
-        level,
-        sample_count,
-        wav_writer,
-        seg_data_bytes,
-        seg_index,
-        debug_count,
-        seg_base_path: thread_seg_base,
-        seg_completed: thread_seg_completed,
+        monitor_active: mgr.system_monitor_active.clone(),
+        level: mgr.current_level.clone(),
+        ring: mgr.system_ring.clone(),
     };
 
     std::thread::spawn(move || {
@@ -231,9 +205,9 @@ fn stop_system_audio_monitoring_internal(mgr: &RecordingManager) {
     mgr.current_level.store(0, Ordering::SeqCst);
 }
 
-/// Unified stream reader for system audio: handles both monitoring and recording.
-/// Always updates the level meter. When recording_active is true, also accumulates
-/// samples for the WAV file.
+/// Unified stream reader for system audio.
+/// Always updates the level meter.  When a ring buffer is available (recording
+/// active), pushes interleaved f32 samples into it for the wav writer thread.
 #[cfg(target_os = "linux")]
 fn system_audio_monitor_reader(stdout: ChildStdout, ctx: SysAudioReaderCtx) {
     let mut reader = BufReader::with_capacity(8192, stdout);
@@ -264,57 +238,24 @@ fn system_audio_monitor_reader(stdout: ChildStdout, ctx: SysAudioReaderCtx) {
                     .fold(0.0f32, f32::max);
                 ctx.level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
 
-                // When recording is active, write to disk and count samples
-                if ctx.recording_active.load(Ordering::SeqCst) {
-                    ctx.sample_count.fetch_add(samples.len(), Ordering::SeqCst);
-                    let sample_bytes = samples.len() * 4;
-
-                    if let Ok(mut writer_guard) = ctx.wav_writer.lock() {
-                        let is_rf64 = matches!(&*writer_guard, Some(AudioWriter::Rf64(_)));
-                        let current_data_bytes = ctx.seg_data_bytes.load(Ordering::Relaxed);
-                        if !is_rf64 && current_data_bytes + sample_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
-                            if let Some(old_writer) = writer_guard.take() {
-                                let _ = old_writer.finalize();
-                                let seg_idx = ctx.seg_index.load(Ordering::Relaxed);
-                                if let Ok(base_guard) = ctx.seg_base_path.lock() {
-                                    if let Some(ref base) = *base_guard {
-                                        let current_seg = segment_path(base, seg_idx);
-                                        let _ = patch_wav_header_if_needed(&current_seg);
-                                        if let Ok(mut completed) = ctx.seg_completed.lock() {
-                                            completed.push(current_seg);
-                                        }
-
-                                        let new_idx = seg_idx + 1;
-                                        ctx.seg_index.store(new_idx, Ordering::Relaxed);
-                                        ctx.seg_data_bytes.store(0, Ordering::Relaxed);
-
-                                        let new_path = segment_path(base, new_idx);
-                                        let sys_spec = WavSpec {
-                                            channels: 2,
-                                            sample_rate: 44100,
-                                            bits_per_sample: 32,
-                                            sample_format: hound::SampleFormat::Float,
-                                        };
-                                        if let Ok(f) = File::create(&new_path) {
-                                            if let Ok(new_writer) = WavWriter::new(BufWriter::new(f), sys_spec) {
-                                                *writer_guard = Some(AudioWriter::Hound(new_writer));
-                                                log::info!("System audio: started new segment {:?}", new_path);
-                                            }
-                                        }
-                                    }
-                                }
+                // When a ring buffer is available, push samples into it
+                if let Ok(guard) = ctx.ring.lock() {
+                    if let Some(ref ring) = *guard {
+                        let wp = ring.write_pos.load(Ordering::Relaxed);
+                        let rp = ring.read_pos.load(Ordering::Relaxed);
+                        let used = wp.wrapping_sub(rp);
+                        if used + samples.len() <= ring.capacity {
+                            for (i, &s) in samples.iter().enumerate() {
+                                let idx = (wp + i) % ring.capacity;
+                                unsafe { *ring.data_ptr.add(idx) = s; }
                             }
+                            ring.write_pos.store(wp + samples.len(), Ordering::Release);
+                        } else {
+                            ring.overrun_count.fetch_add(1, Ordering::Relaxed);
                         }
-
-                        ctx.seg_data_bytes.fetch_add(sample_bytes, Ordering::Relaxed);
-                        if let Some(ref mut writer) = *writer_guard {
-                            for &sample in &samples {
-                                let _ = writer.write_sample(sample);
-                            }
-                        }
+                        let fill = wp.wrapping_sub(rp) + samples.len();
+                        let _ = ring.max_fill_level.fetch_max(fill, Ordering::Relaxed);
                     }
-
-                    ctx.debug_count.fetch_add(1, Ordering::SeqCst);
                 }
             }
             Err(_) => break,
@@ -360,7 +301,9 @@ pub(super) fn reset_recording_state_internal(mgr: &RecordingManager) {
     log::info!("Force resetting recording state");
     mgr.monitoring_active.store(false, Ordering::SeqCst);
     mgr.current_level.store(0, Ordering::SeqCst);
-    mgr.system_recording_active.store(false, Ordering::SeqCst);
+
+    // Clear system ring so reader thread stops pushing
+    if let Ok(mut guard) = mgr.system_ring.lock() { *guard = None; }
 
     // Drop monitoring stream
     if let Ok(mut guard) = mgr.monitor_stream.lock() { *guard = None; }
@@ -380,23 +323,21 @@ pub(super) fn reset_recording_state_internal(mgr: &RecordingManager) {
             }
         }
     }
-
-    // Clean up system audio segment state
-    mgr.system_segment_data_bytes.store(0, Ordering::Relaxed);
-    mgr.system_segment_index.store(1, Ordering::Relaxed);
-    if let Ok(mut base) = mgr.system_segment_base_path.lock() { *base = None; }
-    if let Ok(mut completed) = mgr.system_completed_segments.lock() { completed.clear(); }
 }
 
-/// Record system audio using parec/pw-record with stdout streaming (Linux only)
-/// Reuses the monitoring capture process -- does NOT spawn a new process.
-/// The monitor reader thread accumulates samples when system_recording_active is set.
+/// Record system audio using the ring-buffer path (Linux only).
+/// Reuses the monitoring capture process — does NOT spawn a new process.
+/// Creates a ring buffer + wav writer thread; the monitor reader thread
+/// pushes samples into the ring buffer when it's available.
 #[tauri::command]
 pub async fn start_system_audio_recording(output_dir: String, channel_mode: Option<String>, large_file_format: Option<String>, mgr: State<'_, RecordingManager>) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         // Auto-reset any stuck state from previous failed recordings
-        if mgr.system_recording_active.load(Ordering::SeqCst) {
+        let has_system_session = mgr.sessions.lock()
+            .map(|s| s.contains_key("system-audio"))
+            .unwrap_or(false);
+        if has_system_session {
             log::warn!("Recording state was stuck, auto-resetting...");
             reset_recording_state_internal(&mgr);
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -421,145 +362,160 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
 
         log::info!("Starting system audio recording to: {:?}", output_path);
 
-        // Reset sample counter and segment tracking
-        mgr.system_audio_sample_count.store(0, Ordering::SeqCst);
-        mgr.system_segment_data_bytes.store(0, Ordering::Relaxed);
-        mgr.system_segment_index.store(1, Ordering::Relaxed);
-        if let Ok(mut base) = mgr.system_segment_base_path.lock() {
-            *base = Some(output_path.clone());
-        }
-        if let Ok(mut completed) = mgr.system_completed_segments.lock() {
-            completed.clear();
-        }
-
         let target_mono = channel_mode.as_deref() == Some("mono");
         let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
         let use_rf64 = lff == "rf64";
 
-        let sys_writer = if use_rf64 {
-            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), 44100, 2)
+        let sample_rate: u32 = 44100;
+        let channels: u16 = 2;
+
+        // Create ring buffer (10s at 44.1kHz stereo)
+        let ring = Arc::new(RecordingRingBuffer::new(sample_rate as usize * channels as usize * 10).with_channels(channels));
+
+        // Create WAV writer
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let audio_writer = if use_rf64 {
+            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
                 .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
         } else {
-            let sys_spec = WavSpec {
-                channels: 2,
-                sample_rate: 44100,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-            let sys_file = File::create(&output_path)
+            let file = File::create(&output_path)
                 .map_err(|e| format!("Failed to create output file: {}", e))?;
-            AudioWriter::Hound(WavWriter::new(BufWriter::new(sys_file), sys_spec)
+            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
                 .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
         };
 
-        {
-            let mut wg = mgr.system_wav_writer.lock().unwrap();
-            *wg = Some(sys_writer);
+        // Spawn writer thread (drains ring buffer → disk)
+        let writer_handle = spawn_wav_writer_thread(
+            ring.clone(), audio_writer, channels, target_mono,
+            output_path.clone(), spec, use_rf64,
+        );
+
+        // Make ring buffer available to reader thread
+        if let Ok(mut guard) = mgr.system_ring.lock() {
+            *guard = Some(ring.clone());
         }
+
+        let session_active = Arc::new(AtomicBool::new(true));
 
         // Store recording state as a session
         let session = RecordingSession {
             input: None,
-            ring_buffer: None,
-            writer_handle: None,
-            active: mgr.system_recording_active.clone(),
+            ring_buffer: Some(ring),
+            writer_handle: Some(writer_handle),
+            active: session_active,
             level: mgr.current_level.clone(),
             debug_count: mgr.debug_callback_count.clone(),
             device_id: "system-audio".to_string(),
-            sample_rate: 44100,
-            channels: 2,
+            sample_rate,
+            channels,
             output_path: output_path.clone(),
             target_mono,
             large_file_format: lff,
-            use_system_buffer: true,
             start_offset_us: 0,
             pre_record_seconds: 0.0,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
-            sessions.insert("default".to_string(), session);
+            sessions.insert("system-audio".to_string(), session);
         }
 
-        // Activate recording -- the monitor reader thread will start accumulating samples
-        mgr.system_recording_active.store(true, Ordering::SeqCst);
         mgr.debug_callback_count.store(0, Ordering::SeqCst);
 
-        log::info!("System audio recording active (reusing monitor process)");
+        log::info!("System audio recording active (ring-buffer path, reusing monitor process)");
         Ok(output_path.to_string_lossy().to_string())
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = mgr;
+        let _ = (output_dir, channel_mode, large_file_format, mgr);
         Err("System audio recording only supported on Linux".to_string())
     }
 }
 
-/// Stop system audio recording and write accumulated samples to WAV file.
-/// Does NOT kill the pw-record process -- monitoring continues after recording stops.
+/// Stop system audio recording and finalize the WAV file.
+/// Does NOT kill the subprocess — monitoring continues after recording stops.
 #[tauri::command]
 pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Result<RecordingResult, String> {
     #[cfg(target_os = "linux")]
     {
-        if !mgr.system_recording_active.load(Ordering::SeqCst) {
-            return Err("No recording in progress".to_string());
+        // Take ring from shared state so reader thread stops pushing
+        if let Ok(mut guard) = mgr.system_ring.lock() {
+            *guard = None;
         }
 
-        log::info!("Stopping system audio recording...");
-
-        // Signal recording stop
-        mgr.system_recording_active.store(false, Ordering::SeqCst);
-
+        // Give the reader thread a moment to finish any in-progress push
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Extract the session
         let session = {
             let mut sessions = mgr.sessions.lock().map_err(|_| "Session lock poisoned".to_string())?;
-            sessions.remove("default")
+            sessions.remove("system-audio")
         };
-        let session = session.ok_or("Recording state not found")?;
+        let mut session = session.ok_or("No system audio recording in progress")?;
 
-        let sample_count = mgr.system_audio_sample_count.load(Ordering::SeqCst);
+        session.active.store(false, Ordering::SeqCst);
 
-        log::info!("Recorded {} samples to WAV file: {:?}", sample_count, session.output_path);
+        log::info!("Stopping system audio recording...");
+
+        // Signal ring buffer to stop and join writer thread (same path as mic recording)
+        let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
+            (session.ring_buffer.take(), session.writer_handle.take())
+        {
+            let overruns = ring.overrun_count.load(Ordering::Relaxed);
+            let max_fill = ring.max_fill_level.load(Ordering::Relaxed);
+            if overruns > 0 {
+                log::warn!(
+                    "System audio ring buffer had {} overruns (max fill: {}/{})",
+                    overruns, max_fill, ring.capacity
+                );
+            }
+
+            ring.active.store(false, Ordering::Release);
+            match handle.join() {
+                Ok((w, count, segments)) => (Some(w), count, segments),
+                Err(_) => {
+                    log::error!("System audio writer thread panicked");
+                    return Err("Writer thread panicked".to_string());
+                }
+            }
+        } else {
+            return Err("Recording state incomplete".to_string());
+        };
 
         if sample_count == 0 {
-            if let Ok(mut wg) = mgr.system_wav_writer.lock() {
-                drop(wg.take());
-            }
             return Err("No audio recorded".to_string());
         }
 
-        let duration = sample_count as f64 / session.channels as f64 / session.sample_rate as f64;
+        let samples_per_channel = sample_count / session.channels as usize;
+        let duration = samples_per_channel as f64 / session.sample_rate as f64;
+
+        log::info!("System audio recorded {} samples ({:.2}s)", sample_count, duration);
 
         // Finalize the writer
-        if let Ok(mut wg) = mgr.system_wav_writer.lock() {
-            if let Some(writer) = wg.take() {
-                writer.finalize()
-                    .map_err(|e| format!("Failed to finalize recording: {}", e))?;
-            }
+        if let Some(w) = writer {
+            w.finalize()
+                .map_err(|e| format!("Failed to finalize recording: {}", e))?;
         }
 
         let use_rf64 = session.large_file_format == "rf64";
-
-        let seg_idx = mgr.system_segment_index.load(Ordering::Relaxed);
-        let last_seg_path = segment_path(&session.output_path, seg_idx);
+        let last_seg_path = segment_path(&session.output_path, completed_segments.len() + 1);
         if !use_rf64 {
             let _ = patch_wav_header_if_needed(&last_seg_path);
         }
 
+        // fsync to ensure data is on disk before frontend import
         if let Ok(f) = File::open(&last_seg_path) {
             let _ = f.sync_all();
         }
 
-        let completed = if let Ok(mut guard) = mgr.system_completed_segments.lock() {
-            guard.drain(..).collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        let extra_segments: Vec<String> = if !completed.is_empty() {
-            for seg in &completed {
+        // Build extra_segments list
+        let extra_segments: Vec<String> = if !completed_segments.is_empty() {
+            for seg in &completed_segments {
                 if !use_rf64 {
                     let _ = patch_wav_header_if_needed(seg);
                 }
@@ -567,7 +523,7 @@ pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Re
                     let _ = f.sync_all();
                 }
             }
-            let mut extras: Vec<String> = completed.iter()
+            let mut extras: Vec<String> = completed_segments.iter()
                 .skip(1)
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
@@ -614,11 +570,9 @@ pub fn recover_recording(path: String) -> Result<RecordingResult, String> {
 
     log::info!("Attempting to recover recording: {}", path);
 
-    // Patch the WAV header to match actual file size
     patch_wav_header_if_needed(&file_path)
         .map_err(|e| format!("Failed to recover WAV header: {}", e))?;
 
-    // Read the patched header to get accurate metadata
     let duration = estimate_wav_duration(&file_path).unwrap_or(0.0);
     let (sample_rate, channels) = read_wav_format(&file_path).unwrap_or((48000, 2));
 

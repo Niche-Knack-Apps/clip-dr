@@ -72,7 +72,6 @@ pub(super) struct RecordingSession {
     pub(super) output_path: PathBuf,
     pub(super) target_mono: bool,
     pub(super) large_file_format: String,
-    pub(super) use_system_buffer: bool,
     /// Microseconds from the shared start instant to when this session's stream started
     pub(super) start_offset_us: i64,
     /// Seconds of pre-record buffer audio prepended
@@ -108,13 +107,10 @@ pub struct RecordingManager {
     // ── System audio state (inherently single-instance) ──
     pub(super) system_monitor_active: Arc<AtomicBool>,
     pub(super) system_monitor_child: Arc<Mutex<Option<std::process::Child>>>,
-    pub(super) system_recording_active: Arc<AtomicBool>,
-    pub(super) system_wav_writer: Arc<Mutex<Option<AudioWriter>>>,
-    pub(super) system_segment_base_path: Mutex<Option<PathBuf>>,
-    pub(super) system_completed_segments: Mutex<Vec<PathBuf>>,
-    pub(super) system_segment_data_bytes: Arc<AtomicUsize>,
-    pub(super) system_segment_index: Arc<AtomicUsize>,
-    pub(super) system_audio_sample_count: Arc<AtomicUsize>,
+    /// Shared ring buffer reference for the system audio reader thread.
+    /// When recording is active, contains Some(ring); reader thread pushes samples here.
+    /// Cleared on recording stop so reader thread stops pushing.
+    pub(super) system_ring: Arc<Mutex<Option<Arc<RecordingRingBuffer>>>>,
     pub(super) debug_callback_count: Arc<AtomicUsize>,
 }
 
@@ -138,13 +134,7 @@ impl RecordingManager {
             current_level: Arc::new(AtomicU32::new(0)),
             system_monitor_active: Arc::new(AtomicBool::new(false)),
             system_monitor_child: Arc::new(Mutex::new(None)),
-            system_recording_active: Arc::new(AtomicBool::new(false)),
-            system_wav_writer: Arc::new(Mutex::new(None)),
-            system_segment_base_path: Mutex::new(None),
-            system_completed_segments: Mutex::new(Vec::new()),
-            system_segment_data_bytes: Arc::new(AtomicUsize::new(0)),
-            system_segment_index: Arc::new(AtomicUsize::new(1)),
-            system_audio_sample_count: Arc::new(AtomicUsize::new(0)),
+            system_ring: Arc::new(Mutex::new(None)),
             debug_callback_count: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -724,7 +714,6 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         output_path: output_path.clone(),
         target_mono,
         large_file_format: lff,
-        use_system_buffer: false,
         start_offset_us: 0,
         pre_record_seconds: pre_record_secs,
     };
@@ -779,9 +768,6 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
                 return Err("Writer thread panicked".to_string());
             }
         }
-    } else if session.use_system_buffer {
-        // System audio recording path (no ring buffer)
-        (None, 0usize, Vec::new())
     } else {
         return Err("Recording state incomplete".to_string());
     };
@@ -976,7 +962,6 @@ pub async fn start_multi_recording(
             output_path: output_path.clone(),
             target_mono,
             large_file_format: lff,
-            use_system_buffer: false,
             start_offset_us: offset_us,
             pre_record_seconds: 0.0,
         };
@@ -996,6 +981,11 @@ pub async fn start_multi_recording(
 /// Stop all active recording sessions. Returns a result for each session.
 #[tauri::command]
 pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec<SessionResult>, String> {
+    // Clear system ring first so reader thread stops pushing
+    if let Ok(mut guard) = mgr.system_ring.lock() {
+        *guard = None;
+    }
+
     let sessions_map = {
         let mut guard = mgr.sessions.lock().map_err(|_| "Session lock poisoned".to_string())?;
         std::mem::take(&mut *guard)
@@ -1239,7 +1229,6 @@ pub async fn start_session(
         output_path: output_path.clone(),
         target_mono,
         large_file_format: lff,
-        use_system_buffer: false,
         start_offset_us: 0,
         pre_record_seconds: 0.0,
     };
@@ -1459,7 +1448,7 @@ pub fn get_recording_level(mgr: State<'_, RecordingManager>) -> f32 {
 
 #[tauri::command]
 pub fn is_recording(mgr: State<'_, RecordingManager>) -> bool {
-    mgr.is_default_recording() || mgr.system_recording_active.load(Ordering::SeqCst)
+    mgr.is_any_recording()
 }
 
 #[tauri::command]
@@ -1494,13 +1483,6 @@ pub async fn cancel_recording(mgr: State<'_, RecordingManager>) -> Result<(), St
             }
         }
         let _ = std::fs::remove_file(&output_path);
-
-        // Clean up system audio segments if any
-        if let Ok(mut completed) = mgr.system_completed_segments.lock() {
-            for seg in completed.drain(..) {
-                let _ = std::fs::remove_file(&seg);
-            }
-        }
     }
 
     mgr.current_level.store(0, Ordering::SeqCst);
