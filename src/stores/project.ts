@@ -10,6 +10,7 @@ import { useSilenceStore } from './silence';
 import { useHistoryStore } from './history';
 import { usePlaybackStore } from './playback';
 import { useAudioStore } from './audio';
+import { useTranscriptionStore } from './transcription';
 
 const APP_TITLE = 'Clip Dr.';
 
@@ -228,6 +229,14 @@ export const useProjectStore = defineStore('project', () => {
       // Restore silence regions
       if (project.silenceRegions && project.silenceRegions.length > 0) {
         silenceStore.setSilenceRegions(project.silenceRegions);
+      }
+
+      // Auto-load transcription sidecars for each track (fire-and-forget)
+      const transcriptionStore = useTranscriptionStore();
+      for (const track of tracksStore.tracks) {
+        transcriptionStore.loadTranscriptionFromDisk(track.id).catch(e => {
+          console.warn(`[Project] Failed to load transcription for ${track.name}:`, e);
+        });
       }
 
       // Clear history for fresh undo stack
