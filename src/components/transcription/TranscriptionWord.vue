@@ -1,18 +1,43 @@
 <script setup lang="ts">
-import { ref, nextTick } from 'vue';
+import { ref, nextTick, computed } from 'vue';
 import type { Word } from '@/shared/types';
+import { hexToRgba, lightenHex } from '@/shared/utils';
 
 interface Props {
   word: Word;
   isActive?: boolean;
   isHighlighted?: boolean;
   isDragging?: boolean;
+  trackColor?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isActive: false,
   isHighlighted: false,
   isDragging: false,
+  trackColor: '#00d4ff',
+});
+
+const wordStyle = computed(() => {
+  if (isEditing.value) return {};
+  const color = props.trackColor;
+  if (props.isDragging) {
+    return {
+      backgroundColor: hexToRgba(color, 0.3),
+      color: lightenHex(color),
+      boxShadow: `inset 0 0 0 1px ${color}`,
+    };
+  }
+  if (props.isActive) {
+    return {
+      backgroundColor: hexToRgba(color, 0.2),
+      color: lightenHex(color),
+    };
+  }
+  if (props.isHighlighted) {
+    return {}; // keep yellow highlight styling from classes
+  }
+  return {};
 });
 
 const emit = defineEmits<{
@@ -72,13 +97,12 @@ function handleBlur() {
     :class="[
       'px-1 py-0.5 text-xs font-mono rounded transition-colors select-none',
       {
-        'bg-cyan-600/50 text-cyan-200 ring-1 ring-cyan-400': isDragging && !isEditing,
-        'bg-waveform-wave/30 text-cyan-300': isActive && !isDragging && !isEditing,
         'bg-yellow-500/30 text-yellow-300': isHighlighted && !isActive && !isDragging && !isEditing,
         'text-gray-400 hover:text-gray-200 hover:bg-gray-700': !isActive && !isHighlighted && !isDragging && !isEditing,
         'ring-1 ring-cyan-500 bg-gray-800': isEditing,
       },
     ]"
+    :style="wordStyle"
     @click="!isEditing && emit('click', word)"
     @dblclick="handleDoubleClick"
   >

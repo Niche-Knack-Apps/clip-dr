@@ -7,9 +7,10 @@ import { useSelectionStore } from '@/stores/selection';
 import { usePlaybackStore } from '@/stores/playback';
 import { useAudioStore } from '@/stores/audio';
 import { useSearch } from '@/composables/useSearch';
-import type { Word } from '@/shared/types';
+import type { Word, Track } from '@/shared/types';
 import { WORD_HEIGHT } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
+import { TRACK_COLORS } from '@/shared/types';
 
 const openSettings = inject<() => void>('openSettings');
 
@@ -50,10 +51,28 @@ const dragStartX = ref(0);
 const dragStartOffsetMs = ref(0);
 const globalDragLastX = ref(0);
 
-// Show words from ALL tracks in the visible range
+// Active tracks (same logic as playback: solo+unmuted → only those, else all unmuted)
+const activeTrackIds = computed((): Set<string> => {
+  const tracks = tracksStore.tracks;
+  const playable = tracks.filter((t: Track) =>
+    !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching'
+  );
+  const soloed = playable.filter((t: Track) => t.solo && !t.muted);
+  const active = soloed.length > 0 ? soloed : playable.filter((t: Track) => !t.muted);
+  return new Set(active.map((t: Track) => t.id));
+});
+
+function getTrackColor(trackId: string): string {
+  const track = tracksStore.tracks.find((t: Track) => t.id === trackId);
+  return track?.color ?? TRACK_COLORS[0];
+}
+
+// Show words from active tracks in the visible range
 const visibleWords = computed((): WordWithTrack[] => {
   const allWords: WordWithTrack[] = [];
+  const activeIds = activeTrackIds.value;
   for (const track of tracksStore.tracks) {
+    if (!activeIds.has(track.id)) continue;
     const words = transcriptionStore.getWordsInRange(track.id, selection.value.start, selection.value.end);
     for (const w of words) {
       allWords.push({ ...w, trackId: track.id });
@@ -79,17 +98,19 @@ const wordsTooSmallToRead = computed(() => {
 });
 
 // rAF-throttled active word to avoid per-frame recomputation
-const activeWord = ref<Word | null>(null);
+const activeWord = ref<WordWithTrack | null>(null);
 let activeWordRafId: number | null = null;
 
 watch(currentTime, () => {
   if (activeWordRafId !== null) return;
   activeWordRafId = requestAnimationFrame(() => {
     activeWordRafId = null;
-    let found: Word | null = null;
+    const activeIds = activeTrackIds.value;
+    let found: WordWithTrack | null = null;
     for (const track of tracksStore.tracks) {
+      if (!activeIds.has(track.id)) continue;
       const word = transcriptionStore.getWordAtTime(track.id, currentTime.value);
-      if (word) { found = word; break; }
+      if (word) { found = { ...word, trackId: track.id }; break; }
     }
     activeWord.value = found;
   });
@@ -293,6 +314,7 @@ onUnmounted(() => {
             :is-active="activeWord?.id === word.id"
             :is-highlighted="isWordHighlighted(word)"
             :is-dragging="isWordBeingDragged(word)"
+            :track-color="getTrackColor(word.trackId)"
             @click="handleWordClick"
             @update-text="(wordId: string, text: string) => handleWordTextUpdate(word.trackId, wordId, text)"
           />
@@ -301,7 +323,7 @@ onUnmounted(() => {
 
       <!-- Magnified active word mode (zoomed out too far to read individual words) -->
       <div v-if="wordsTooSmallToRead && activeWord" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <span class="text-sm font-mono text-cyan-300 bg-gray-900/80 px-3 py-1 rounded">
+        <span class="text-sm font-mono bg-gray-900/80 px-3 py-1 rounded" :style="{ color: getTrackColor(activeWord.trackId) }">
           {{ activeWord.text }}
         </span>
       </div>
