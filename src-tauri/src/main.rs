@@ -7,9 +7,49 @@ mod services;
 
 use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, import, playback, project};
 use std::panic;
+use std::io::Write;
 
 fn main() {
-    env_logger::init();
+    // Default to debug logging so device detection issues are visible.
+    // Logs to both stderr AND a file (~/.local/share/com.niche-knack.clip-dr/clip-dr-debug.log).
+    // TODO: revert to env_logger::init() after PulseAudio debugging is complete
+    let data_dir = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        });
+    let log_file = data_dir.join("com.niche-knack.clip-dr").join("clip-dr-debug.log");
+
+    // Ensure parent dir exists
+    if let Some(parent) = log_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Truncate log file on each launch so it doesn't grow unbounded
+    let file = std::fs::File::create(&log_file).ok();
+
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("debug")
+    )
+    .format(move |buf, record| {
+        let ts = buf.timestamp_millis();
+        let line = format!("{} [{}] {} - {}\n", ts, record.level(), record.target(), record.args());
+        // Write to stderr (normal env_logger behavior)
+        let _ = buf.write_all(line.as_bytes());
+        // Also write to log file
+        if let Some(ref f) = file {
+            use std::io::Write as _;
+            let _ = (&*f).write_all(line.as_bytes());
+        }
+        Ok(())
+    })
+    .init();
+
+    log::info!("=== Clip Dr. v0.13.3-debug starting ===");
+    log::info!("Log file: {}", log_file.display());
+    log::info!("OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
 
     // Set a custom panic hook to handle ALSA thread panics gracefully
     let default_hook = panic::take_hook();
