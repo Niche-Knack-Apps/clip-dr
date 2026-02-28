@@ -360,178 +360,23 @@ fn monitor_session_reader(
     log::info!("Monitor session reader thread exiting");
 }
 
+/// List input audio devices using the backend selected at startup.
+/// On Linux, PulseBackend is preferred (includes monitor sources); falls back to CpalBackend.
+/// No inline #[cfg] — the DeviceRegistry picks the backend once at startup.
 #[tauri::command]
-pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
-    log::info!("[DeviceList] list_audio_devices() called");
+pub async fn list_audio_devices(mgr: State<'_, RecordingManager>) -> Result<Vec<AudioDevice>, String> {
+    log::info!("[DeviceList] list_audio_devices() called (backend: {:?})", mgr.registry.kind());
 
-    // On Linux, try PulseAudio API first (works reliably on PipeWire via pw-pulse)
-    #[cfg(target_os = "linux")]
-    {
-        log::debug!("[DeviceList] Linux detected, trying PulseAudio enumeration first...");
-        match super::pulse_devices::enumerate_pulse_sources() {
-            Ok(devices) if !devices.is_empty() => {
-                log::info!("[DeviceList] PulseAudio returned {} input devices — using Pulse path", devices.len());
-                for (i, d) in devices.iter().enumerate() {
-                    log::debug!("[DeviceList]   [{}] id='{}' name='{}' type={} source={} default={} loopback={} ch={} rates={:?}",
-                        i, d.id, d.name, d.device_type, d.device_source, d.is_default, d.is_loopback, d.channels, d.sample_rates);
-                }
-                return Ok(devices);
-            }
-            Ok(_) => log::warn!("[DeviceList] Pulse returned 0 devices, falling back to cpal"),
-            Err(e) => log::warn!("[DeviceList] Pulse enumeration failed: '{}', falling back to cpal", e),
-        }
-    }
+    let devices = mgr.registry.refresh()
+        .map_err(|e| format!("Failed to list devices: {}", e))?;
 
-    // cpal path (fallback on Linux, primary on Windows/macOS)
-    log::debug!("[DeviceList] Using cpal device enumeration");
-    let host = cpal::default_host();
-    log::debug!("[DeviceList] cpal host: {:?}", host.id());
-    let mut devices = Vec::new();
-
-    // Get default input device name for comparison
-    let default_input_name = host
-        .default_input_device()
-        .and_then(|d| d.name().ok());
-
-    // List input devices from cpal
-    if let Ok(input_devices) = host.input_devices() {
-        let mut cpal_total = 0u32;
-        let mut cpal_skipped = 0u32;
-        for device in input_devices {
-            cpal_total += 1;
-            if let Ok(name) = device.name() {
-                // Skip problematic ALSA devices that cause issues
-                let name_lower = name.to_lowercase();
-                if name_lower.contains("dmix")
-                    || name_lower.contains("surround")
-                    || name_lower.contains("iec958")
-                    || name_lower.contains("spdif")
-                    || name == "null"
-                {
-                    log::debug!("[DeviceList] cpal: Skipping '{}' (filtered name)", name);
-                    cpal_skipped += 1;
-                    continue;
-                }
-
-                // Try to verify the device can actually be opened for input
-                let has_input_config = device.default_input_config().is_ok();
-                if !has_input_config {
-                    log::debug!("[DeviceList] cpal: Skipping '{}' (no valid input config)", name);
-                    cpal_skipped += 1;
-                    continue;
-                }
-                log::debug!("[DeviceList] cpal: Accepting '{}' (has valid input config)", name);
-
-                let is_default = default_input_name.as_ref() == Some(&name);
-                let is_loopback = name_lower.contains("monitor")
-                    || name_lower.contains("loopback")
-                    || name_lower.contains("stereo mix");
-
-                // Get channel count and sample rates from device config
-                let (channels, sample_rates) = if let Ok(cfg) = device.default_input_config() {
-                    let ch = cfg.channels();
-                    let rates = device.supported_input_configs()
-                        .map(|cfgs| {
-                            let mut rates: Vec<u32> = cfgs.flat_map(|c| {
-                                let mut r = vec![c.min_sample_rate().0];
-                                if c.max_sample_rate().0 != c.min_sample_rate().0 {
-                                    r.push(c.max_sample_rate().0);
-                                }
-                                r
-                            }).collect();
-                            rates.sort_unstable();
-                            rates.dedup();
-                            rates
-                        })
-                        .unwrap_or_default();
-                    (ch, rates)
-                } else {
-                    (0, Vec::new())
-                };
-
-                let device_type = if is_loopback { "loopback" } else { "microphone" }.to_string();
-
-                devices.push(AudioDevice {
-                    id: name.clone(),
-                    name: name.clone(),
-                    is_default,
-                    is_input: true,
-                    is_loopback,
-                    is_output: false,
-                    device_type,
-                    channels,
-                    sample_rates,
-                    platform_id: name.clone(),
-                    device_source: String::new(),
-                    pulse_name: String::new(),
-                    pulse_index: 0,
-                    hw_bus: String::new(),
-                    serial: String::new(),
-                });
-            }
-        }
-        log::info!("[DeviceList] cpal: enumerated {} devices total, {} skipped, {} accepted",
-            cpal_total, cpal_skipped, cpal_total - cpal_skipped);
-    } else {
-        log::error!("[DeviceList] cpal: host.input_devices() returned error");
-    }
-
-    // On Linux, try to get PipeWire/PulseAudio monitor devices for system audio capture
-    #[cfg(target_os = "linux")]
-    {
-        // Try to get monitor devices using pw-record (PipeWire)
-        if let Ok(output) = std::process::Command::new("pw-cli")
-            .args(["list-objects"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Look for output sinks that can be monitored
-            // PipeWire exposes monitors as "*.monitor" sources
-            for line in stdout.lines() {
-                if line.contains("alsa_output") && line.contains("node.name") {
-                    if let Some(name_start) = line.find("= \"") {
-                        if let Some(name_end) = line[name_start + 3..].find("\"") {
-                            let sink_name = &line[name_start + 3..name_start + 3 + name_end];
-                            let monitor_name = format!("{}.monitor", sink_name);
-                            let display_name = format!("Monitor of {}", sink_name.replace("alsa_output.", "").replace(".", " "));
-
-                            // Check if we already have this device (exact ID match or fuzzy CPAL match)
-                            let already_exists = devices.iter().any(|d| {
-                                d.id == monitor_name || (d.is_loopback && matches_monitor_sink(&d.name, sink_name))
-                            });
-                            if !already_exists {
-                                devices.push(AudioDevice {
-                                    id: monitor_name.clone(),
-                                    name: display_name,
-                                    is_default: false,
-                                    is_input: true,
-                                    is_loopback: true,
-                                    is_output: false,
-                                    device_type: "loopback".to_string(),
-                                    channels: 2,
-                                    sample_rates: vec![44100, 48000],
-                                    platform_id: monitor_name,
-                                    device_source: "monitor".to_string(),
-                                    pulse_name: String::new(),
-                                    pulse_index: 0,
-                                    hw_bus: String::new(),
-                                    serial: String::new(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    log::info!("[DeviceList] Final result: {} devices via cpal fallback", devices.len());
+    log::info!("[DeviceList] {:?} backend returned {} input devices", mgr.registry.kind(), devices.len());
     for (i, d) in devices.iter().enumerate() {
-        log::debug!("[DeviceList]   [{}] id='{}' name='{}' type={} default={} loopback={} ch={} rates={:?}",
-            i, d.id, d.name, d.device_type, d.is_default, d.is_loopback, d.channels, d.sample_rates);
+        log::debug!("[DeviceList]   [{}] id='{}' name='{}' type={} source={} default={} loopback={} ch={} rates={:?}",
+            i, d.id, d.name, d.device_type, d.device_source, d.is_default, d.is_loopback, d.channels, d.sample_rates);
     }
     if devices.is_empty() {
-        log::error!("[DeviceList] WARNING: Returning 0 devices! No devices found via any method.");
+        log::error!("[DeviceList] WARNING: Returning 0 devices! No devices found via {:?} backend.", mgr.registry.kind());
     }
 
     Ok(devices)
