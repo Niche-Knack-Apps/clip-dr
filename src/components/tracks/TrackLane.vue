@@ -9,6 +9,7 @@ import type { Track } from '@/shared/types';
 import { usePlaybackStore } from '@/stores/playback';
 import { useTracksStore } from '@/stores/tracks';
 import { useUIStore } from '@/stores/ui';
+import { useHistoryStore } from '@/stores/history';
 import { TRACK_HEIGHT, TRACK_PANEL_MIN_WIDTH, MAX_VOLUME_DB, MIN_VOLUME_DB } from '@/shared/constants';
 import { linearToDb, dbToLinear, formatDb } from '@/shared/utils';
 
@@ -28,7 +29,7 @@ const emit = defineEmits<{
   delete: [trackId: string];
   export: [trackId: string];
   rename: [trackId: string, name: string];
-  setVolume: [trackId: string, volume: number];
+  setVolume: [trackId: string, volume: number, skipHistory: boolean];
   clipDragStart: [trackId: string, clipId: string];
   clipDrag: [trackId: string, clipId: string, newClipStart: number];
   clipDragEnd: [trackId: string, clipId: string, newClipStart: number];
@@ -247,9 +248,20 @@ const volumeDb = computed(() => {
 });
 const volumeDbLabel = computed(() => formatDb(props.track.volume));
 
+const volumeDragging = ref(false);
+
+function handleVolumeDragStart() {
+  volumeDragging.value = true;
+  useHistoryStore().pushState('Set volume');
+}
+
+function handleVolumeDragEnd() {
+  volumeDragging.value = false;
+}
+
 function handleVolumeDbChange(db: number) {
   const linear = db <= MIN_VOLUME_DB ? 0 : dbToLinear(db);
-  emit('setVolume', props.track.id, linear);
+  emit('setVolume', props.track.id, linear, volumeDragging.value);
 }
 
 // Draw static waveform for importing tracks (progressive fill-in)
@@ -473,6 +485,8 @@ onUnmounted(() => {
           :format-value="() => volumeDbLabel"
           class="flex-1"
           @update:model-value="handleVolumeDbChange"
+          @drag-start="handleVolumeDragStart"
+          @drag-end="handleVolumeDragEnd"
         />
       </div>
     </div>

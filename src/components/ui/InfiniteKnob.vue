@@ -24,6 +24,8 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   'update:modelValue': [value: number];
+  'dragStart': [];
+  'dragEnd': [];
 }>();
 
 const isDragging = ref(false);
@@ -58,6 +60,7 @@ function handleMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   event.preventDefault();
   isDragging.value = true;
+  emit('dragStart');
   dragStartX = event.clientX;
   dragStartValue = props.logarithmic
     ? Math.log(Math.max(props.min, props.modelValue))
@@ -99,6 +102,7 @@ function handleMouseUp() {
   }
   pendingEvent = null;
   isDragging.value = false;
+  emit('dragEnd');
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseup', handleMouseUp);
 }

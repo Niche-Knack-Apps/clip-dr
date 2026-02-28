@@ -195,8 +195,8 @@ function handleRename(trackId: string, name: string) {
   renameTrack(trackId, name);
 }
 
-function handleSetVolume(trackId: string, volume: number) {
-  setTrackVolume(trackId, volume);
+function handleSetVolume(trackId: string, volume: number, skipHistory = false) {
+  setTrackVolume(trackId, volume, skipHistory);
 }
 
 // Panel resize handlers

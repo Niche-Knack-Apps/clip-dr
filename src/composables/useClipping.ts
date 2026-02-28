@@ -108,8 +108,8 @@ export function useClipping() {
     tracksStore.setTrackSolo(trackId, solo);
   }
 
-  function setTrackVolume(trackId: string, volume: number): void {
-    tracksStore.setTrackVolume(trackId, volume);
+  function setTrackVolume(trackId: string, volume: number, skipHistory = false): void {
+    tracksStore.setTrackVolume(trackId, volume, skipHistory);
   }
 
   function renameTrack(trackId: string, name: string): void {

@@ -218,10 +218,10 @@ export const useTracksStore = defineStore('tracks', () => {
     });
   }
 
-  function setTrackVolume(trackId: string, volume: number): void {
+  function setTrackVolume(trackId: string, volume: number, skipHistory = false): void {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
-      useHistoryStore().pushState('Set volume');
+      if (!skipHistory) useHistoryStore().pushState('Set volume');
       const clamped = Math.max(0, Math.min(MAX_VOLUME_LINEAR, volume));
       // Scale envelope points proportionally so relative automation shape is preserved
       if (track.volumeEnvelope && track.volumeEnvelope.length > 0 && track.volume > 0) {
