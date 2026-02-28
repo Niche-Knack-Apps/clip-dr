@@ -73,6 +73,8 @@ struct RecordingSession {
     pre_record_seconds: f64,
     /// Subprocess handle for monitor device capture (when CPAL can't open the device)
     child: Option<std::process::Child>,
+    /// Pulse capture thread handle (Linux only)
+    pulse_capture: Option<JoinHandle<()>>,
 }
 
 /// Managed state for all recording, monitoring, and preview operations.
@@ -123,6 +125,8 @@ struct PreviewSession {
     level: Arc<AtomicU32>,
     /// Subprocess handle for monitor device preview (when CPAL can't open the device)
     child: Option<std::process::Child>,
+    /// Pulse preview thread handle (Linux only)
+    pulse_capture: Option<JoinHandle<()>>,
 }
 unsafe impl Send for PreviewSession {}
 
@@ -876,6 +880,20 @@ fn monitor_session_reader(
 
 #[tauri::command]
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
+    // On Linux, try PulseAudio API first (works reliably on PipeWire via pw-pulse)
+    #[cfg(target_os = "linux")]
+    {
+        match super::pulse_devices::enumerate_pulse_sources() {
+            Ok(devices) if !devices.is_empty() => {
+                log::info!("Found {} devices via PulseAudio API", devices.len());
+                return Ok(devices);
+            }
+            Ok(_) => log::warn!("Pulse returned 0 devices, falling back to cpal"),
+            Err(e) => log::warn!("Pulse enumeration failed: {}, falling back to cpal", e),
+        }
+    }
+
+    // cpal path (fallback on Linux, primary on Windows/macOS)
     let host = cpal::default_host();
     let mut devices = Vec::new();
 
@@ -1016,6 +1034,30 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
 /// Returns a unified list with is_input/is_output flags.
 #[tauri::command]
 pub async fn list_all_audio_devices() -> Result<Vec<AudioDevice>, String> {
+    // On Linux, try PulseAudio API first — sources + sinks merged
+    #[cfg(target_os = "linux")]
+    {
+        let sources = super::pulse_devices::enumerate_pulse_sources();
+        let sinks = super::pulse_devices::enumerate_pulse_sinks();
+        if let (Ok(mut src_list), Ok(sink_list)) = (sources, sinks) {
+            if !src_list.is_empty() || !sink_list.is_empty() {
+                // Merge sinks: if a source already has the same base name, mark it bidirectional
+                for sink in sink_list {
+                    let base = sink.id.trim_end_matches(".monitor");
+                    if let Some(existing) = src_list.iter_mut().find(|d| d.id == base || d.id == sink.id) {
+                        existing.is_output = true;
+                    } else {
+                        src_list.push(sink);
+                    }
+                }
+                log::info!("Found {} total devices via PulseAudio API", src_list.len());
+                return Ok(src_list);
+            }
+        }
+        log::warn!("Pulse enumeration returned no devices, falling back to cpal");
+    }
+
+    // cpal path (fallback on Linux, primary on Windows/macOS)
     let host = cpal::default_host();
     let mut devices = Vec::new();
 
@@ -1288,6 +1330,28 @@ pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingMan
     stop_device_preview_internal(&mgr);
     std::thread::sleep(Duration::from_millis(50));
 
+    mgr.preview_active.store(true, Ordering::SeqCst);
+    mgr.preview_level.store(0, Ordering::SeqCst);
+
+    // On Linux, try Pulse capture for Pulse-enumerated devices
+    #[cfg(target_os = "linux")]
+    if super::pulse_devices::is_pulse_source(&device_id) {
+        let active = mgr.preview_active.clone();
+        let level = mgr.preview_level.clone();
+        let (simple, spec) = super::pulse_devices::open_pulse_capture(&device_id, 48000, 2)?;
+        let handle = std::thread::Builder::new()
+            .name("pulse-preview".into())
+            .spawn(move || {
+                super::pulse_devices::pulse_preview_thread(simple, spec, active, level);
+            })
+            .map_err(|e| format!("Failed to spawn pulse preview thread: {}", e))?;
+        // Store handle — we don't have a dedicated field for single preview pulse handle,
+        // but the preview_active flag controls shutdown. The thread handle is fire-and-forget.
+        drop(handle);
+        log::info!("Device preview started (Pulse): {}", device_id);
+        return Ok(());
+    }
+
     let host = cpal::default_host();
 
     let device = host.input_devices()
@@ -1297,9 +1361,6 @@ pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingMan
 
     let config = device.default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
-
-    mgr.preview_active.store(true, Ordering::SeqCst);
-    mgr.preview_level.store(0, Ordering::SeqCst);
 
     let active = mgr.preview_active.clone();
     let level = mgr.preview_level.clone();
@@ -1382,6 +1443,97 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         log::warn!("Recording state was stuck, auto-resetting...");
         reset_recording_state_internal(&mgr);
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // On Linux, use Pulse capture if device_id is a Pulse source
+    #[cfg(target_os = "linux")]
+    if device_id.as_ref().map_or(false, |id| super::pulse_devices::is_pulse_source(id)) {
+        let device_id_str = device_id.as_ref().unwrap();
+        let (simple, spec) = super::pulse_devices::open_pulse_capture(device_id_str, 48000, 2)?;
+        let sample_rate = spec.rate;
+        let channels = spec.channels as u16;
+
+        let target_mono = channel_mode.as_deref() == Some("mono");
+        let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
+        let use_rf64 = lff == "rf64";
+
+        let output_dir_path = PathBuf::from(&output_dir);
+        std::fs::create_dir_all(&output_dir_path)
+            .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir_path, e))?;
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("recording_{}.wav", timestamp);
+        let output_path = output_dir_path.join(&filename);
+
+        let wav_spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let audio_writer = if use_rf64 {
+            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+        } else {
+            let file = File::create(&output_path)
+                .map_err(|e| format!("Failed to create output file: {}", e))?;
+            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), wav_spec)
+                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+        };
+
+        let session_active = Arc::new(AtomicBool::new(true));
+        let session_level = Arc::new(AtomicU32::new(0));
+        let session_debug = Arc::new(AtomicUsize::new(0));
+        mgr.current_level.store(0, Ordering::SeqCst);
+
+        let ring = Arc::new(RecordingRingBuffer::new(
+            sample_rate as usize * channels as usize * 10,
+        ).with_channels(channels));
+
+        let writer_handle = spawn_wav_writer_thread(
+            ring.clone(), audio_writer, channels, target_mono,
+            output_path.clone(), wav_spec, use_rf64,
+        );
+
+        let shared_level = mgr.current_level.clone();
+        let ring_clone = ring.clone();
+        let active_clone = session_active.clone();
+        let level_clone = session_level.clone();
+        let pulse_handle = std::thread::Builder::new()
+            .name("pulse-capture-default".into())
+            .spawn(move || {
+                super::pulse_devices::pulse_capture_thread(
+                    simple, spec, ring_clone, active_clone, level_clone, shared_level,
+                );
+            })
+            .map_err(|e| format!("Failed to spawn Pulse capture thread: {}", e))?;
+
+        let session = RecordingSession {
+            stream: None,
+            ring_buffer: Some(ring),
+            writer_handle: Some(writer_handle),
+            active: session_active,
+            level: session_level,
+            debug_count: session_debug,
+            device_id: device_id_str.clone(),
+            sample_rate,
+            channels,
+            output_path: output_path.clone(),
+            target_mono,
+            large_file_format: lff,
+            use_system_buffer: false,
+            start_offset_us: 0,
+            pre_record_seconds: 0.0,
+            child: None,
+            pulse_capture: Some(pulse_handle),
+        };
+
+        if let Ok(mut sessions) = mgr.sessions.lock() {
+            sessions.insert("default".to_string(), session);
+        }
+
+        return Ok(output_path.to_string_lossy().to_string());
     }
 
     let host = cpal::default_host();
@@ -1579,6 +1731,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         start_offset_us: 0,
         pre_record_seconds: pre_record_secs,
         child: None,
+        pulse_capture: None,
     };
 
     if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1683,6 +1836,11 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
 
     // Drop cpal stream to release OS audio resources
     session.stream = None;
+
+    // Join Pulse capture thread if present
+    if let Some(handle) = session.pulse_capture.take() {
+        let _ = handle.join();
+    }
 
     // Signal ring buffer to stop and join writer thread to get writer back
     let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) = (session.ring_buffer.take(), session.writer_handle.take()) {
@@ -1948,6 +2106,7 @@ pub async fn start_multi_recording(
             start_offset_us: offset_us,
             pre_record_seconds: 0.0,
             child: None,
+            pulse_capture: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1983,6 +2142,11 @@ pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec
 
         // Drop the stream
         session.stream = None;
+
+        // Join Pulse capture thread if present
+        if let Some(handle) = session.pulse_capture.take() {
+            let _ = handle.join();
+        }
 
         let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
             (session.ring_buffer.take(), session.writer_handle.take())
@@ -2118,6 +2282,102 @@ pub async fn start_session(
     let output_dir_path = PathBuf::from(&output_dir);
     std::fs::create_dir_all(&output_dir_path)
         .map_err(|e| format!("Failed to create output directory: {}", e))?;
+
+    let target_mono_early = channel_mode.as_deref() == Some("mono");
+    let lff_early = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
+
+    // On Linux, use Pulse capture for Pulse-enumerated devices
+    #[cfg(target_os = "linux")]
+    if super::pulse_devices::is_pulse_source(&device_id) {
+        let (simple, spec) = super::pulse_devices::open_pulse_capture(
+            &device_id,
+            48000, // will be overridden by Pulse negotiation
+            2,
+        )?;
+        let sample_rate = spec.rate;
+        let channels = spec.channels as u16;
+        let use_rf64 = lff_early == "rf64";
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let safe_name: String = device_id.chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .take(30)
+            .collect();
+        let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
+        let output_path = output_dir_path.join(&filename);
+
+        let wav_spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let audio_writer = if use_rf64 {
+            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
+        } else {
+            let file = File::create(&output_path)
+                .map_err(|e| format!("Failed to create output file: {}", e))?;
+            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), wav_spec)
+                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+        };
+
+        let session_active = Arc::new(AtomicBool::new(true));
+        let session_level = Arc::new(AtomicU32::new(0));
+        let session_debug = Arc::new(AtomicUsize::new(0));
+
+        let ring = Arc::new(RecordingRingBuffer::new(
+            sample_rate as usize * channels as usize * 10,
+        ).with_channels(channels));
+
+        let writer_handle = spawn_wav_writer_thread(
+            ring.clone(), audio_writer, channels, target_mono_early,
+            output_path.clone(), wav_spec, use_rf64,
+        );
+
+        // Spawn Pulse capture thread → ring buffer → WAV writer
+        let shared_level = mgr.current_level.clone();
+        let ring_clone = ring.clone();
+        let active_clone = session_active.clone();
+        let level_clone = session_level.clone();
+        let shared_clone = shared_level;
+        let pulse_handle = std::thread::Builder::new()
+            .name(format!("pulse-capture-{}", session_id))
+            .spawn(move || {
+                super::pulse_devices::pulse_capture_thread(
+                    simple, spec, ring_clone, active_clone, level_clone, shared_clone,
+                );
+            })
+            .map_err(|e| format!("Failed to spawn Pulse capture thread: {}", e))?;
+
+        let session = RecordingSession {
+            stream: None,
+            ring_buffer: Some(ring),
+            writer_handle: Some(writer_handle),
+            active: session_active,
+            level: session_level,
+            debug_count: session_debug,
+            device_id: device_id.clone(),
+            sample_rate,
+            channels,
+            output_path: output_path.clone(),
+            target_mono: target_mono_early,
+            large_file_format: lff_early,
+            use_system_buffer: false,
+            start_offset_us: 0,
+            pre_record_seconds: 0.0,
+            child: None,
+            pulse_capture: Some(pulse_handle),
+        };
+
+        if let Ok(mut sessions) = mgr.sessions.lock() {
+            sessions.insert(session_id.clone(), session);
+        }
+
+        log::info!("Session '{}' started (Pulse): {}", session_id, output_path.display());
+        return Ok(output_path.to_string_lossy().to_string());
+    }
 
     let host = cpal::default_host();
 
@@ -2278,6 +2538,7 @@ pub async fn start_session(
             start_offset_us: 0,
             pre_record_seconds: 0.0,
             child: None,
+            pulse_capture: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -2369,6 +2630,7 @@ pub async fn start_session(
                 start_offset_us: 0,
                 pre_record_seconds: 0.0,
                 child: Some(child),
+                pulse_capture: None,
             };
 
             if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -2410,6 +2672,12 @@ pub async fn stop_session(
         let _ = child.wait();
     }
     session.child = None;
+
+    // Join Pulse capture thread if this was a Pulse capture session
+    if let Some(handle) = session.pulse_capture.take() {
+        log::info!("Session '{}': joining Pulse capture thread", session_id);
+        let _ = handle.join();
+    }
 
     // Drop the stream
     session.stream = None;
@@ -2521,6 +2789,39 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
             }
         }
 
+        // On Linux, use Pulse capture for Pulse-enumerated devices
+        #[cfg(target_os = "linux")]
+        if super::pulse_devices::is_pulse_source(device_id) {
+            let active = Arc::new(AtomicBool::new(true));
+            let level = Arc::new(AtomicU32::new(0));
+            match super::pulse_devices::open_pulse_capture(device_id, 48000, 2) {
+                Ok((simple, spec)) => {
+                    let a = active.clone();
+                    let l = level.clone();
+                    let handle = std::thread::Builder::new()
+                        .name(format!("pulse-preview-{}", device_id))
+                        .spawn(move || {
+                            super::pulse_devices::pulse_preview_thread(simple, spec, a, l);
+                        });
+                    if let Ok(h) = handle {
+                        if let Ok(mut guard) = mgr.preview_sessions.lock() {
+                            guard.insert(device_id.clone(), PreviewSession {
+                                stream: None,
+                                active,
+                                level,
+                                child: None,
+                                pulse_capture: Some(h),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Preview: Pulse capture failed for '{}': {}", device_id, e);
+                }
+            }
+            continue;
+        }
+
         let device = match host.input_devices()
             .map_err(|e| format!("Failed to enumerate devices: {}", e))?
             .find(|d| d.name().ok().as_ref() == Some(device_id))
@@ -2567,6 +2868,7 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
                                                     active,
                                                     level,
                                                     child: Some(child),
+                                                    pulse_capture: None,
                                                 });
                                             }
                                         }
@@ -2617,6 +2919,7 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
                         active,
                         level,
                         child: None,
+                        pulse_capture: None,
                     });
                 }
             }
@@ -2672,6 +2975,9 @@ fn stop_all_previews_internal(mgr: &RecordingManager) {
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            if let Some(handle) = session.pulse_capture.take() {
+                let _ = handle.join();
+            }
             log::info!("Preview stopped: {}", id);
         }
     }
@@ -2700,6 +3006,11 @@ pub async fn cancel_recording(mgr: State<'_, RecordingManager>) -> Result<(), St
 
         // Drop cpal stream
         session.stream = None;
+
+        // Join Pulse capture thread if present
+        if let Some(handle) = session.pulse_capture.take() {
+            let _ = handle.join();
+        }
 
         let output_path = session.output_path.clone();
         // Stop ring buffer and join writer thread before cleaning up
@@ -3436,6 +3747,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
             start_offset_us: 0,
             pre_record_seconds: 0.0,
             child: None,
+            pulse_capture: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
