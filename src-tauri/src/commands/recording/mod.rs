@@ -2,6 +2,7 @@ pub mod types;
 pub mod ring_buffer;
 pub mod wav_writer;
 pub mod error;
+pub mod backend;
 
 // Re-export all public types so external callers remain unchanged
 pub use types::*;
@@ -12,6 +13,10 @@ pub use wav_writer::{
     read_wav_format,
 };
 pub use error::AudioError;
+pub use backend::{
+    AudioBackend, AudioSink, BackendKind, DeviceKey,
+    InputHandle, NegotiatedConfig, StreamConfigRequest,
+};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat};
