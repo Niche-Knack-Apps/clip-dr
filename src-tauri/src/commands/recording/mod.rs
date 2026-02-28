@@ -3,6 +3,7 @@ pub mod ring_buffer;
 pub mod wav_writer;
 pub mod error;
 pub mod backend;
+pub mod cpal_backend;
 
 // Re-export all public types so external callers remain unchanged
 pub use types::*;
@@ -17,6 +18,8 @@ pub use backend::{
     AudioBackend, AudioSink, BackendKind, DeviceKey,
     InputHandle, NegotiatedConfig, StreamConfigRequest,
 };
+pub use cpal_backend::CpalBackend;
+use cpal_backend::StreamHolder;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat};
@@ -34,33 +37,6 @@ use std::time::Duration;
 use tauri::State;
 
 use crate::audio_util::{Rf64Writer, AudioWriter, WAV_SEGMENT_MAX_DATA_BYTES};
-
-/// Wrapper to make cpal::Stream storable in a Mutex (it's !Send but we only
-/// access from the main thread during setup/teardown).
-/// Includes thread affinity guard: logs a warning if dropped on a different thread.
-struct StreamHolder {
-    stream: cpal::Stream,
-    creator_thread: std::thread::ThreadId,
-}
-unsafe impl Send for StreamHolder {}
-
-impl StreamHolder {
-    fn new(stream: cpal::Stream) -> Self {
-        Self { stream, creator_thread: std::thread::current().id() }
-    }
-}
-
-impl Drop for StreamHolder {
-    fn drop(&mut self) {
-        if std::thread::current().id() != self.creator_thread {
-            log::warn!(
-                "StreamHolder dropped on different thread than created \
-                 (created: {:?}, dropping: {:?})",
-                self.creator_thread, std::thread::current().id()
-            );
-        }
-    }
-}
 
 // ── Per-Session Recording Architecture ──
 // RecordingManager is Tauri managed state; individual sessions hold per-stream
@@ -893,14 +869,8 @@ pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingMan
     let active = mgr.preview_active.clone();
     let level = mgr.preview_level.clone();
 
-    let stream = match config.sample_format() {
-        SampleFormat::F32 => build_preview_stream::<f32>(&device, &config.into(), active, level)?,
-        SampleFormat::I16 => build_preview_stream::<i16>(&device, &config.into(), active, level)?,
-        SampleFormat::U16 => build_preview_stream::<u16>(&device, &config.into(), active, level)?,
-        SampleFormat::I32 => build_preview_stream::<i32>(&device, &config.into(), active, level)?,
-        SampleFormat::U8 => build_preview_stream::<u8>(&device, &config.into(), active, level)?,
-        fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
-    };
+    let sample_format = config.sample_format();
+    let stream = cpal_backend::build_preview_stream_dispatch(&device, &config.into(), sample_format, active, level)?;
 
     stream.play().map_err(|e| format!("Failed to start preview stream: {}", e))?;
 
@@ -912,36 +882,7 @@ pub async fn start_device_preview(device_id: String, mgr: State<'_, RecordingMan
     Ok(())
 }
 
-fn build_preview_stream<T: Sample + cpal::SizedSample + Send + 'static>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    active: Arc<AtomicBool>,
-    level: Arc<AtomicU32>,
-) -> Result<cpal::Stream, String>
-where
-    f32: cpal::FromSample<T>,
-{
-    device.build_input_stream(
-        config,
-        move |data: &[T], _: &cpal::InputCallbackInfo| {
-            if !active.load(Ordering::SeqCst) { return; }
-            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                let mut max_level: f32 = 0.0;
-                for s in data.iter() {
-                    let f = f32::from_sample(*s);
-                    max_level = max_level.max(f.abs());
-                }
-                level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
-            }));
-            if result.is_err() {
-                log::warn!("Preview callback panic caught (ALSA timing issue)");
-            }
-        },
-        |err| log::error!("Preview stream error: {}", err),
-        None,
-    )
-    .map_err(|e| format!("Failed to build preview stream: {}", e))
-}
+// build_preview_stream moved to cpal_backend.rs
 
 /// Get the current preview level (0.0 - 1.0)
 #[tauri::command]
@@ -1099,46 +1040,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
             cfg.min_sample_rate().0, cfg.max_sample_rate().0);
     }
 
-    // Score configs: prefer stereo, prefer F32/I16, prefer matching sample rate
-    fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
-        let mut score = 0;
-        if cfg.channels() == 2 { score += 100; }
-        else if cfg.channels() == 1 { score += 50; }
-        match cfg.sample_format() {
-            SampleFormat::F32 => score += 50,
-            SampleFormat::I16 => score += 40,
-            SampleFormat::I32 => score += 30,
-            SampleFormat::F64 => score += 25,
-            SampleFormat::U16 => score += 20,
-            _ => {}
-        }
-        let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
-        if rate_range.contains(&target_rate) { score += 10; }
-        if rate_range.contains(&44100) { score += 5; }
-        score
-    }
-
-    let target_rate = default_config.sample_rate().0;
-    let best_supported = supported_configs.iter()
-        .max_by_key(|cfg| config_score(cfg, target_rate));
-
-    let config = if let Some(best) = best_supported {
-        let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
-        let sample_rate = if rate_range.contains(&target_rate) {
-            target_rate
-        } else if rate_range.contains(&44100) {
-            44100
-        } else {
-            best.max_sample_rate().0.min(48000)
-        };
-        let cfg = best.clone().with_sample_rate(cpal::SampleRate(sample_rate));
-        log::info!("Selected config: {} ch, {:?}, {} Hz (score: {})",
-            cfg.channels(), cfg.sample_format(), sample_rate, config_score(best, target_rate));
-        cfg
-    } else {
-        log::info!("Using default config");
-        default_config
-    };
+    let config = cpal_backend::select_best_config(&supported_configs, default_config);
 
     let sample_rate = config.sample_rate().0;
     let channels = config.channels();
@@ -1232,14 +1134,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     // Build stream based on sample format (per-session atomics)
     let stream_config: cpal::StreamConfig = config.into();
     let shared_level = mgr.current_level.clone();
-    let stream = match sample_format {
-        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-        fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
-    };
+    let stream = cpal_backend::build_input_stream_dispatch(&device, &stream_config, sample_format, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?;
 
     stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
 
@@ -1271,82 +1166,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     Ok(output_path.to_string_lossy().to_string())
 }
 
-fn build_input_stream<T: Sample + cpal::SizedSample + Send + 'static>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    ring: Arc<RecordingRingBuffer>,
-    active: Arc<AtomicBool>,
-    session_level: Arc<AtomicU32>,
-    shared_level: Arc<AtomicU32>,
-    debug_count: Arc<AtomicUsize>,
-) -> Result<cpal::Stream, String>
-where
-    f32: cpal::FromSample<T>,
-{
-    let err_fn = |err| {
-        log::error!("Recording error: {}", err);
-    };
-
-    device
-        .build_input_stream(
-            config,
-            move |data: &[T], _: &cpal::InputCallbackInfo| {
-                if !active.load(Ordering::SeqCst) {
-                    return;
-                }
-
-                // Wrap in catch_unwind to prevent ALSA timing panics from crashing
-                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    let cap = ring.capacity;
-                    let wp = ring.write_pos.load(Ordering::Relaxed);
-                    let rp = ring.read_pos.load(Ordering::Acquire);
-
-                    // Check if ring buffer has enough space (drop samples if full)
-                    let used = wp.wrapping_sub(rp);
-                    if used + data.len() > cap {
-                        ring.overrun_count.fetch_add(1, Ordering::Relaxed);
-                        let _ = ring.max_fill_level.fetch_max(cap, Ordering::Relaxed);
-                        return;
-                    }
-
-                    // Convert and write samples directly to ring buffer (no Vec alloc)
-                    let mut max_level: f32 = 0.0;
-                    for (i, s) in data.iter().enumerate() {
-                        let f = f32::from_sample(*s);
-                        let idx = (wp + i) % cap;
-                        unsafe { *ring.data_ptr.add(idx) = f; }
-                        let abs = f.abs();
-                        if abs > max_level { max_level = abs; }
-                    }
-                    ring.write_pos.store(wp + data.len(), Ordering::Release);
-
-                    // Update telemetry: high-water mark of ring usage
-                    let _ = ring.max_fill_level.fetch_max(used + data.len(), Ordering::Relaxed);
-
-                    // Update level meters (per-session + shared)
-                    let level_int = (max_level * 1000.0) as u32;
-                    session_level.store(level_int, Ordering::SeqCst);
-                    shared_level.store(level_int, Ordering::SeqCst);
-
-                    // Debug logging every ~1 second
-                    let count = debug_count.fetch_add(1, Ordering::SeqCst);
-                    if count % 43 == 0 {
-                        log::info!(
-                            "Recording callback #{}: {} samples, max_level={:.4}, ring used={}/{}",
-                            count, data.len(), max_level, used + data.len(), cap
-                        );
-                    }
-                }));
-
-                if result.is_err() {
-                    log::warn!("Audio callback panic caught (ALSA timing issue)");
-                }
-            },
-            err_fn,
-            None,
-        )
-        .map_err(|e| format!("Failed to build input stream: {}", e))
-}
+// build_input_stream moved to cpal_backend.rs
 
 #[tauri::command]
 pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<RecordingResult, String> {
@@ -1522,41 +1342,7 @@ pub async fn start_multi_recording(
             .map_err(|e| format!("Failed to get supported configs: {}", e))?
             .collect();
 
-        fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
-            let mut score = 0;
-            if cfg.channels() == 2 { score += 100; }
-            else if cfg.channels() == 1 { score += 50; }
-            match cfg.sample_format() {
-                SampleFormat::F32 => score += 50,
-                SampleFormat::I16 => score += 40,
-                SampleFormat::I32 => score += 30,
-                SampleFormat::F64 => score += 25,
-                SampleFormat::U16 => score += 20,
-                _ => {}
-            }
-            let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
-            if rate_range.contains(&target_rate) { score += 10; }
-            if rate_range.contains(&44100) { score += 5; }
-            score
-        }
-
-        let target_rate = default_config.sample_rate().0;
-        let best_supported = supported_configs.iter()
-            .max_by_key(|c| config_score(c, target_rate));
-
-        let config = if let Some(best) = best_supported {
-            let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
-            let sample_rate = if rate_range.contains(&target_rate) {
-                target_rate
-            } else if rate_range.contains(&44100) {
-                44100
-            } else {
-                best.max_sample_rate().0.min(48000)
-            };
-            best.clone().with_sample_rate(cpal::SampleRate(sample_rate))
-        } else {
-            default_config
-        };
+        let config = cpal_backend::select_best_config(&supported_configs, default_config);
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
@@ -1606,14 +1392,7 @@ pub async fn start_multi_recording(
 
         let stream_config: cpal::StreamConfig = config.into();
         let shared_level = mgr.current_level.clone();
-        let stream = match sample_format {
-            SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
-        };
+        let stream = cpal_backend::build_input_stream_dispatch(&device, &stream_config, sample_format, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?;
 
         stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
 
@@ -1962,41 +1741,7 @@ pub async fn start_session(
             .map_err(|e| format!("Failed to get supported configs: {}", e))?
             .collect();
 
-        fn config_score(cfg: &cpal::SupportedStreamConfigRange, target_rate: u32) -> i32 {
-            let mut score = 0;
-            if cfg.channels() == 2 { score += 100; }
-            else if cfg.channels() == 1 { score += 50; }
-            match cfg.sample_format() {
-                SampleFormat::F32 => score += 50,
-                SampleFormat::I16 => score += 40,
-                SampleFormat::I32 => score += 30,
-                SampleFormat::F64 => score += 25,
-                SampleFormat::U16 => score += 20,
-                _ => {}
-            }
-            let rate_range = cfg.min_sample_rate().0..=cfg.max_sample_rate().0;
-            if rate_range.contains(&target_rate) { score += 10; }
-            if rate_range.contains(&44100) { score += 5; }
-            score
-        }
-
-        let target_rate = default_config.sample_rate().0;
-        let best_supported = supported_configs.iter()
-            .max_by_key(|c| config_score(c, target_rate));
-
-        let config = if let Some(best) = best_supported {
-            let rate_range = best.min_sample_rate().0..=best.max_sample_rate().0;
-            let sample_rate = if rate_range.contains(&target_rate) {
-                target_rate
-            } else if rate_range.contains(&44100) {
-                44100
-            } else {
-                best.max_sample_rate().0.min(48000)
-            };
-            best.clone().with_sample_rate(cpal::SampleRate(sample_rate))
-        } else {
-            default_config
-        };
+        let config = cpal_backend::select_best_config(&supported_configs, default_config);
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
@@ -2042,14 +1787,7 @@ pub async fn start_session(
 
         let stream_config: cpal::StreamConfig = config.into();
         let shared_level = mgr.current_level.clone();
-        let stream = match sample_format {
-            SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::U16 => build_input_stream::<u16>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            SampleFormat::U8 => build_input_stream::<u8>(&device, &stream_config, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?,
-            fmt => return Err(format!("Unsupported sample format: {:?}", fmt)),
-        };
+        let stream = cpal_backend::build_input_stream_dispatch(&device, &stream_config, sample_format, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?;
 
         stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
 
@@ -2436,14 +2174,8 @@ pub async fn start_device_previews(device_ids: Vec<String>, mgr: State<'_, Recor
         let active = Arc::new(AtomicBool::new(true));
         let level = Arc::new(AtomicU32::new(0));
 
-        let stream_result = match config.sample_format() {
-            SampleFormat::F32 => build_preview_stream::<f32>(&device, &config.into(), active.clone(), level.clone()),
-            SampleFormat::I16 => build_preview_stream::<i16>(&device, &config.into(), active.clone(), level.clone()),
-            SampleFormat::U16 => build_preview_stream::<u16>(&device, &config.into(), active.clone(), level.clone()),
-            SampleFormat::I32 => build_preview_stream::<i32>(&device, &config.into(), active.clone(), level.clone()),
-            SampleFormat::U8 => build_preview_stream::<u8>(&device, &config.into(), active.clone(), level.clone()),
-            fmt => { log::warn!("Preview: unsupported format {:?} for '{}'", fmt, device_id); continue; }
-        };
+        let sample_format = config.sample_format();
+        let stream_result = cpal_backend::build_preview_stream_dispatch(&device, &config.into(), sample_format, active.clone(), level.clone());
 
         match stream_result {
             Ok(s) => {
