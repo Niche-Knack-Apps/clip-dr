@@ -14,8 +14,7 @@ pub use types::*;
 pub use ring_buffer::{RecordingRingBuffer, PreRecordBuffer, PRE_RECORD_SECONDS};
 pub use wav_writer::{
     segment_path, spawn_wav_writer_thread, stereo_wav_to_mono_streaming,
-    patch_wav_header_if_needed, check_wav_header_valid, estimate_wav_duration,
-    read_wav_format,
+    patch_wav_header_if_needed, estimate_wav_duration, read_wav_format,
 };
 pub use error::AudioError;
 pub use backend::{
@@ -31,8 +30,6 @@ pub use diagnostics::*;
 // System audio functions re-exported from system_audio.rs (glob re-export needed
 // so Tauri's generated __cmd__ symbols are visible at the recording:: path)
 pub use system_audio::*;
-#[cfg(target_os = "linux")]
-use system_audio::which_exists;
 use system_audio::reset_recording_state_internal;
 use cpal_backend::StreamHolder;
 
@@ -41,10 +38,9 @@ use cpal::{Sample, SampleFormat};
 use hound::{WavSpec, WavWriter};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read};
+use std::io::BufWriter;
 use std::panic;
 use std::path::PathBuf;
-use std::process::{ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -60,7 +56,7 @@ use crate::audio_util::{Rf64Writer, AudioWriter};
 
 /// A single recording session (one input device → one WAV file).
 pub(super) struct RecordingSession {
-    pub(super) stream: Option<StreamHolder>,
+    pub(super) input: Option<Box<dyn InputHandle>>,
     pub(super) ring_buffer: Option<Arc<RecordingRingBuffer>>,
     pub(super) writer_handle: Option<JoinHandle<(AudioWriter, usize, Vec<PathBuf>)>>,
     /// Per-session active flag (checked by audio callback)
@@ -81,10 +77,6 @@ pub(super) struct RecordingSession {
     pub(super) start_offset_us: i64,
     /// Seconds of pre-record buffer audio prepended
     pub(super) pre_record_seconds: f64,
-    /// Subprocess handle for monitor device capture (when CPAL can't open the device)
-    pub(super) child: Option<std::process::Child>,
-    /// Pulse capture thread handle (Linux only)
-    pub(super) pulse_capture: Option<JoinHandle<()>>,
 }
 
 /// Managed state for all recording, monitoring, and preview operations.
@@ -125,10 +117,6 @@ pub struct RecordingManager {
     pub(super) system_audio_sample_count: Arc<AtomicUsize>,
     pub(super) debug_callback_count: Arc<AtomicUsize>,
 }
-
-// RecordingSession contains a StreamHolder which has `unsafe impl Send`.
-// The Mutex wrappers ensure safe concurrent access.
-unsafe impl Send for RecordingSession {}
 
 /// A preview session for live VU metering (no recording).
 struct PreviewSession {
@@ -218,138 +206,6 @@ fn matches_monitor_sink(device_name: &str, sink_name: &str) -> bool {
     }
 
     tokens.iter().all(|token| lower_device.contains(&token.to_lowercase()))
-}
-
-/// Spawn a subprocess to capture audio from a PipeWire monitor source.
-/// Tries `parec` first, then `pw-record`. Returns the child process with stdout piped.
-#[cfg(target_os = "linux")]
-fn spawn_monitor_capture(device_id: &str, sample_rate: u32, channels: u16) -> Result<std::process::Child, String> {
-    let pa_monitor = if device_id.ends_with(".monitor") {
-        device_id.to_string()
-    } else {
-        format!("{}.monitor", device_id)
-    };
-    // For pw-record --target, strip .monitor suffix to get the sink name
-    let pw_target = device_id.trim_end_matches(".monitor");
-
-    let child = if which_exists("parec") {
-        log::info!("Monitor capture: using parec -d {}", pa_monitor);
-        std::process::Command::new("parec")
-            .args([
-                "-d", &pa_monitor,
-                "--format=float32le",
-                &format!("--rate={}", sample_rate),
-                &format!("--channels={}", channels),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    } else if which_exists("pw-record") {
-        log::info!("Monitor capture: using pw-record --target {}", pw_target);
-        std::process::Command::new("pw-record")
-            .args([
-                "-P", "{ stream.capture.sink = true }",
-                "--target", pw_target,
-                "--format", "f32",
-                "--rate", &sample_rate.to_string(),
-                "--channels", &channels.to_string(),
-                "-",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    } else {
-        return Err("No audio capture tool available (need parec or pw-record)".to_string());
-    };
-
-    child.map_err(|e| format!("Failed to spawn monitor capture: {}", e))
-}
-
-/// Reader thread for subprocess-based monitor preview (level metering only).
-#[cfg(target_os = "linux")]
-fn monitor_preview_reader(stdout: ChildStdout, active: Arc<AtomicBool>, level: Arc<AtomicU32>) {
-    let mut reader = BufReader::with_capacity(8192, stdout);
-    let mut buffer = [0u8; 8192];
-
-    while active.load(Ordering::SeqCst) {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                let mut max_level: f32 = 0.0;
-                for chunk in buffer[..n].chunks_exact(4) {
-                    let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    max_level = max_level.max(s.abs());
-                }
-                level.store((max_level * 1000.0) as u32, Ordering::SeqCst);
-            }
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::Interrupted {
-                    log::warn!("Monitor preview reader error: {}", e);
-                    break;
-                }
-            }
-        }
-    }
-    log::info!("Monitor preview reader thread exiting");
-}
-
-/// Reader thread for subprocess-based monitor recording.
-/// Reads f32le from stdout, pushes samples into ring buffer (same as CPAL callback path).
-#[cfg(target_os = "linux")]
-fn monitor_session_reader(
-    stdout: ChildStdout,
-    ring: Arc<RecordingRingBuffer>,
-    active: Arc<AtomicBool>,
-    level: Arc<AtomicU32>,
-    shared_level: Arc<AtomicU32>,
-) {
-    let mut reader = BufReader::with_capacity(8192, stdout);
-    let mut buffer = [0u8; 8192];
-
-    while active.load(Ordering::SeqCst) {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                let samples: Vec<f32> = buffer[..n]
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-
-                if samples.is_empty() {
-                    continue;
-                }
-
-                // Update level meter
-                let max_level = samples.iter()
-                    .map(|s| s.abs())
-                    .fold(0.0f32, f32::max);
-                let level_val = (max_level * 1000.0) as u32;
-                level.store(level_val, Ordering::SeqCst);
-                shared_level.store(level_val, Ordering::SeqCst);
-
-                // Push into ring buffer (same path as CPAL callback)
-                let wp = ring.write_pos.load(Ordering::Relaxed);
-                let rp = ring.read_pos.load(Ordering::Relaxed);
-                let used = wp.wrapping_sub(rp);
-                if used + samples.len() <= ring.capacity {
-                    for (i, &s) in samples.iter().enumerate() {
-                        let idx = (wp + i) % ring.capacity;
-                        unsafe { *ring.data_ptr.add(idx) = s; }
-                    }
-                    ring.write_pos.store(wp + samples.len(), Ordering::Release);
-                } else {
-                    ring.overrun_count.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::Interrupted {
-                    log::warn!("Monitor session reader error: {}", e);
-                    break;
-                }
-            }
-        }
-    }
-    log::info!("Monitor session reader thread exiting");
 }
 
 /// List input audio devices using the backend selected at startup.
@@ -742,159 +598,68 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // On Linux, use Pulse capture if device_id is a Pulse source
-    #[cfg(target_os = "linux")]
-    if device_id.as_ref().map_or(false, |id| super::pulse_devices::is_pulse_source(id)) {
-        let device_id_str = device_id.as_ref().unwrap();
-        log::info!("[Recording] start_recording: Pulse source detected, device='{}'", device_id_str);
-        let (simple, spec) = super::pulse_devices::open_pulse_capture(device_id_str, 48000, 2)?;
-        log::debug!("[Recording] Pulse capture opened: format={:?} rate={} ch={}", spec.format, spec.rate, spec.channels);
-        let sample_rate = spec.rate;
-        let channels = spec.channels as u16;
-
-        let target_mono = channel_mode.as_deref() == Some("mono");
-        let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
-        let use_rf64 = lff == "rf64";
-
-        let output_dir_path = PathBuf::from(&output_dir);
-        std::fs::create_dir_all(&output_dir_path)
-            .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir_path, e))?;
-
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("recording_{}.wav", timestamp);
-        let output_path = output_dir_path.join(&filename);
-
-        let wav_spec = WavSpec {
-            channels,
-            sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-
-        let audio_writer = if use_rf64 {
-            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
-                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
-        } else {
-            let file = File::create(&output_path)
-                .map_err(|e| format!("Failed to create output file: {}", e))?;
-            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), wav_spec)
-                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
-        };
-
-        let session_active = Arc::new(AtomicBool::new(true));
-        let session_level = Arc::new(AtomicU32::new(0));
-        let session_debug = Arc::new(AtomicUsize::new(0));
-        mgr.current_level.store(0, Ordering::SeqCst);
-
-        let ring = Arc::new(RecordingRingBuffer::new(
-            sample_rate as usize * channels as usize * 10,
-        ).with_channels(channels));
-
-        let writer_handle = spawn_wav_writer_thread(
-            ring.clone(), audio_writer, channels, target_mono,
-            output_path.clone(), wav_spec, use_rf64,
-        );
-
-        let shared_level = mgr.current_level.clone();
-        let ring_clone = ring.clone();
-        let active_clone = session_active.clone();
-        let level_clone = session_level.clone();
-        let pulse_handle = std::thread::Builder::new()
-            .name("pulse-capture-default".into())
-            .spawn(move || {
-                super::pulse_devices::pulse_capture_thread(
-                    simple, spec, ring_clone, active_clone, level_clone, shared_level,
-                );
-            })
-            .map_err(|e| format!("Failed to spawn Pulse capture thread: {}", e))?;
-
-        let session = RecordingSession {
-            stream: None,
-            ring_buffer: Some(ring),
-            writer_handle: Some(writer_handle),
-            active: session_active,
-            level: session_level,
-            debug_count: session_debug,
-            device_id: device_id_str.clone(),
-            sample_rate,
-            channels,
-            output_path: output_path.clone(),
-            target_mono,
-            large_file_format: lff,
-            use_system_buffer: false,
-            start_offset_us: 0,
-            pre_record_seconds: 0.0,
-            child: None,
-            pulse_capture: Some(pulse_handle),
-        };
-
-        if let Ok(mut sessions) = mgr.sessions.lock() {
-            sessions.insert("default".to_string(), session);
-        }
-
-        return Ok(output_path.to_string_lossy().to_string());
-    }
-
-    let host = cpal::default_host();
-
-    // Select device
-    let device = if let Some(ref id) = device_id {
-        host.input_devices()
-            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-            .find(|d| d.name().ok().as_ref() == Some(id))
-            .ok_or_else(|| format!("Device not found: {}", id))?
+    // Resolve device_id — use default if not specified
+    let device_id_str = if let Some(id) = device_id {
+        id
     } else {
-        host.default_input_device()
+        let devices = mgr.registry.refresh()
+            .map_err(|e| format!("Failed to list devices: {}", e))?;
+        devices.iter()
+            .find(|d| d.is_default)
+            .map(|d| d.id.clone())
             .ok_or("No default input device available")?
     };
 
-    let device_name = device.name().unwrap_or_default();
-    log::info!("Recording from device: {}", device_name);
+    log::info!("[Recording] start_recording: device='{}'", device_id_str);
 
-    // Get supported config
-    let default_config = device
-        .default_input_config()
-        .map_err(|e| format!("Failed to get input config: {}", e))?;
-
-    // Try to find a better config - prefer stereo with good sample format (F32 > I16 > I32)
-    let supported_configs: Vec<_> = device.supported_input_configs()
-        .map_err(|e| format!("Failed to get supported configs: {}", e))?
-        .collect();
-
-    log::info!("Available input configs:");
-    for cfg in &supported_configs {
-        log::info!("  {} ch, {:?}, {}-{} Hz",
-            cfg.channels(), cfg.sample_format(),
-            cfg.min_sample_rate().0, cfg.max_sample_rate().0);
-    }
-
-    let config = cpal_backend::select_best_config(&supported_configs, default_config);
-
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels();
-
-    let sample_format = config.sample_format();
-    log::info!(
-        "Recording config: {} Hz, {} channels, {:?}",
-        sample_rate, channels, sample_format
-    );
-    log::info!("Buffer size: {:?}", config.buffer_size());
+    let target_mono = channel_mode.as_deref() == Some("mono");
+    let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
+    let use_rf64 = lff == "rf64";
 
     // Ensure output directory exists
     let output_dir_path = PathBuf::from(&output_dir);
     std::fs::create_dir_all(&output_dir_path)
         .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir_path, e))?;
 
-    // Generate output filename
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("recording_{}.wav", timestamp);
     let output_path = output_dir_path.join(&filename);
 
-    let target_mono = channel_mode.as_deref() == Some("mono");
-    let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
-    let use_rf64 = lff == "rf64";
+    // Create per-session atomics
+    let session_active = Arc::new(AtomicBool::new(true));
+    let session_level = Arc::new(AtomicU32::new(0));
+    let session_debug = Arc::new(AtomicUsize::new(0));
+    mgr.current_level.store(0, Ordering::SeqCst);
 
-    // Create WAV/RF64 writer for incremental crash-safe recording
+    // Create ring buffer (generous default, 10s at 48kHz stereo)
+    let ring = Arc::new(RecordingRingBuffer::new(48000 * 2 * 10).with_channels(2));
+
+    // Open input stream via backend trait (handles Pulse vs cpal internally)
+    let key = DeviceKey {
+        backend: mgr.registry.kind(),
+        opaque_id: device_id_str.clone(),
+    };
+    let config_req = StreamConfigRequest {
+        preferred_rate: Some(48000),
+        preferred_channels: Some(2),
+    };
+    let sink = AudioSink {
+        ring: ring.clone(),
+        meter: session_level.clone(),
+        shared_meter: mgr.current_level.clone(),
+    };
+
+    let mut input = mgr.registry.backend()
+        .open_input(&key, config_req, sink)
+        .map_err(|e| format!("Failed to open input: {}", e))?;
+
+    let config = input.negotiated_config();
+    let sample_rate = config.rate;
+    let channels = config.channels;
+
+    log::info!("[Recording] Negotiated config: {}Hz {}ch", sample_rate, channels);
+
+    // Create WAV/RF64 writer with negotiated format
     let spec = WavSpec {
         channels,
         sample_rate,
@@ -912,19 +677,6 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
             .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
     };
 
-    // Create per-session atomics
-    let session_active = Arc::new(AtomicBool::new(true));
-    let session_level = Arc::new(AtomicU32::new(0));
-    let session_debug = Arc::new(AtomicUsize::new(0));
-
-    // Also update the shared current_level for backward compat
-    mgr.current_level.store(0, Ordering::SeqCst);
-
-    // Create ring buffer for lock-free audio callback → writer thread communication
-    let ring = Arc::new(RecordingRingBuffer::new(
-        sample_rate as usize * channels as usize * 10, // 10 seconds of headroom
-    ).with_channels(channels));
-
     // Spawn the writer thread (drains ring buffer → disk)
     let writer_handle = spawn_wav_writer_thread(
         ring.clone(), audio_writer, channels, target_mono,
@@ -935,11 +687,9 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     let mut pre_record_secs = 0.0f64;
     if let Ok(mut guard) = mgr.pre_record_buffer.lock() {
         if let Some(ref buf) = *guard {
-            // Only drain if the buffer's format matches the recording
             if buf.sample_rate == sample_rate && buf.channels == channels {
                 let (samples, secs) = buf.drain();
                 if !samples.is_empty() {
-                    // Write directly into ring buffer
                     let cap = ring.capacity;
                     let wp = ring.write_pos.load(Ordering::Relaxed);
                     for (i, &s) in samples.iter().enumerate() {
@@ -955,26 +705,20 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
                     buf.sample_rate, buf.channels, sample_rate, channels);
             }
         }
-        // Clear the buffer reference (monitoring callback may still hold its own Arc)
         *guard = None;
     }
 
-    // Build stream based on sample format (per-session atomics)
-    let stream_config: cpal::StreamConfig = config.into();
-    let shared_level = mgr.current_level.clone();
-    let stream = cpal_backend::build_input_stream_dispatch(&device, &stream_config, sample_format, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?;
+    // Start capture
+    input.start().map_err(|e| format!("Failed to start recording: {}", e))?;
 
-    stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
-
-    // Create session and store it
     let session = RecordingSession {
-        stream: Some(StreamHolder::new(stream)),
+        input: Some(input),
         ring_buffer: Some(ring),
         writer_handle: Some(writer_handle),
         active: session_active,
         level: session_level,
         debug_count: session_debug,
-        device_id: device_id.unwrap_or_else(|| device_name.clone()),
+        device_id: device_id_str,
         sample_rate,
         channels,
         output_path: output_path.clone(),
@@ -983,8 +727,6 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
         use_system_buffer: false,
         start_offset_us: 0,
         pre_record_seconds: pre_record_secs,
-        child: None,
-        pulse_capture: None,
     };
 
     if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1012,12 +754,9 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
     // Give the stream callback a moment to see the flag
     std::thread::sleep(Duration::from_millis(100));
 
-    // Drop cpal stream to release OS audio resources
-    session.stream = None;
-
-    // Join Pulse capture thread if present
-    if let Some(handle) = session.pulse_capture.take() {
-        let _ = handle.join();
+    // Stop and drop the input handle (releases OS audio resources, joins threads)
+    if let Some(mut input) = session.input.take() {
+        let _ = input.stop();
     }
 
     // Signal ring buffer to stop and join writer thread to get writer back
@@ -1142,7 +881,6 @@ pub async fn start_multi_recording(
     std::fs::create_dir_all(&output_dir_path)
         .map_err(|e| format!("Failed to create output directory: {}", e))?;
 
-    let host = cpal::default_host();
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let start_instant = std::time::Instant::now();
     let mut session_ids = Vec::new();
@@ -1154,30 +892,40 @@ pub async fn start_multi_recording(
             format!("multi_{}", idx)
         };
 
-        let device = host.input_devices()
-            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-            .find(|d| d.name().ok().as_ref() == Some(&cfg.device_id))
-            .ok_or_else(|| format!("Device not found: {}", cfg.device_id))?;
+        log::info!("Multi-recording session '{}': device '{}'", session_id, cfg.device_id);
 
-        let device_name = device.name().unwrap_or_default();
-        log::info!("Multi-recording session '{}': device '{}'", session_id, device_name);
+        let session_active = Arc::new(AtomicBool::new(true));
+        let session_level = Arc::new(AtomicU32::new(0));
+        let session_debug = Arc::new(AtomicUsize::new(0));
 
-        let default_config = device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get input config for '{}': {}", device_name, e))?;
+        // Create ring buffer (generous default)
+        let ring = Arc::new(RecordingRingBuffer::new(48000 * 2 * 10).with_channels(2));
 
-        let supported_configs: Vec<_> = device.supported_input_configs()
-            .map_err(|e| format!("Failed to get supported configs: {}", e))?
-            .collect();
+        // Open input stream via backend trait
+        let key = DeviceKey {
+            backend: mgr.registry.kind(),
+            opaque_id: cfg.device_id.clone(),
+        };
+        let config_req = StreamConfigRequest {
+            preferred_rate: Some(48000),
+            preferred_channels: Some(2),
+        };
+        let sink = AudioSink {
+            ring: ring.clone(),
+            meter: session_level.clone(),
+            shared_meter: mgr.current_level.clone(),
+        };
 
-        let config = cpal_backend::select_best_config(&supported_configs, default_config);
+        let mut input = mgr.registry.backend()
+            .open_input(&key, config_req, sink)
+            .map_err(|e| format!("Failed to open input for '{}': {}", cfg.device_id, e))?;
 
-        let sample_rate = config.sample_rate().0;
-        let channels = config.channels();
-        let sample_format = config.sample_format();
+        let negotiated = input.negotiated_config();
+        let sample_rate = negotiated.rate;
+        let channels = negotiated.channels;
 
-        // Use device index in filename for multi-source
-        let safe_name: String = device_name.chars()
+        // Use device id in filename for multi-source
+        let safe_name: String = cfg.device_id.chars()
             .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
             .take(30)
             .collect();
@@ -1205,29 +953,18 @@ pub async fn start_multi_recording(
                 .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
         };
 
-        let session_active = Arc::new(AtomicBool::new(true));
-        let session_level = Arc::new(AtomicU32::new(0));
-        let session_debug = Arc::new(AtomicUsize::new(0));
-
-        let ring = Arc::new(RecordingRingBuffer::new(
-            sample_rate as usize * channels as usize * 10,
-        ).with_channels(channels));
-
         let writer_handle = spawn_wav_writer_thread(
             ring.clone(), audio_writer, channels, target_mono,
             output_path.clone(), spec, use_rf64,
         );
 
-        let stream_config: cpal::StreamConfig = config.into();
-        let shared_level = mgr.current_level.clone();
-        let stream = cpal_backend::build_input_stream_dispatch(&device, &stream_config, sample_format, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?;
-
-        stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
+        // Start capture
+        input.start().map_err(|e| format!("Failed to start multi-session '{}': {}", session_id, e))?;
 
         let offset_us = start_instant.elapsed().as_micros() as i64;
 
         let session = RecordingSession {
-            stream: Some(StreamHolder::new(stream)),
+            input: Some(input),
             ring_buffer: Some(ring),
             writer_handle: Some(writer_handle),
             active: session_active,
@@ -1242,8 +979,6 @@ pub async fn start_multi_recording(
             use_system_buffer: false,
             start_offset_us: offset_us,
             pre_record_seconds: 0.0,
-            child: None,
-            pulse_capture: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
@@ -1277,12 +1012,9 @@ pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec
         session.active.store(false, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(50));
 
-        // Drop the stream
-        session.stream = None;
-
-        // Join Pulse capture thread if present
-        if let Some(handle) = session.pulse_capture.take() {
-            let _ = handle.join();
+        // Stop and drop the input handle
+        if let Some(mut input) = session.input.take() {
+            let _ = input.stop();
         }
 
         let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
@@ -1420,331 +1152,104 @@ pub async fn start_session(
     std::fs::create_dir_all(&output_dir_path)
         .map_err(|e| format!("Failed to create output directory: {}", e))?;
 
-    let target_mono_early = channel_mode.as_deref() == Some("mono");
-    let lff_early = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
-
-    // On Linux, use Pulse capture for Pulse-enumerated devices
-    #[cfg(target_os = "linux")]
-    if super::pulse_devices::is_pulse_source(&device_id) {
-        log::info!("[Session] start_session '{}': Pulse source detected, device='{}'", session_id, device_id);
-        let (simple, spec) = super::pulse_devices::open_pulse_capture(
-            &device_id,
-            48000, // will be overridden by Pulse negotiation
-            2,
-        )?;
-        log::debug!("[Session] Pulse capture opened for '{}': format={:?} rate={} ch={}", session_id, spec.format, spec.rate, spec.channels);
-        let sample_rate = spec.rate;
-        let channels = spec.channels as u16;
-        let use_rf64 = lff_early == "rf64";
-
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let safe_name: String = device_id.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .take(30)
-            .collect();
-        let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
-        let output_path = output_dir_path.join(&filename);
-
-        let wav_spec = WavSpec {
-            channels,
-            sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-
-        let audio_writer = if use_rf64 {
-            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
-                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
-        } else {
-            let file = File::create(&output_path)
-                .map_err(|e| format!("Failed to create output file: {}", e))?;
-            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), wav_spec)
-                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
-        };
-
-        let session_active = Arc::new(AtomicBool::new(true));
-        let session_level = Arc::new(AtomicU32::new(0));
-        let session_debug = Arc::new(AtomicUsize::new(0));
-
-        let ring = Arc::new(RecordingRingBuffer::new(
-            sample_rate as usize * channels as usize * 10,
-        ).with_channels(channels));
-
-        let writer_handle = spawn_wav_writer_thread(
-            ring.clone(), audio_writer, channels, target_mono_early,
-            output_path.clone(), wav_spec, use_rf64,
-        );
-
-        // Spawn Pulse capture thread → ring buffer → WAV writer
-        let shared_level = mgr.current_level.clone();
-        let ring_clone = ring.clone();
-        let active_clone = session_active.clone();
-        let level_clone = session_level.clone();
-        let shared_clone = shared_level;
-        let pulse_handle = std::thread::Builder::new()
-            .name(format!("pulse-capture-{}", session_id))
-            .spawn(move || {
-                super::pulse_devices::pulse_capture_thread(
-                    simple, spec, ring_clone, active_clone, level_clone, shared_clone,
-                );
-            })
-            .map_err(|e| format!("Failed to spawn Pulse capture thread: {}", e))?;
-
-        let session = RecordingSession {
-            stream: None,
-            ring_buffer: Some(ring),
-            writer_handle: Some(writer_handle),
-            active: session_active,
-            level: session_level,
-            debug_count: session_debug,
-            device_id: device_id.clone(),
-            sample_rate,
-            channels,
-            output_path: output_path.clone(),
-            target_mono: target_mono_early,
-            large_file_format: lff_early,
-            use_system_buffer: false,
-            start_offset_us: 0,
-            pre_record_seconds: 0.0,
-            child: None,
-            pulse_capture: Some(pulse_handle),
-        };
-
-        if let Ok(mut sessions) = mgr.sessions.lock() {
-            sessions.insert(session_id.clone(), session);
-        }
-
-        log::info!("Session '{}' started (Pulse): {}", session_id, output_path.display());
-        return Ok(output_path.to_string_lossy().to_string());
-    }
-
-    let host = cpal::default_host();
-
-    // Three-stage device lookup:
-    // 1. Exact CPAL match by name
-    // 2. Fuzzy CPAL match for monitor devices
-    // 3. Subprocess fallback for monitor devices CPAL can't open
-    let cpal_device = host.input_devices()
-        .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-        .find(|d| d.name().ok().as_ref() == Some(&device_id));
-
-    let cpal_device = if cpal_device.is_some() {
-        cpal_device
-    } else if device_id.ends_with(".monitor") {
-        // Stage 2: fuzzy match for monitor devices
-        let sink = device_id.trim_end_matches(".monitor");
-        let fuzzy = host.input_devices()
-            .map_err(|e| format!("Failed to enumerate devices: {}", e))?
-            .find(|d| {
-                if let Ok(name) = d.name() {
-                    let lower = name.to_lowercase();
-                    (lower.contains("monitor") || lower.contains("loopback"))
-                        && matches_monitor_sink(&name, sink)
-                } else {
-                    false
-                }
-            });
-        if fuzzy.is_some() {
-            log::info!("Session '{}': resolved monitor '{}' via fuzzy CPAL match", session_id, device_id);
-        }
-        fuzzy
-    } else {
-        None
-    };
-
     let target_mono = channel_mode.as_deref() == Some("mono");
     let lff = large_file_format.as_deref().unwrap_or("split-tracks").to_string();
     let use_rf64 = lff == "rf64";
 
-    if let Some(device) = cpal_device {
-        // ── CPAL path (stages 1 & 2) ──
-        let device_name = device.name().unwrap_or_default();
-        log::info!("Starting session '{}': device '{}'", session_id, device_name);
+    log::info!("[Session] start_session '{}': device='{}'", session_id, device_id);
 
-        let default_config = device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get input config for '{}': {}", device_name, e))?;
+    // Create per-session atomics
+    let session_active = Arc::new(AtomicBool::new(true));
+    let session_level = Arc::new(AtomicU32::new(0));
+    let session_debug = Arc::new(AtomicUsize::new(0));
 
-        let supported_configs: Vec<_> = device.supported_input_configs()
-            .map_err(|e| format!("Failed to get supported configs: {}", e))?
-            .collect();
+    // Create ring buffer (generous default)
+    let ring = Arc::new(RecordingRingBuffer::new(48000 * 2 * 10).with_channels(2));
 
-        let config = cpal_backend::select_best_config(&supported_configs, default_config);
+    // Open input stream via backend trait
+    let key = DeviceKey {
+        backend: mgr.registry.kind(),
+        opaque_id: device_id.clone(),
+    };
+    let config_req = StreamConfigRequest {
+        preferred_rate: Some(48000),
+        preferred_channels: Some(2),
+    };
+    let sink = AudioSink {
+        ring: ring.clone(),
+        meter: session_level.clone(),
+        shared_meter: mgr.current_level.clone(),
+    };
 
-        let sample_rate = config.sample_rate().0;
-        let channels = config.channels();
-        let sample_format = config.sample_format();
+    let mut input = mgr.registry.backend()
+        .open_input(&key, config_req, sink)
+        .map_err(|e| format!("Failed to open input for '{}': {}", device_id, e))?;
 
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let safe_name: String = device_name.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .take(30)
-            .collect();
-        let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
-        let output_path = output_dir_path.join(&filename);
+    let config = input.negotiated_config();
+    let sample_rate = config.rate;
+    let channels = config.channels;
 
-        let spec = WavSpec {
-            channels,
-            sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
+    log::info!("[Session] '{}' negotiated: {}Hz {}ch", session_id, sample_rate, channels);
 
-        let audio_writer = if use_rf64 {
-            AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
-                .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
-        } else {
-            let file = File::create(&output_path)
-                .map_err(|e| format!("Failed to create output file: {}", e))?;
-            AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
-                .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
-        };
+    // Generate output filename
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let safe_name: String = device_id.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(30)
+        .collect();
+    let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
+    let output_path = output_dir_path.join(&filename);
 
-        let session_active = Arc::new(AtomicBool::new(true));
-        let session_level = Arc::new(AtomicU32::new(0));
-        let session_debug = Arc::new(AtomicUsize::new(0));
+    // Create WAV/RF64 writer with negotiated format
+    let spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
 
-        let ring = Arc::new(RecordingRingBuffer::new(
-            sample_rate as usize * channels as usize * 10,
-        ).with_channels(channels));
-
-        let writer_handle = spawn_wav_writer_thread(
-            ring.clone(), audio_writer, channels, target_mono,
-            output_path.clone(), spec, use_rf64,
-        );
-
-        let stream_config: cpal::StreamConfig = config.into();
-        let shared_level = mgr.current_level.clone();
-        let stream = cpal_backend::build_input_stream_dispatch(&device, &stream_config, sample_format, ring.clone(), session_active.clone(), session_level.clone(), shared_level.clone(), session_debug.clone())?;
-
-        stream.play().map_err(|e| format!("Failed to start stream for '{}': {}", device_name, e))?;
-
-        let session = RecordingSession {
-            stream: Some(StreamHolder::new(stream)),
-            ring_buffer: Some(ring),
-            writer_handle: Some(writer_handle),
-            active: session_active,
-            level: session_level,
-            debug_count: session_debug,
-            device_id: device_id.clone(),
-            sample_rate,
-            channels,
-            output_path: output_path.clone(),
-            target_mono,
-            large_file_format: lff,
-            use_system_buffer: false,
-            start_offset_us: 0,
-            pre_record_seconds: 0.0,
-            child: None,
-            pulse_capture: None,
-        };
-
-        if let Ok(mut sessions) = mgr.sessions.lock() {
-            sessions.insert(session_id.clone(), session);
-        }
-
-        log::info!("Session '{}' started: {}", session_id, output_path.display());
-        Ok(output_path.to_string_lossy().to_string())
-    } else if device_id.ends_with(".monitor") {
-        // ── Stage 3: Subprocess fallback for monitor devices ──
-        #[cfg(target_os = "linux")]
-        {
-            let sample_rate: u32 = 48000;
-            let channels: u16 = 2;
-
-            log::info!("Session '{}': using subprocess capture for monitor '{}'", session_id, device_id);
-
-            let mut child = spawn_monitor_capture(&device_id, sample_rate, channels)?;
-            let stdout = child.stdout.take()
-                .ok_or_else(|| "Failed to capture subprocess stdout".to_string())?;
-
-            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let safe_name: String = device_id.chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-                .take(30)
-                .collect();
-            let filename = format!("recording_{}_{}.wav", timestamp, safe_name);
-            let output_path = output_dir_path.join(&filename);
-
-            let spec = WavSpec {
-                channels,
-                sample_rate,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-
-            let audio_writer = if use_rf64 {
-                AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
-                    .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
-            } else {
-                let file = File::create(&output_path)
-                    .map_err(|e| format!("Failed to create output file: {}", e))?;
-                AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
-                    .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
-            };
-
-            let session_active = Arc::new(AtomicBool::new(true));
-            let session_level = Arc::new(AtomicU32::new(0));
-            let session_debug = Arc::new(AtomicUsize::new(0));
-
-            let ring = Arc::new(RecordingRingBuffer::new(
-                sample_rate as usize * channels as usize * 10,
-            ).with_channels(channels));
-
-            let writer_handle = spawn_wav_writer_thread(
-                ring.clone(), audio_writer, channels, target_mono,
-                output_path.clone(), spec, use_rf64,
-            );
-
-            // Spawn reader thread: subprocess stdout → ring buffer
-            let shared_level = mgr.current_level.clone();
-            {
-                let ring_clone = ring.clone();
-                let active_clone = session_active.clone();
-                let level_clone = session_level.clone();
-                let shared_clone = shared_level;
-                std::thread::Builder::new()
-                    .name("monitor-session-reader".into())
-                    .spawn(move || {
-                        monitor_session_reader(stdout, ring_clone, active_clone, level_clone, shared_clone);
-                    })
-                    .map_err(|e| format!("Failed to spawn monitor reader thread: {}", e))?;
-            }
-
-            let session = RecordingSession {
-                stream: None,
-                ring_buffer: Some(ring),
-                writer_handle: Some(writer_handle),
-                active: session_active,
-                level: session_level,
-                debug_count: session_debug,
-                device_id: device_id.clone(),
-                sample_rate,
-                channels,
-                output_path: output_path.clone(),
-                target_mono,
-                large_file_format: lff,
-                use_system_buffer: false,
-                start_offset_us: 0,
-                pre_record_seconds: 0.0,
-                child: Some(child),
-                pulse_capture: None,
-            };
-
-            if let Ok(mut sessions) = mgr.sessions.lock() {
-                sessions.insert(session_id.clone(), session);
-            }
-
-            log::info!("Session '{}' started (subprocess): {}", session_id, output_path.display());
-            Ok(output_path.to_string_lossy().to_string())
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Err(format!("Monitor device '{}' not found (subprocess fallback only on Linux)", device_id))
-        }
+    let audio_writer = if use_rf64 {
+        AudioWriter::Rf64(Rf64Writer::new(output_path.clone(), sample_rate, channels)
+            .map_err(|e| format!("Failed to create RF64 writer: {}", e))?)
     } else {
-        Err(format!("Device not found: {}", device_id))
+        let file = File::create(&output_path)
+            .map_err(|e| format!("Failed to create output file: {}", e))?;
+        AudioWriter::Hound(WavWriter::new(BufWriter::new(file), spec)
+            .map_err(|e| format!("Failed to create WAV writer: {}", e))?)
+    };
+
+    let writer_handle = spawn_wav_writer_thread(
+        ring.clone(), audio_writer, channels, target_mono,
+        output_path.clone(), spec, use_rf64,
+    );
+
+    // Start capture
+    input.start().map_err(|e| format!("Failed to start session '{}': {}", session_id, e))?;
+
+    let session = RecordingSession {
+        input: Some(input),
+        ring_buffer: Some(ring),
+        writer_handle: Some(writer_handle),
+        active: session_active,
+        level: session_level,
+        debug_count: session_debug,
+        device_id: device_id.clone(),
+        sample_rate,
+        channels,
+        output_path: output_path.clone(),
+        target_mono,
+        large_file_format: lff,
+        use_system_buffer: false,
+        start_offset_us: 0,
+        pre_record_seconds: 0.0,
+    };
+
+    if let Ok(mut sessions) = mgr.sessions.lock() {
+        sessions.insert(session_id.clone(), session);
     }
+
+    log::info!("Session '{}' started: {}", session_id, output_path.display());
+    Ok(output_path.to_string_lossy().to_string())
 }
 
 /// Stop a single recording session by its ID. Other sessions continue running.
@@ -1763,22 +1268,10 @@ pub async fn stop_session(
     session.active.store(false, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(50));
 
-    // Kill subprocess if this was a monitor capture session
-    if let Some(ref mut child) = session.child {
-        log::info!("Session '{}': killing monitor subprocess", session_id);
-        let _ = child.kill();
-        let _ = child.wait();
+    // Stop and drop the input handle
+    if let Some(mut input) = session.input.take() {
+        let _ = input.stop();
     }
-    session.child = None;
-
-    // Join Pulse capture thread if this was a Pulse capture session
-    if let Some(handle) = session.pulse_capture.take() {
-        log::info!("Session '{}': joining Pulse capture thread", session_id);
-        let _ = handle.join();
-    }
-
-    // Drop the stream
-    session.stream = None;
 
     let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
         (session.ring_buffer.take(), session.writer_handle.take())
@@ -1980,12 +1473,9 @@ pub async fn cancel_recording(mgr: State<'_, RecordingManager>) -> Result<(), St
     if let Some(mut session) = session {
         session.active.store(false, Ordering::SeqCst);
 
-        // Drop cpal stream
-        session.stream = None;
-
-        // Join Pulse capture thread if present
-        if let Some(handle) = session.pulse_capture.take() {
-            let _ = handle.join();
+        // Stop and drop the input handle
+        if let Some(mut input) = session.input.take() {
+            let _ = input.stop();
         }
 
         let output_path = session.output_path.clone();

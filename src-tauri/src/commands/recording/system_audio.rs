@@ -369,7 +369,9 @@ pub(super) fn reset_recording_state_internal(mgr: &RecordingManager) {
     if let Ok(mut sessions) = mgr.sessions.lock() {
         for (_, mut session) in sessions.drain() {
             session.active.store(false, Ordering::SeqCst);
-            session.stream = None;
+            if let Some(mut input) = session.input.take() {
+                let _ = input.stop();
+            }
             if let Some(ring) = &session.ring_buffer {
                 ring.active.store(false, Ordering::Release);
             }
@@ -457,7 +459,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
 
         // Store recording state as a session
         let session = RecordingSession {
-            stream: None,
+            input: None,
             ring_buffer: None,
             writer_handle: None,
             active: mgr.system_recording_active.clone(),
@@ -472,8 +474,6 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
             use_system_buffer: true,
             start_offset_us: 0,
             pre_record_seconds: 0.0,
-            child: None,
-            pulse_capture: None,
         };
 
         if let Ok(mut sessions) = mgr.sessions.lock() {
