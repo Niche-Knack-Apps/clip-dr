@@ -20,7 +20,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 const containerRef = ref<HTMLDivElement | null>(null);
 const width = ref(0);
 
-const { getBucketsForRange, renderWaveform, waveformData, duration, tileVersion, hasPyramid } = useWaveform();
+const { getBucketsForRange, getBucketsForRangeForLayer, renderWaveform, renderLayeredWaveform, waveformData, duration, tileVersion, hasPyramid, waveformLayers } = useWaveform();
 
 let resizeObserver: ResizeObserver | null = null;
 let resizeRafId: number | null = null;
@@ -37,14 +37,30 @@ function render() {
   canvas.height = props.height * dpr;
   ctx.scale(dpr, dpr);
 
-  const buckets = getBucketsForRange(props.startTime, props.endTime, width.value);
+  const layers = waveformLayers.value;
 
-  renderWaveform(ctx, buckets, {
-    width: width.value,
-    height: props.height,
-    color: props.color,
-    backgroundColor: props.backgroundColor,
-  });
+  if (layers.length > 0) {
+    // Layered rendering: each track in its own color with alpha blending
+    const layerBuckets = layers.map(layer => ({
+      color: layer.color,
+      buckets: getBucketsForRangeForLayer(layer, props.startTime, props.endTime, width.value),
+    }));
+
+    renderLayeredWaveform(ctx, layerBuckets, {
+      width: width.value,
+      height: props.height,
+      backgroundColor: props.backgroundColor,
+    });
+  } else {
+    // Fallback: single-color composite
+    const buckets = getBucketsForRange(props.startTime, props.endTime, width.value);
+    renderWaveform(ctx, buckets, {
+      width: width.value,
+      height: props.height,
+      color: props.color,
+      backgroundColor: props.backgroundColor,
+    });
+  }
 }
 
 function updateSize() {
@@ -96,7 +112,7 @@ onUnmounted(() => {
 });
 
 // Watch for props changes and waveform data changes (when tracks are modified)
-watch([() => props.startTime, () => props.endTime, () => props.color, waveformData, tileVersion, duration, hasPyramid], scheduleRender, { immediate: true });
+watch([() => props.startTime, () => props.endTime, () => props.color, waveformData, tileVersion, duration, hasPyramid, waveformLayers], scheduleRender, { immediate: true });
 </script>
 
 <template>

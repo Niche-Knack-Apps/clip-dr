@@ -276,6 +276,16 @@ export interface WaveformBucket {
   max: number;
 }
 
+export interface WaveformLayer {
+  trackId: string;
+  color: string;
+  waveformData: number[];     // min/max pairs (1000 buckets), timeline-mapped
+  trackStart: number;
+  duration: number;
+  sourcePath?: string;
+  hasPeakPyramid?: boolean;
+}
+
 export interface AudioMetadata {
   duration: number;
   sampleRate: number;

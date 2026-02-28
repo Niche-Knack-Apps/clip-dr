@@ -2,7 +2,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useTracksStore } from '@/stores/tracks';
-import type { WaveformBucket } from '@/shared/types';
+import type { WaveformBucket, WaveformLayer } from '@/shared/types';
 
 export interface WaveformRenderOptions {
   width: number;
@@ -49,7 +49,7 @@ function quantizeRange(start: number, end: number) {
 }
 
 export function useWaveform() {
-  const { effectiveWaveformData, effectiveDuration } = useEffectiveAudio();
+  const { effectiveWaveformData, effectiveDuration, waveformLayers } = useEffectiveAudio();
   const tracksStore = useTracksStore();
 
   // Use effective waveform/duration which switches when a processed track is soloed
@@ -259,6 +259,98 @@ export function useWaveform() {
     ctx.fill();
   }
 
+  function getBucketsForRangeForLayer(
+    layer: WaveformLayer,
+    start: number,
+    end: number,
+    bucketCount: number
+  ): WaveformBucket[] {
+    const data = layer.waveformData;
+    if (!data.length || bucketCount <= 0) return [];
+
+    const dur = duration.value;
+    if (!dur || !isFinite(dur) || dur <= 0) return [];
+
+    const totalBuckets = data.length / 2;
+    const startBucket = Math.floor((start / dur) * totalBuckets);
+    const endBucket = Math.ceil((end / dur) * totalBuckets);
+    const rangeBuckets = endBucket - startBucket;
+
+    // Use peak tiles when overview data is insufficient
+    if (rangeBuckets < bucketCount * 2 && layer.hasPeakPyramid && layer.sourcePath) {
+      const relStart = Math.max(0, start - layer.trackStart);
+      const relEnd = Math.min(layer.duration, end - layer.trackStart);
+      const { qStart, qEnd } = quantizeRange(relStart, relEnd);
+      const cacheKey = `${layer.sourcePath}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${bucketCount}`;
+
+      const cached = getCachedTile(cacheKey);
+      if (cached && cached.length >= bucketCount * 2) {
+        const tileRange = qEnd - qStart;
+        const fracStart = Math.max(0, (relStart - qStart) / tileRange);
+        const fracEnd = Math.min(1, (relEnd - qStart) / tileRange);
+        const fracSpan = fracEnd - fracStart;
+
+        const buckets: WaveformBucket[] = [];
+        for (let i = 0; i < bucketCount; i++) {
+          const frac = fracStart + (i / bucketCount) * fracSpan;
+          const srcIdx = Math.min(Math.floor(frac * bucketCount), bucketCount - 1);
+          buckets.push({ min: cached[srcIdx * 2], max: cached[srcIdx * 2 + 1] });
+        }
+        return buckets;
+      }
+
+      if (!inFlightKeys.has(cacheKey)) {
+        inFlightKeys.add(cacheKey);
+        fetchPeakTile(layer.sourcePath, qStart, qEnd, bucketCount, cacheKey);
+      }
+    }
+
+    return stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
+  }
+
+  function renderLayeredWaveform(
+    ctx: CanvasRenderingContext2D,
+    layerBuckets: { color: string; buckets: WaveformBucket[] }[],
+    options: WaveformRenderOptions
+  ): void {
+    const { width, height, backgroundColor = 'transparent' } = options;
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (backgroundColor !== 'transparent') {
+      ctx.fillStyle = backgroundColor;
+      ctx.fillRect(0, 0, width, height);
+    }
+
+    if (layerBuckets.length === 0) return;
+
+    const centerY = height / 2;
+    const singleLayer = layerBuckets.length === 1;
+
+    for (const layer of layerBuckets) {
+      if (!layer.buckets.length) continue;
+
+      ctx.globalAlpha = singleLayer ? 1.0 : 0.7;
+      ctx.fillStyle = layer.color;
+      ctx.beginPath();
+
+      const barWidth = Math.max(width / layer.buckets.length, 1);
+      for (let i = 0; i < layer.buckets.length; i++) {
+        const { min, max } = layer.buckets[i];
+        const x = i * barWidth;
+        const topY = centerY - max * centerY;
+        const bottomY = centerY - min * centerY;
+        const barH = bottomY - topY;
+        if (barH < 0.5) continue;
+        ctx.rect(x, topY, barWidth, barH);
+      }
+
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1.0;
+  }
+
   function timeToX(time: number, width: number, start: number, end: number): number {
     return ((time - start) / (end - start)) * width;
   }
@@ -272,8 +364,11 @@ export function useWaveform() {
     duration,
     tileVersion,
     hasPyramid,
+    waveformLayers,
     getBucketsForRange,
+    getBucketsForRangeForLayer,
     renderWaveform,
+    renderLayeredWaveform,
     timeToX,
     xToTime,
   };

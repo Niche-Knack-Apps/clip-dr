@@ -1,7 +1,7 @@
 import { computed } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
-import type { TrackClip } from '@/shared/types';
+import type { TrackClip, WaveformLayer, Track } from '@/shared/types';
 
 /**
  * Composable that creates a composite waveform from all tracks.
@@ -93,11 +93,68 @@ export function useCompositeWaveform() {
     return composite;
   });
 
+  // Per-track waveform layers with solo/mute filtering
+  const waveformLayers = computed((): WaveformLayer[] => {
+    const tracks = tracksStore.tracks;
+    if (tracks.length === 0) return [];
+
+    const timelineDuration = tracksStore.timelineDuration;
+    if (timelineDuration <= 0) return [];
+
+    // Solo/mute filtering (same logic as playback)
+    const playable = tracks.filter((t: Track) =>
+      !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching'
+    );
+    const soloed = playable.filter((t: Track) => t.solo && !t.muted);
+    const active = soloed.length > 0 ? soloed : playable.filter((t: Track) => !t.muted);
+
+    if (active.length === 0) return [];
+
+    const bucketDuration = timelineDuration / WAVEFORM_BUCKET_COUNT;
+    const layers: WaveformLayer[] = [];
+
+    for (const track of active) {
+      // Single track with no clips: use waveformData directly (no allocation)
+      if (!track.clips || track.clips.length === 0) {
+        layers.push({
+          trackId: track.id,
+          color: track.color,
+          waveformData: track.audioData.waveformData,
+          trackStart: track.trackStart,
+          duration: track.duration,
+          sourcePath: track.sourcePath,
+          hasPeakPyramid: track.hasPeakPyramid,
+        });
+        continue;
+      }
+
+      // Multi-clip track: build per-track bucket array
+      const trackBuckets = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
+      const clips = tracksStore.getTrackClips(track.id);
+      for (const clip of clips) {
+        addClipToComposite(trackBuckets, clip, timelineDuration, bucketDuration);
+      }
+
+      layers.push({
+        trackId: track.id,
+        color: track.color,
+        waveformData: trackBuckets,
+        trackStart: track.trackStart,
+        duration: track.duration,
+        sourcePath: track.sourcePath,
+        hasPeakPyramid: track.hasPeakPyramid,
+      });
+    }
+
+    return layers;
+  });
+
   // Compute composite duration (same as timeline duration)
   const compositeDuration = computed(() => tracksStore.timelineDuration);
 
   return {
     compositeWaveformData,
     compositeDuration,
+    waveformLayers,
   };
 }

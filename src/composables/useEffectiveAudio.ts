@@ -11,7 +11,7 @@ import { useCompositeWaveform } from './useCompositeWaveform';
  */
 export function useEffectiveAudio() {
   const tracksStore = useTracksStore();
-  const { compositeWaveformData, compositeDuration } = useCompositeWaveform();
+  const { compositeWaveformData, compositeDuration, waveformLayers } = useCompositeWaveform();
 
   const selectedTrack = computed(() => tracksStore.selectedTrack);
 
@@ -40,5 +40,6 @@ export function useEffectiveAudio() {
     effectiveTrackStart,
     effectiveTrackEnd,
     effectiveColor,
+    waveformLayers,
   };
 }
