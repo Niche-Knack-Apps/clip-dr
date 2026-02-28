@@ -40,10 +40,10 @@ describe('Recording Store - Device Filtering', () => {
   });
 
   const mockDevices: AudioDevice[] = [
-    { id: 'hw:0,0', name: 'Built-in Mic', is_default: true, is_input: true, is_loopback: false, is_output: false, device_type: 'microphone', channels: 2, sample_rates: [44100, 48000], platform_id: 'hw:0,0' },
-    { id: 'hw:1,0', name: 'USB Mic', is_default: false, is_input: true, is_loopback: false, is_output: false, device_type: 'microphone', channels: 1, sample_rates: [48000], platform_id: 'hw:1,0' },
-    { id: 'alsa_output.monitor', name: 'Monitor of Built-in', is_default: false, is_input: true, is_loopback: true, is_output: false, device_type: 'loopback', channels: 2, sample_rates: [44100, 48000], platform_id: 'alsa_output.monitor' },
-    { id: 'stereo_mix', name: 'Stereo Mix', is_default: false, is_input: true, is_loopback: true, is_output: false, device_type: 'loopback', channels: 2, sample_rates: [44100], platform_id: 'stereo_mix' },
+    { id: 'hw:0,0', name: 'Built-in Mic', is_default: true, is_input: true, is_loopback: false, is_output: false, device_type: 'microphone', channels: 2, sample_rates: [44100, 48000], platform_id: 'hw:0,0', device_source: 'hardware', pulse_name: '', pulse_index: 0, hw_bus: 'pci', serial: '' },
+    { id: 'hw:1,0', name: 'USB Mic', is_default: false, is_input: true, is_loopback: false, is_output: false, device_type: 'microphone', channels: 1, sample_rates: [48000], platform_id: 'hw:1,0', device_source: 'hardware', pulse_name: '', pulse_index: 0, hw_bus: 'usb', serial: '' },
+    { id: 'alsa_output.monitor', name: 'Monitor of Built-in', is_default: false, is_input: true, is_loopback: true, is_output: false, device_type: 'loopback', channels: 2, sample_rates: [44100, 48000], platform_id: 'alsa_output.monitor', device_source: 'monitor', pulse_name: '', pulse_index: 0, hw_bus: '', serial: '' },
+    { id: 'stereo_mix', name: 'Stereo Mix', is_default: false, is_input: true, is_loopback: true, is_output: false, device_type: 'loopback', channels: 2, sample_rates: [44100], platform_id: 'stereo_mix', device_source: 'monitor', pulse_name: '', pulse_index: 0, hw_bus: '', serial: '' },
   ];
 
   it('microphoneDevices filters out loopback devices', async () => {
