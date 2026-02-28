@@ -51,8 +51,8 @@ async function handleStop(deviceId: string) {
   const session = recordingStore.getDeviceSession(deviceId);
   if (!session) return;
   await recordingStore.stopDeviceSession(session.sessionId);
-  // Re-enable previews for non-recording devices
-  refreshPreviews();
+  // Previews for non-recording devices are already running — no need to restart them.
+  // Restarting here caused a churn storm (stop_all_previews + sleep + re-open for every stop).
 }
 
 /** Restart previews for devices that are not currently recording */
@@ -140,8 +140,13 @@ const hiddenCount = computed(() => {
 async function handleStopAll() {
   const activeSessions = recordingStore.sessions.filter(s => s.active);
   for (const session of activeSessions) {
-    await handleStop(session.deviceId);
+    const sess = recordingStore.getDeviceSession(session.deviceId);
+    if (sess) {
+      await recordingStore.stopDeviceSession(sess.sessionId);
+    }
   }
+  // Refresh previews once after all stops are done (not per-stop)
+  refreshPreviews();
 }
 
 // Start previews for all devices on mount

@@ -503,6 +503,23 @@ pub fn pulse_capture_thread(
         spec.format, spec.rate, spec.channels, frame_bytes, buf_frames, buf_bytes);
     log::debug!("[PulseCapture] Ring buffer capacity={} channels={}", ring.capacity, ring.channels);
 
+    // Wait for start() to set active=true (prevents race where thread exits before start() runs)
+    log::debug!("[PulseCapture] Waiting for active flag...");
+    let mut wait_count = 0u32;
+    loop {
+        if active.load(Ordering::SeqCst) {
+            break;
+        }
+        wait_count += 1;
+        if wait_count > 2000 {
+            // 10s timeout — thread was never started, bail out
+            log::warn!("[PulseCapture] Timed out waiting for active flag after 10s, exiting");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    log::debug!("[PulseCapture] Active flag set after {}ms, entering capture loop", wait_count * 5);
+
     while active.load(Ordering::SeqCst) {
         match simple.read(&mut buffer) {
             Ok(()) => {
@@ -595,6 +612,22 @@ pub fn pulse_preview_thread(
 
     log::debug!("[PulsePreview] Preview thread started: format={:?} rate={}Hz channels={} buf={}B",
         spec.format, spec.rate, spec.channels, buf_bytes);
+
+    // Wait for start() to set active=true (prevents race where thread exits before start() runs)
+    log::debug!("[PulsePreview] Waiting for active flag...");
+    let mut wait_count = 0u32;
+    loop {
+        if active.load(Ordering::SeqCst) {
+            break;
+        }
+        wait_count += 1;
+        if wait_count > 2000 {
+            log::warn!("[PulsePreview] Timed out waiting for active flag after 10s, exiting");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    log::debug!("[PulsePreview] Active flag set after {}ms, entering preview loop", wait_count * 5);
 
     while active.load(Ordering::SeqCst) {
         match simple.read(&mut buffer) {

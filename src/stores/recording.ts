@@ -974,33 +974,41 @@ export const useRecordingStore = defineStore('recording', () => {
 
   /** Stop a single recording session by ID. Other sessions continue. */
   async function stopDeviceSession(sessionId: string): Promise<SessionResult | null> {
+    // Capture session timing BEFORE it gets removed
+    const session = sessions.value.find(s => s.sessionId === sessionId);
+    const sessionStartTime = session?.startTime ?? Date.now();
+    const epochVal = recordingEpoch.value;
+    const basePos = recordingBasePosition.value;
+
+    let result: SessionResult | null = null;
     try {
-      // Capture session timing BEFORE it gets removed
-      const session = sessions.value.find(s => s.sessionId === sessionId);
-      const sessionStartTime = session?.startTime ?? Date.now();
-      const epochVal = recordingEpoch.value;
-      const basePos = recordingBasePosition.value;
-
-      const result = await invoke<SessionResult>('stop_session', { sessionId });
-
-      // Remove from sessions list
-      sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
-
-      // If no more active sessions, clear global recording state + epoch
-      if (sessions.value.filter(s => s.active).length === 0) {
-        isRecording.value = false;
-        isLocked.value = false;
-        currentLevel.value = 0;
-        recordingEpoch.value = null;
-        recordingBasePosition.value = null;
-        if (durationInterval) {
-          clearInterval(durationInterval);
-          durationInterval = null;
-        }
-      }
-
+      result = await invoke<SessionResult>('stop_session', { sessionId });
       console.log(`[Recording] Session '${sessionId}' stopped: ${result.result.duration.toFixed(1)}s`);
+    } catch (e) {
+      // Handle gracefully: session may already be gone or captured 0 samples.
+      // Still clean up frontend state so the UI doesn't get stuck.
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[Recording] stop_session('${sessionId}') error (cleaning up frontend state): ${msg}`);
+    }
 
+    // Always remove from sessions list, even on error
+    sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
+
+    // If no more active sessions, clear global recording state + epoch
+    if (sessions.value.filter(s => s.active).length === 0) {
+      isRecording.value = false;
+      isLocked.value = false;
+      currentLevel.value = 0;
+      recordingEpoch.value = null;
+      recordingBasePosition.value = null;
+      if (durationInterval) {
+        clearInterval(durationInterval);
+        durationInterval = null;
+      }
+    }
+
+    // Import the recording if we got a successful result
+    if (result?.result?.path) {
       // Brief delay for OS file flush
       await new Promise(r => setTimeout(r, 200));
 
@@ -1010,19 +1018,12 @@ export const useRecordingStore = defineStore('recording', () => {
         : 0;
       const trackStart = (basePos ?? tracksStore.timelineDuration) + offsetSeconds;
 
-      // Import the recording as a track at the computed position
-      if (result.result.path) {
-        createTrackFromRecording(result.result, trackStart).catch(e => {
-          console.error('[Recording] Background import failed for session:', sessionId, e);
-        });
-      }
-
-      return result;
-    } catch (e) {
-      console.error('[Recording] Failed to stop session:', sessionId, e);
-      error.value = e instanceof Error ? e.message : String(e);
-      return null;
+      createTrackFromRecording(result.result, trackStart).catch(e => {
+        console.error('[Recording] Background import failed for session:', sessionId, e);
+      });
     }
+
+    return result;
   }
 
   /** Check if a specific device is currently recording */

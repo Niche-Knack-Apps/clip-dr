@@ -96,9 +96,10 @@ function handleWindowBlur() {
 }
 
 // Close recording panel on click outside the transport area
+// Recording continues in background — closing the panel doesn't stop it.
 function handleClickOutside(event: MouseEvent) {
   if (!showRecordingPanel.value) return;
-  if (recordingStore.isRecording || recordingStore.isPreparing) return;
+  if (recordingStore.isPreparing) return;
   const target = event.target as HTMLElement;
   if (transportRef.value?.contains(target)) return;
   showRecordingPanel.value = false;
