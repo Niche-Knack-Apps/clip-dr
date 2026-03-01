@@ -110,11 +110,6 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
-  function setAutoTranscribe(enabled: boolean): void {
-    settings.value.autoTranscribe = enabled;
-    saveSettings();
-  }
-
   function setASRModel(model: ASRModel): void {
     settings.value.asrModel = model;
     saveSettings();
@@ -337,7 +332,6 @@ export const useSettingsStore = defineStore('settings', () => {
     setPlayheadColor,
     setSelectionColor,
     setShowTranscription,
-    setAutoTranscribe,
     setASRModel,
     setModelsPath,
     browseModelsPath,

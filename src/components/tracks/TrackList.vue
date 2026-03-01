@@ -5,7 +5,6 @@ import { useClipping } from '@/composables/useClipping';
 import { useAudioStore } from '@/stores/audio';
 import { useUIStore } from '@/stores/ui';
 import { useTracksStore } from '@/stores/tracks';
-import { useTranscriptionStore } from '@/stores/transcription';
 import { useExportStore } from '@/stores/export';
 import { useSettingsStore } from '@/stores/settings';
 import { useSelectionStore } from '@/stores/selection';
@@ -17,7 +16,6 @@ import type { ExportProfile } from '@/shared/types';
 const audioStore = useAudioStore();
 const uiStore = useUIStore();
 const tracksStore = useTracksStore();
-const transcriptionStore = useTranscriptionStore();
 const exportStore = useExportStore();
 const settingsStore = useSettingsStore();
 const selectionStore = useSelectionStore();
@@ -327,15 +325,6 @@ function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number
   if (clipDragTargetTrackId.value && clipDragTargetTrackId.value !== trackId) {
     const ctx = audioStore.getAudioContext();
     tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
-  }
-
-  // Only re-transcribe multi-clip tracks where clip arrangement changed audio content.
-  // Single-buffer tracks only change trackStart, which getAdjustedWords() handles via trackOffset.
-  const movedTrack = tracksStore.tracks.find(t => t.id === trackId);
-  if (movedTrack?.clips && movedTrack.clips.length > 1 && transcriptionStore.hasTranscriptionForTrack(trackId)) {
-    console.log('[TrackList] Multi-clip track rearranged, re-queuing transcription...');
-    transcriptionStore.removeTranscription(trackId);
-    transcriptionStore.queueTranscription(trackId, 'normal');
   }
 
   // Reset state

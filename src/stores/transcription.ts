@@ -632,8 +632,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       return;
     }
 
-    // Queue for background transcription
-    queueTranscription(trackId, 'high');
   }
 
   // ─── Disk persistence ───

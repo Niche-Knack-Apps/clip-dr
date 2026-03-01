@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed, watch } from 'vue';
+import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -446,61 +446,8 @@ export const useAudioStore = defineStore('audio', () => {
       const { useTranscriptionStore } = await import('./transcription');
       const transcriptionStore = useTranscriptionStore();
 
-      // Always try to load cached transcription from disk (free, no CPU cost)
-      const loadedFromDisk = await transcriptionStore.loadTranscriptionFromDisk(trackId);
-      if (!loadedFromDisk) {
-        // Check if auto-transcription is enabled in settings
-        const { useSettingsStore } = await import('./settings');
-        const settingsStore = useSettingsStore();
-
-        if (!settingsStore.settings.autoTranscribe) {
-          console.log(`[Audio] Auto-transcription disabled (use toolbar button)`);
-        } else if (metadata.duration >= 900) {
-          console.log(`[Audio] Skipping auto-transcription: duration ${metadata.duration.toFixed(0)}s >= 900s (use toolbar button)`);
-        } else {
-          // Auto-transcribe short files, but only after fully ready (peaks + cache done)
-          const currentTrack = tracksStore.tracks.find(t => t.id === trackId);
-          const isFullyReady = currentTrack &&
-            (currentTrack.importStatus === 'ready' || currentTrack.importStatus === 'large-file') &&
-            currentTrack.hasPeakPyramid === true;
-
-          if (isFullyReady) {
-            transcriptionStore.queueTranscription(trackId, 'high');
-          } else {
-            // Defer until track is fully ready (peaks built, audio cached)
-            console.log(`[Audio] Deferring auto-transcription until fully ready (importStatus=${currentTrack?.importStatus}, hasPeakPyramid=${currentTrack?.hasPeakPyramid})`);
-
-            const stopWatch = watch(
-              () => {
-                const t = tracksStore.tracks.find(t => t.id === trackId);
-                if (!t) return null; // Track deleted
-                return {
-                  importStatus: t.importStatus,
-                  hasPeakPyramid: t.hasPeakPyramid,
-                };
-              },
-              (val) => {
-                if (!val) {
-                  console.log(`[Audio] Track ${trackId.slice(0, 8)} deleted, cancelling deferred transcription`);
-                  stopWatch();
-                  return;
-                }
-                if ((val.importStatus === 'ready' || val.importStatus === 'large-file') && val.hasPeakPyramid) {
-                  console.log(`[Audio] Track ${trackId.slice(0, 8)} fully ready, starting auto-transcription`);
-                  stopWatch();
-                  transcriptionStore.queueTranscription(trackId, 'high');
-                }
-              },
-            );
-
-            // Safety timeout: stop watching after 2 minutes
-            setTimeout(() => {
-              stopWatch();
-              console.log(`[Audio] Auto-transcription defer timeout for ${trackId.slice(0, 8)}`);
-            }, 120_000);
-          }
-        }
-      }
+      // Load cached transcription from disk (free, no CPU cost)
+      await transcriptionStore.loadTranscriptionFromDisk(trackId);
 
       console.log(`[Audio] ── Import complete in ${((performance.now() - t0) / 1000).toFixed(2)}s ──`);
     } catch (e) {
