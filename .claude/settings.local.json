@@ -77,7 +77,11 @@
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:discourse.ardour.org)",
       "WebFetch(domain:community.ardour.org)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(git tag:*)",
+      "WebFetch(domain:manual.audacityteam.org)",
+      "WebFetch(domain:www.eleken.co)",
+      "Bash(npm ls:*)"
     ]
   }
 }
