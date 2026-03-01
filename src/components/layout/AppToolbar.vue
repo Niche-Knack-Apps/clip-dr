@@ -91,6 +91,7 @@ function handleRecordClick() {
 // Close recording panel on window blur when not actively recording
 function handleWindowBlur() {
   if (showRecordingPanel.value && !recordingStore.isRecording && !recordingStore.isPreparing) {
+    if (document.querySelector('.schedule-overlay')) return;
     showRecordingPanel.value = false;
   }
 }
