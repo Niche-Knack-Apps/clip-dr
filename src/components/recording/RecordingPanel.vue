@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import DeviceMeter from './DeviceMeter.vue';
 import MiniWaveform from './MiniWaveform.vue';
 import OrphanRecovery from './OrphanRecovery.vue';
+import ScheduleRecordingModal from './ScheduleRecordingModal.vue';
 import { useRecordingStore } from '@/stores/recording';
 import { useSettingsStore } from '@/stores/settings';
 import { formatTime } from '@/shared/utils';
@@ -114,6 +115,22 @@ function getHoldProgress(deviceId: string): number {
 const anyRecording = computed(() => recordingStore.sessions.some(s => s.active));
 const activeSessionCount = computed(() => recordingStore.sessions.filter(s => s.active).length);
 
+// Schedule modal
+const showScheduleModal = ref(false);
+
+function handleSchedule(config: { deviceId: string; startTime: number; endTime: number }) {
+  const success = recordingStore.scheduleRecording(config);
+  if (success) {
+    showScheduleModal.value = false;
+  }
+}
+
+function formatCountdown(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 // Hide unused devices toggle
 const hideUnused = ref(false);
 
@@ -178,6 +195,33 @@ onUnmounted(() => {
     <div class="flex items-center gap-2 mb-3">
       <h3 class="text-sm font-medium text-gray-200">Record Audio</h3>
       <div class="ml-auto flex items-center gap-2">
+        <!-- Schedule / Cancel Schedule button -->
+        <button
+          v-if="!recordingStore.hasSchedule"
+          :disabled="anyRecording"
+          class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium transition-colors"
+          :class="anyRecording
+            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+            : 'bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-cyan-400'"
+          title="Schedule a recording"
+          @click="showScheduleModal = true"
+        >
+          <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          Schedule
+        </button>
+        <button
+          v-else
+          class="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600/80 hover:bg-amber-600 text-white text-[10px] font-medium transition-colors"
+          title="Cancel scheduled recording"
+          @click="recordingStore.cancelSchedule()"
+        >
+          <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+          Cancel
+        </button>
         <!-- Stop All button (when 2+ sources recording) -->
         <button
           v-if="activeSessionCount > 1"
@@ -207,6 +251,24 @@ onUnmounted(() => {
 
     <!-- Orphaned recording recovery banner -->
     <OrphanRecovery />
+
+    <!-- Schedule countdown -->
+    <div
+      v-if="recordingStore.hasSchedule"
+      class="mb-3 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-950/20 flex items-center gap-2"
+    >
+      <svg class="w-3.5 h-3.5 text-amber-400 shrink-0 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <div class="flex-1 min-w-0">
+        <span class="text-[10px] text-amber-300 font-medium">
+          Starts in {{ formatCountdown(recordingStore.scheduleCountdown) }}
+        </span>
+        <span class="text-[10px] text-gray-400 ml-1.5 truncate">
+          ({{ recordingStore.schedule?.deviceName }})
+        </span>
+      </div>
+    </div>
 
     <!-- ========== Microphones Section ========== -->
     <div v-if="recordingStore.microphoneDevices.length > 0" class="mb-3">
@@ -511,6 +573,13 @@ onUnmounted(() => {
     <div v-if="recordingStore.microphoneDevices.length === 0 && recordingStore.loopbackDevices.length === 0" class="py-4 text-center">
       <span class="text-xs text-gray-500">No audio devices found</span>
     </div>
+
+    <!-- Schedule modal -->
+    <ScheduleRecordingModal
+      :visible="showScheduleModal"
+      @close="showScheduleModal = false"
+      @schedule="handleSchedule"
+    />
   </div>
 </template>
 

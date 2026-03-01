@@ -104,6 +104,14 @@ export interface OrphanedRecording {
   estimated_duration: number;
 }
 
+export interface ScheduledRecording {
+  deviceId: string;
+  deviceName: string;
+  startTime: number;   // Unix ms
+  endTime: number;     // Unix ms
+  status: 'pending' | 'recording' | 'completed' | 'cancelled';
+}
+
 export type RecordingSource = 'microphone' | 'system';
 
 export interface SystemAudioInfo {
@@ -159,6 +167,19 @@ export const useRecordingStore = defineStore('recording', () => {
 
   // Track placement setting: where new recordings appear on timeline
   const placement = ref<TrackPlacement>('append');
+
+  // Scheduled recording
+  const schedule = ref<ScheduledRecording | null>(null);
+  let scheduleCheckInterval: number | null = null;
+
+  const hasSchedule = computed(() =>
+    schedule.value !== null && schedule.value.status === 'pending'
+  );
+
+  const scheduleCountdown = computed(() => {
+    if (!schedule.value || schedule.value.status !== 'pending') return 0;
+    return Math.max(0, Math.ceil((schedule.value.startTime - Date.now()) / 1000));
+  });
 
   let levelPollInterval: number | null = null;
   let monitorPollInterval: number | null = null;
@@ -414,6 +435,11 @@ export const useRecordingStore = defineStore('recording', () => {
   async function startRecording(): Promise<void> {
     if (isRecording.value) return;
 
+    // Manual start overrides a pending schedule
+    if (schedule.value?.status === 'pending') {
+      cancelSchedule();
+    }
+
     error.value = null;
     isPreparing.value = true;
     clearTimemarks();
@@ -510,6 +536,16 @@ export const useRecordingStore = defineStore('recording', () => {
 
   async function stopRecording(): Promise<RecordingResult | null> {
     if (!isRecording.value) return null;
+
+    // If this was a scheduled recording, mark completed and clear interval
+    if (schedule.value?.status === 'recording') {
+      schedule.value = { ...schedule.value, status: 'completed' };
+      if (scheduleCheckInterval) {
+        clearInterval(scheduleCheckInterval);
+        scheduleCheckInterval = null;
+      }
+      setTimeout(() => { schedule.value = null; }, 2000);
+    }
 
     // Stop polling
     if (levelPollInterval) {
@@ -1092,6 +1128,84 @@ export const useRecordingStore = defineStore('recording', () => {
     orphanedRecordings.value = [];
   }
 
+  // ── Scheduled Recording ──
+
+  function scheduleRecording(config: { deviceId: string; startTime: number; endTime: number }): boolean {
+    const now = Date.now();
+    if (config.startTime <= now || config.endTime <= config.startTime) {
+      error.value = 'Invalid schedule: start must be in the future and end must be after start';
+      return false;
+    }
+    if (config.endTime - config.startTime < 1000) {
+      error.value = 'Invalid schedule: duration must be at least 1 second';
+      return false;
+    }
+
+    const device = devices.value.find(d => d.id === config.deviceId);
+    if (!device) {
+      error.value = 'Selected device not found';
+      return false;
+    }
+
+    // Cancel any existing schedule
+    if (scheduleCheckInterval) {
+      clearInterval(scheduleCheckInterval);
+      scheduleCheckInterval = null;
+    }
+
+    schedule.value = {
+      deviceId: config.deviceId,
+      deviceName: device.name,
+      startTime: config.startTime,
+      endTime: config.endTime,
+      status: 'pending',
+    };
+
+    console.log('[Recording] Scheduled recording:', device.name,
+      'from', new Date(config.startTime).toLocaleTimeString(),
+      'to', new Date(config.endTime).toLocaleTimeString());
+
+    scheduleCheckInterval = window.setInterval(() => {
+      checkSchedule();
+    }, 1000);
+
+    error.value = null;
+    return true;
+  }
+
+  function cancelSchedule(): void {
+    if (scheduleCheckInterval) {
+      clearInterval(scheduleCheckInterval);
+      scheduleCheckInterval = null;
+    }
+    if (schedule.value) {
+      schedule.value = { ...schedule.value, status: 'cancelled' };
+      console.log('[Recording] Schedule cancelled');
+      setTimeout(() => { schedule.value = null; }, 1000);
+    }
+  }
+
+  function checkSchedule(): void {
+    if (!schedule.value) return;
+    const now = Date.now();
+
+    if (schedule.value.status === 'pending' && now >= schedule.value.startTime) {
+      // Time to start
+      schedule.value = { ...schedule.value, status: 'recording' };
+      selectDevice(schedule.value.deviceId);
+      startRecording();
+      console.log('[Recording] Scheduled recording started');
+    } else if (schedule.value.status === 'recording' && now >= schedule.value.endTime) {
+      // Time to stop
+      stopRecording();
+      // stopRecording handles setting status to completed
+      console.log('[Recording] Scheduled recording ended');
+    } else if (schedule.value.status === 'pending') {
+      // Touch the ref to drive countdown reactivity
+      schedule.value = { ...schedule.value };
+    }
+  }
+
   // Initialize devices on store creation
   refreshDevices();
 
@@ -1111,6 +1225,10 @@ export const useRecordingStore = defineStore('recording', () => {
     placement,
     isMuted,
     isLocked,
+    // Schedule
+    schedule,
+    hasSchedule,
+    scheduleCountdown,
     // Timemarks
     timemarks,
     triggerPhrases,
@@ -1167,6 +1285,9 @@ export const useRecordingStore = defineStore('recording', () => {
     stopDeviceSession,
     isDeviceRecording,
     getDeviceSession,
+    // Schedule
+    scheduleRecording,
+    cancelSchedule,
     // Crash recovery
     orphanedRecordings,
     scanOrphanedRecordings,

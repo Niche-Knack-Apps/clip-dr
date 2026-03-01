@@ -98,6 +98,15 @@ const trackTimemarks = computed(() => {
   }));
 });
 
+function handleTimelineClick(event: MouseEvent) {
+  if (event.button !== 0) return;
+  if (isClipDragging.value || clipDragPending.value) return;
+  const rect = containerRef.value?.getBoundingClientRect();
+  if (!rect || duration.value <= 0) return;
+  const time = ((event.clientX - rect.left) / rect.width) * duration.value;
+  playbackStore.seek(Math.max(0, Math.min(duration.value, time)));
+}
+
 function handleTimemarkClick(time: number) {
   playbackStore.seek(props.track.trackStart + time);
 }
@@ -495,6 +504,7 @@ onUnmounted(() => {
     <div
       ref="containerRef"
       class="flex-1 relative"
+      @click="handleTimelineClick"
     >
       <!-- Static waveform for importing tracks (progressive fill-in) — only when zoomed in enough -->
       <canvas

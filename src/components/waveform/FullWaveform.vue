@@ -222,6 +222,14 @@ function handleResize() {
   });
 }
 
+function handleWaveformClick(event: MouseEvent) {
+  if (event.button !== 0) return;
+  const rect = containerRef.value?.getBoundingClientRect();
+  if (!rect || duration.value <= 0) return;
+  const time = ((event.clientX - rect.left) / rect.width) * duration.value;
+  playbackStore.seek(Math.max(0, Math.min(duration.value, time)));
+}
+
 function handlePlayheadDrag(time: number) {
   playbackStore.scrub(time);
 }
@@ -303,6 +311,7 @@ onUnmounted(() => {
       ref="containerRef"
       class="relative"
       :style="{ height: `${props.height}px` }"
+      @click="handleWaveformClick"
       @wheel.prevent="handleWheel"
       @contextmenu.prevent="handleContextMenu"
     >

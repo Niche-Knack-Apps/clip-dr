@@ -18,7 +18,7 @@ fn main() {
     )
     .init();
 
-    log::info!("=== Clip Dr. v0.14.0 starting ===");
+    log::info!("=== Clip Dr. v0.14.1 starting ===");
     log::info!("OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
 
     // Set a custom panic hook to handle ALSA thread panics gracefully
