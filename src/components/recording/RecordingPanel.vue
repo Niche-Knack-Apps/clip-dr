@@ -292,6 +292,10 @@ onUnmounted(() => {
             <span class="text-xs text-gray-200 truncate flex-1">{{ device.name }}</span>
             <span v-if="device.is_default && !recordingStore.isDeviceRecording(device.id)" class="text-[9px] text-cyan-500/70 shrink-0">default</span>
             <span
+              v-if="recordingStore.schedule?.deviceId === device.id && recordingStore.hasSchedule"
+              class="text-[9px] text-amber-400 shrink-0"
+            >scheduled</span>
+            <span
               v-if="recordingStore.isDeviceRecording(device.id)"
               class="text-[10px] font-mono text-red-400 shrink-0"
             >
@@ -388,6 +392,10 @@ onUnmounted(() => {
           <!-- Device name + duration -->
           <div class="flex items-center gap-2 mb-1.5">
             <span class="text-xs text-gray-200 truncate flex-1">{{ device.name }}</span>
+            <span
+              v-if="recordingStore.schedule?.deviceId === device.id && recordingStore.hasSchedule"
+              class="text-[9px] text-amber-400 shrink-0"
+            >scheduled</span>
             <span
               v-if="recordingStore.isDeviceRecording(device.id)"
               class="text-[10px] font-mono text-red-400 shrink-0"

@@ -102,6 +102,7 @@ function handleClickOutside(event: MouseEvent) {
   if (recordingStore.isPreparing) return;
   const target = event.target as HTMLElement;
   if (transportRef.value?.contains(target)) return;
+  if (target.closest('.schedule-overlay')) return;
   showRecordingPanel.value = false;
 }
 
