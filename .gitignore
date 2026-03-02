@@ -21,6 +21,8 @@ packaging/flatpak/.flatpak-builder/
 
 # Model binaries
 src-tauri/resources/models/*.bin
+src-tauri/resources/models/**/*.onnx
+src-tauri/resources/models/**/*.json
 
 # Test audio files (local only, not for builds)
 src-tauri/resources/princess-bride.wav
