@@ -7,8 +7,9 @@ use ort::value::TensorRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Instant;
 
-use super::transcribe::{TranscriptionResult, Word};
+use super::transcribe::{TranscriptionMetrics, TranscriptionResult, Word};
 
 // ── Constants ──
 
@@ -559,6 +560,7 @@ pub async fn transcribe_moonshine(
     path: String,
     models_path: Option<String>,
 ) -> Result<TranscriptionResult, String> {
+    let total_start = Instant::now();
     let audio_path = Path::new(&path);
     let custom_path = models_path.as_deref();
 
@@ -567,21 +569,41 @@ pub async fn transcribe_moonshine(
     let (variant_name, model_dir) = find_any_moonshine_model(custom_path)?;
     log::info!("Using moonshine model: {} at {:?}", variant_name, model_dir);
 
+    let load_start = Instant::now();
     let samples = super::transcribe::load_audio_16khz_pub(audio_path)?;
-    log::info!("Loaded {} samples at 16kHz ({:.1}s)", samples.len(), samples.len() as f64 / 16000.0);
+    let audio_duration_secs = samples.len() as f64 / 16000.0;
+    let load_time_ms = load_start.elapsed().as_millis() as u64;
+    log::info!("Loaded {} samples at 16kHz ({:.1}s) in {}ms", samples.len(), audio_duration_secs, load_time_ms);
 
+    let inference_start = Instant::now();
     let (text, words) = transcribe_chunked(&model_dir, &variant_name, &samples)?;
+    let inference_time_ms = inference_start.elapsed().as_millis() as u64;
+
+    let total_time_ms = total_start.elapsed().as_millis() as u64;
+    let word_count = words.len();
+    let words_per_second = if audio_duration_secs > 0.0 { word_count as f64 / audio_duration_secs } else { 0.0 };
+    let real_time_factor = if audio_duration_secs > 0.0 { (total_time_ms as f64 / 1000.0) / audio_duration_secs } else { 0.0 };
 
     log::info!(
-        "Moonshine transcription complete: {} words, {:.1}s audio",
-        words.len(),
-        samples.len() as f64 / 16000.0
+        "Moonshine transcription complete: {} words, {:.1}s audio | load={}ms inference={}ms total={}ms | RTF={:.2}x",
+        word_count, audio_duration_secs, load_time_ms, inference_time_ms, total_time_ms, real_time_factor
     );
 
     Ok(TranscriptionResult {
         words,
         text,
         language: "en".to_string(),
+        metrics: Some(TranscriptionMetrics {
+            engine: "moonshine".to_string(),
+            model_name: format!("moonshine-{}", variant_name),
+            audio_duration_secs,
+            load_time_ms,
+            inference_time_ms,
+            total_time_ms,
+            word_count,
+            words_per_second,
+            real_time_factor,
+        }),
     })
 }
 

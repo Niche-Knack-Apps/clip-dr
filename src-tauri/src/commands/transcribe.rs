@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::time::Instant;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -21,12 +22,27 @@ pub struct Word {
     pub confidence: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionMetrics {
+    pub engine: String,
+    pub model_name: String,
+    pub audio_duration_secs: f64,
+    pub load_time_ms: u64,
+    pub inference_time_ms: u64,
+    pub total_time_ms: u64,
+    pub word_count: usize,
+    pub words_per_second: f64,
+    pub real_time_factor: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResult {
     pub words: Vec<Word>,
     pub text: String,
     pub language: String,
+    pub metrics: Option<TranscriptionMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,19 +423,26 @@ pub async fn transcribe_audio(
     let audio_path = Path::new(&path);
     let custom_path = models_path.as_deref();
 
+    let total_start = Instant::now();
+
     log::info!("Transcribing audio: {}", path);
     log::info!("Models path: {:?}", custom_path);
 
     // Try to find any available model
     let model_path = find_any_model(custom_path)?;
+    let model_name = model_path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     log::info!("Using model: {:?}", model_path);
 
     // Load audio
     let samples = load_audio_16khz(audio_path)?;
-    log::info!("Loaded {} samples at 16kHz", samples.len());
+    let audio_duration_secs = samples.len() as f64 / 16000.0;
+    log::info!("Loaded {} samples at 16kHz ({:.1}s)", samples.len(), audio_duration_secs);
 
     // Create whisper context
+    let load_start = Instant::now();
     let ctx = WhisperContext::new_with_params(
         model_path.to_str().unwrap(),
         WhisperContextParameters::default(),
@@ -455,10 +478,13 @@ pub async fn transcribe_audio(
     let whisper_threads = (max_threads / 2).max(1).min(8) as i32;
     params.set_n_threads(whisper_threads);
     log::info!("Whisper using {} threads (system has {})", whisper_threads, max_threads);
+    let load_time_ms = load_start.elapsed().as_millis() as u64;
 
     // Run transcription
+    let inference_start = Instant::now();
     state.full(params, &samples)
         .map_err(|e| format!("Transcription failed: {}", e))?;
+    let inference_time_ms = inference_start.elapsed().as_millis() as u64;
 
     // Extract segments and create word-level timestamps
     let num_segments = state.full_n_segments()
@@ -602,12 +628,32 @@ pub async fn transcribe_audio(
     if skipped_segments > 0 {
         log::warn!("Transcription finished with {} skipped segments (out of {})", skipped_segments, num_segments);
     }
-    log::info!("Transcription complete: {} words from {} segments", words.len(), num_segments - skipped_segments);
+
+    let total_time_ms = total_start.elapsed().as_millis() as u64;
+    let word_count = words.len();
+    let words_per_second = if audio_duration_secs > 0.0 { word_count as f64 / audio_duration_secs } else { 0.0 };
+    let real_time_factor = if audio_duration_secs > 0.0 { (total_time_ms as f64 / 1000.0) / audio_duration_secs } else { 0.0 };
+
+    log::info!(
+        "Whisper transcription complete: {} words from {} segments | load={}ms inference={}ms total={}ms | RTF={:.2}x",
+        word_count, num_segments - skipped_segments, load_time_ms, inference_time_ms, total_time_ms, real_time_factor
+    );
 
     Ok(TranscriptionResult {
         words,
         text: full_text,
         language: "en".to_string(),
+        metrics: Some(TranscriptionMetrics {
+            engine: "whisper".to_string(),
+            model_name,
+            audio_duration_secs,
+            load_time_ms,
+            inference_time_ms,
+            total_time_ms,
+            word_count,
+            words_per_second,
+            real_time_factor,
+        }),
     })
 }
 
