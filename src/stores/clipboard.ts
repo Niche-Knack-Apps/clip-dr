@@ -8,7 +8,7 @@ import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
-import { encodeWavFloat32, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { encodeWavFloat32 } from '@/shared/audio-utils';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
 
@@ -30,40 +30,27 @@ export const useClipboardStore = defineStore('clipboard', () => {
   const settingsStore = useSettingsStore();
   const transcriptionStore = useTranscriptionStore();
 
-  // Flatten clips back to single buffer and re-cache WAV for Rust playback
-  async function flattenAndRecacheClips(ctx: AudioContext): Promise<void> {
+  // Cache small-file clips as individual WAVs for Rust playback
+  // EDL clips (with sourceFile) already point to their source — no caching needed
+  async function cacheClipsForPlayback(): Promise<void> {
     for (const track of tracksStore.tracks) {
       if (!track.clips || track.clips.length === 0) continue;
-      const merged = mixTrackClipsToBuffer(track.clips, ctx);
-      if (!merged) continue;
+      for (const clip of track.clips) {
+        // EDL clips already have sourceFile — skip
+        if (clip.sourceFile) continue;
+        // No buffer — skip (shouldn't happen for small files, but guard)
+        if (!clip.buffer) continue;
 
-      const waveformData = tracksStore.generateWaveformFromBuffer(merged);
-      const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
-      if (trackIdx === -1) continue;
-
-      const currentDuration = track.duration;
-      tracksStore.tracks[trackIdx] = {
-        ...track,
-        audioData: { ...track.audioData, buffer: merged, waveformData },
-        clips: undefined,
-      };
-      tracksStore.tracks = [...tracksStore.tracks];
-
-      // Write 32-bit float WAV for Rust playback (mmap fast path, no int→float conversion)
-      const trackId = track.id;
-      const wavData = encodeWavFloat32(merged);
-      const fileName = `cut_${trackId}_${Date.now()}.wav`;
-      try {
-        await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
-        const tmpDir = await tempDir();
-        const cachedPath = `${tmpDir}${tmpDir.endsWith('/') ? '' : '/'}${fileName}`;
-        // Guard: only update if track still exists with same duration (user didn't undo)
-        const current = tracksStore.tracks.find(t => t.id === trackId);
-        if (current && Math.abs(current.duration - currentDuration) < 0.001) {
-          tracksStore.setCachedAudioPath(trackId, cachedPath);
+        try {
+          const wavData = encodeWavFloat32(clip.buffer);
+          const fileName = `clip_${clip.id}_${Date.now()}.wav`;
+          await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
+          const tmpDir = await tempDir();
+          clip.sourceFile = `${tmpDir}${tmpDir.endsWith('/') ? '' : '/'}${fileName}`;
+          clip.sourceOffset = 0;
+        } catch (err) {
+          console.error('[Clipboard] Failed to cache clip WAV:', err);
         }
-      } catch (err) {
-        console.error('[Clipboard] Failed to write cached WAV:', err);
       }
     }
   }
@@ -86,12 +73,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
   }
 
   // Get the region to copy based on settings and I/O points
-  function getCopyRegion(): { start: number; end: number; trackId: string; buffer: AudioBuffer } | null {
+  async function getCopyRegion(): Promise<{ start: number; end: number; trackId: string; buffer: AudioBuffer } | null> {
     const selectedTrack = getTargetTrack();
     if (!selectedTrack) return null;
 
-    const buffer = selectedTrack.audioData.buffer;
-    if (!buffer) return null;
+    let buffer = selectedTrack.audioData.buffer;
 
     // Check settings for whether to use I/O points or track bounds
     const useInOutPoints = settingsStore.settings.clipboardUsesInOutPoints ?? true;
@@ -109,12 +95,28 @@ export const useClipboardStore = defineStore('clipboard', () => {
         const end = Math.min(selectedTrack.duration, relativeEnd);
 
         if (end > start) {
+          // Large-file fallback: extract via Rust if no in-memory buffer
+          if (!buffer && (selectedTrack.cachedAudioPath || selectedTrack.sourcePath)) {
+            const ctx = audioStore.getAudioContext();
+            const rustBuffer = await tracksStore.extractRegionViaRust(selectedTrack, start, end, ctx);
+            if (rustBuffer) return { start, end, trackId: selectedTrack.id, buffer: rustBuffer };
+            return null;
+          }
+          if (!buffer) return null;
           return { start, end, trackId: selectedTrack.id, buffer };
         }
       }
     }
 
-    // Use entire track
+    // Use entire track — large-file fallback for full track
+    if (!buffer && (selectedTrack.cachedAudioPath || selectedTrack.sourcePath)) {
+      const ctx = audioStore.getAudioContext();
+      const rustBuffer = await tracksStore.extractRegionViaRust(selectedTrack, 0, selectedTrack.duration, ctx);
+      if (rustBuffer) return { start: 0, end: selectedTrack.duration, trackId: selectedTrack.id, buffer: rustBuffer };
+      return null;
+    }
+    if (!buffer) return null;
+
     return {
       start: 0,
       end: selectedTrack.duration,
@@ -124,8 +126,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
   }
 
   // Copy the selected region to clipboard
-  function copy(): boolean {
-    const region = getCopyRegion();
+  async function copy(): Promise<boolean> {
+    const region = await getCopyRegion();
     if (!region) {
       console.log('[Clipboard] Nothing to copy - no region or track selected');
       return false;
@@ -184,7 +186,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
   }
 
   // Cut: selected clip > I/O region ripple delete > entire track
-  function cut(): boolean {
+  async function cut(): Promise<boolean> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Cut');
     try {
@@ -235,7 +237,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       tracksStore.slideTracksLeft(gapStart, gapDuration);
 
       tracksStore.clearClipSelection();
-      playbackStore.seek(Math.max(0, gapStart - 0.5));
+      playbackStore.seek(Math.max(0, gapStart - 1.0));
       console.log(`[Clipboard] Cut clip ${clip.id} (${gapDuration.toFixed(2)}s) from track ${trackId}`);
       return true;
     }
@@ -249,10 +251,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
     if (hasIOPoints) {
       // Extract mixed audio BEFORE deleting (for clipboard)
-      const extracted = tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
+      const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
 
       // Ripple delete the I/O region from ALL tracks and close the gap
-      const results = tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx);
+      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx);
 
       if (results.buffers.length > 0) {
         // Store the mixed extraction in clipboard (or first cut buffer as fallback)
@@ -275,15 +277,15 @@ export const useClipboardStore = defineStore('clipboard', () => {
           transcriptionStore.adjustForCut(track.id, inPoint, outPoint);
         }
 
-        // Flatten clips back to single buffer and re-cache for Rust playback
-        const recachePromise = flattenAndRecacheClips(ctx);
+        // Cache small-file clips for Rust playback (EDL clips already have sourceFile)
+        const recachePromise = cacheClipsForPlayback();
         tracksStore.setPendingRecache(recachePromise);
       }
 
       // Clear I/O points after cut
       selectionStore.clearInOutPoints();
       if (results.buffers.length > 0) {
-        playbackStore.seek(Math.max(0, inPoint! - 0.5));
+        playbackStore.seek(Math.max(0, inPoint! - 1.0));
       }
       return results.buffers.length > 0;
     } else {
@@ -293,7 +295,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
       const trackStart = selectedTrack.trackStart;
       const trackDuration = selectedTrack.duration;
-      const copied = copy();
+      const copied = await copy();
       if (!copied) return false;
 
       tracksStore.clearTrackAudio(selectedTrack.id);
@@ -306,7 +308,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
 
       tracksStore.slideTracksLeft(trackStart, trackDuration);
-      playbackStore.seek(Math.max(0, trackStart - 0.5));
+      playbackStore.seek(Math.max(0, trackStart - 1.0));
       console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, kept empty, slid remaining tracks left`);
       return true;
     }
@@ -379,7 +381,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
   }
 
   // Delete: selected clip > I/O points > entire track
-  function deleteSelected(): boolean {
+  async function deleteSelected(): Promise<boolean> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Delete');
     try {
@@ -406,7 +408,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         const trackEnd = track.trackStart + track.duration;
         if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-        const result = tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx);
+        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx);
         if (result) cutCount++;
       }
 
@@ -420,10 +422,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
           tracksStore.adjustTimemarksForDelete(trackId, inPoint, outPoint);
           tracksStore.adjustVolumeEnvelopeForDelete(trackId, inPoint, outPoint);
         }
-        // Flatten clips back to single buffer and re-cache for Rust playback
-        const recachePromise = flattenAndRecacheClips(ctx);
+        // Cache small-file clips for Rust playback (EDL clips already have sourceFile)
+        const recachePromise = cacheClipsForPlayback();
         tracksStore.setPendingRecache(recachePromise);
         selectionStore.clearInOutPoints();
+        playbackStore.seek(Math.max(0, inPoint - 1.0));
       }
       return cutCount > 0;
     } else {
@@ -439,50 +442,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     } finally { historyStore.endBatch(); }
   }
 
-  // Create clip: extract audio from I/O region across ALL tracks into a new track
-  function createClip(): Track | null {
-    const { inPoint, outPoint } = selectionStore.inOutPoints;
-    if (inPoint === null || outPoint === null) {
-      console.log('[Clipboard] createClip: no I/O points set');
-      return null;
-    }
-    const historyStore = useHistoryStore();
-    historyStore.beginBatch('Create clip');
-    try {
-
-    const ctx = audioStore.getAudioContext();
-    const extracted = tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
-    if (!extracted) {
-      console.log('[Clipboard] createClip: no audio found in I/O region');
-      return null;
-    }
-
-    // Create new track at end of timeline so it doesn't overlap
-    const pasteTime = tracksStore.timelineDuration;
-    const trackName = `Clip ${tracksStore.tracks.length + 1}`;
-
-    const newTrack = tracksStore.createTrackFromBuffer(
-      extracted.buffer,
-      extracted.waveformData,
-      trackName,
-      pasteTime
-    );
-
-    // Mute source tracks that contributed audio to the clip
-    for (const t of tracksStore.tracks) {
-      if (t.id === newTrack.id) continue;
-      if (t.trackStart < outPoint! && t.trackStart + t.duration > inPoint!) {
-        tracksStore.setTrackMuted(t.id, true);
-      }
-    }
-
-    // Position playhead at the beginning of the new clip
-    playbackStore.seek(pasteTime);
-    console.log(`[Clipboard] Created clip "${trackName}" (${(outPoint - inPoint).toFixed(2)}s) at ${pasteTime.toFixed(2)}s`);
-    selectionStore.clearInOutPoints();
-    return newTrack;
-    } finally { historyStore.endBatch(); }
-  }
+  // NOTE: createClip() moved to useClipping.ts composable (insert below + solo behavior)
 
   // Clear clipboard
   function clear(): void {
@@ -499,7 +459,6 @@ export const useClipboardStore = defineStore('clipboard', () => {
     cut,
     paste,
     deleteSelected,
-    createClip,
     clear,
   };
 });
