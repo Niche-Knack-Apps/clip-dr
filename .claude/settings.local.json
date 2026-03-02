@@ -85,7 +85,8 @@
       "Bash(ls .eslintrc*:*)",
       "Bash(node_modules/.bin/eslint:*)",
       "WebFetch(domain:usefulsensors.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl:*)"
     ]
   }
 }
