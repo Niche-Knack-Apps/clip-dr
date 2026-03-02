@@ -113,16 +113,25 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   // ── Rust engine sync ──
 
-  // Get all tracks with sourcePath that can be loaded by Rust
+  // Get all tracks that can be played (have source path or clips with source files)
   function getPlayableTracks(): Track[] {
-    return tracksStore.tracks.filter(t =>
-      (t.cachedAudioPath || t.sourcePath) && (!t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching')
-    );
+    return tracksStore.tracks.filter(t => {
+      if (t.importStatus && t.importStatus !== 'ready' && t.importStatus !== 'large-file' && t.importStatus !== 'caching') return false;
+      // Playable if track has source OR any clip has sourceFile
+      if (t.cachedAudioPath || t.sourcePath) return true;
+      if (t.clips?.some(c => c.sourceFile)) return true;
+      return false;
+    });
   }
 
   function computeTrackHash(): string {
     return getPlayableTracks()
-      .map(t => `${t.id}:${t.cachedAudioPath || t.sourcePath}:${t.trackStart.toFixed(4)}:${t.duration.toFixed(4)}`)
+      .map(t => {
+        const clips = tracksStore.getTrackClips(t.id);
+        return clips.map(c =>
+          `${t.id}:${c.id}:${c.sourceFile || t.cachedAudioPath || t.sourcePath || ''}:${c.clipStart.toFixed(4)}:${c.duration.toFixed(4)}:${(c.sourceOffset ?? 0).toFixed(4)}`
+        ).join(';');
+      })
       .sort()
       .join('|');
   }
@@ -132,15 +141,26 @@ export const usePlaybackStore = defineStore('playback', () => {
     if (hash === lastSyncedTrackHash) return;
 
     const playable = getPlayableTracks();
-    const trackConfigs = playable.map(t => ({
-      track_id: t.id,
-      source_path: t.cachedAudioPath || t.sourcePath!,
-      track_start: t.trackStart,
-      duration: t.duration,
-      volume: t.volume,
-      muted: false, // mute handled via playback_set_track_muted
-      volume_envelope: t.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null,
-    }));
+    const trackConfigs: { track_id: string; source_path: string; track_start: number; duration: number; file_offset: number; volume: number; muted: boolean; volume_envelope: { time: number; value: number }[] | null }[] = [];
+
+    for (const t of playable) {
+      const clips = tracksStore.getTrackClips(t.id);
+      for (const clip of clips) {
+        const sourcePath = clip.sourceFile || t.cachedAudioPath || t.sourcePath;
+        if (!sourcePath) continue;
+
+        trackConfigs.push({
+          track_id: `${t.id}:${clip.id}`,
+          source_path: sourcePath,
+          track_start: clip.clipStart,
+          duration: clip.duration,
+          file_offset: clip.sourceOffset ?? 0,
+          volume: t.volume,
+          muted: false, // mute handled via playback_set_track_muted
+          volume_envelope: t.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null,
+        });
+      }
+    }
 
     await invoke('playback_set_tracks', { tracks: trackConfigs });
     lastSyncedTrackHash = hash;
@@ -158,10 +178,14 @@ export const usePlaybackStore = defineStore('playback', () => {
       if (hasSolo) {
         muted = !track.solo || track.muted;
       }
-      await invoke('playback_set_track_muted', {
-        trackId: track.id,
-        muted,
-      });
+
+      const clips = tracksStore.getTrackClips(track.id);
+      for (const clip of clips) {
+        await invoke('playback_set_track_muted', {
+          trackId: `${track.id}:${clip.id}`,
+          muted,
+        });
+      }
     }
   }
 
@@ -516,19 +540,26 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   // Watch for track volume changes during playback — sync to Rust engine live
+  // Uses hash-based approach (matching mute/solo watcher) to avoid deep comparison overhead
+  let lastVolumeKey = 0;
   watch(
-    () => tracksStore.tracks.map(t => ({ id: t.id, volume: t.volume })),
-    async (newVols, oldVols) => {
-      if (!isPlaying.value || !oldVols) return;
-      for (let i = 0; i < newVols.length; i++) {
-        const nv = newVols[i];
-        const ov = oldVols.find(o => o.id === nv.id);
-        if (ov && ov.volume !== nv.volume) {
-          await invoke('playback_set_track_volume', { trackId: nv.id, volume: nv.volume });
-        }
+    () => {
+      const tracks = tracksStore.tracks;
+      let key = tracks.length;
+      for (const t of tracks) {
+        key = ((key << 5) - key + t.id.charCodeAt(0)) | 0;
+        key = ((key << 5) - key + (t.volume * 10000 | 0)) | 0;
       }
+      return key;
     },
-    { deep: true }
+    async (newKey) => {
+      if (newKey === lastVolumeKey) return;
+      lastVolumeKey = newKey;
+      if (!isPlaying.value) return;
+      for (const t of tracksStore.tracks) {
+        await invoke('playback_set_track_volume', { trackId: t.id, volume: t.volume });
+      }
+    }
   );
 
   // Watch for volume envelope changes during playback — sync to Rust engine live
