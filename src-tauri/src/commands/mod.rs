@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod waveform;
 pub mod transcribe;
+pub mod moonshine;
 pub mod export;
 pub mod vad;
 pub mod clean;

@@ -276,7 +276,7 @@ fn find_any_model(custom_path: Option<&str>) -> Result<std::path::PathBuf, Strin
         .or_else(|_| find_model_path("large", custom_path))
 }
 
-/// Load audio and convert to 16kHz mono f32 samples (required by whisper)
+/// Load audio and convert to 16kHz mono f32 samples (required by whisper/moonshine)
 fn load_audio_16khz(path: &Path) -> Result<Vec<f32>, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -388,6 +388,11 @@ fn load_audio_16khz(path: &Path) -> Result<Vec<f32>, String> {
     }
 
     Ok(resampled)
+}
+
+/// Public wrapper for load_audio_16khz (used by moonshine module)
+pub fn load_audio_16khz_pub(path: &Path) -> Result<Vec<f32>, String> {
+    load_audio_16khz(path)
 }
 
 /// Transcribe audio file using Whisper

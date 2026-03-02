@@ -5,7 +5,7 @@ mod audio_clean;
 mod audio_util;
 mod services;
 
-use commands::{audio, waveform, transcribe, export, vad, clean, metadata, recording, import, playback, project};
+use commands::{audio, waveform, transcribe, moonshine, export, vad, clean, metadata, recording, import, playback, project};
 use std::panic;
 
 fn main() {
@@ -109,6 +109,9 @@ fn main() {
             recording::recover_recording,
             recording::delete_orphaned_recording,
             transcribe::get_bundled_model_info,
+            moonshine::transcribe_moonshine,
+            moonshine::check_moonshine_model,
+            moonshine::list_moonshine_models,
             import::import_audio_start,
             import::import_audio_cancel,
             import::get_peak_tile,

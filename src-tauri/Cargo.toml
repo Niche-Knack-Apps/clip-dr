@@ -26,6 +26,11 @@ uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 env_logger = "0.10"
 whisper-rs = "0.13"
+
+# Moonshine ASR via ONNX Runtime
+ort = { version = "2.0.0-rc.11", features = ["load-dynamic"] }
+ndarray = "0.17"
+
 biquad = "0.4"
 nnnoiseless = "0.5"
 realfft = "3.4"
