@@ -56,6 +56,8 @@ export const DEFAULT_SETTINGS = {
   recordingChannelMode: 'stereo' as const,
   // Recording large file format (>4GB): split into separate tracks or single RF64
   recordingLargeFileFormat: 'split-tracks' as const,
+  // Transcription engine: whisper (default) or moonshine
+  transcriptionEngine: 'whisper' as const,
   // Bottom bar shortcut hints
   shortcutHints: ['help', 'jkl', 'cut', 'delete'],
 };

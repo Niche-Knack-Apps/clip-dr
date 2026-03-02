@@ -266,6 +266,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setTranscriptionEngine(engine: 'whisper' | 'moonshine'): void {
+    settings.value.transcriptionEngine = engine;
+    saveSettings();
+  }
+
   function setLastExportPath(path: string): void {
     settings.value.lastExportPath = path;
     saveSettings();
@@ -365,6 +370,8 @@ export const useSettingsStore = defineStore('settings', () => {
     setRecordingChannelMode,
     // Recording large file format
     setRecordingLargeFileFormat,
+    // Transcription engine
+    setTranscriptionEngine,
     // Bottom bar shortcut hints
     setShortcutHints,
   };

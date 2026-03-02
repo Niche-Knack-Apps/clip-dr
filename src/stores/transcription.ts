@@ -3,7 +3,7 @@ import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark } from '@/shared/types';
+import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark, TranscriptionMetrics } from '@/shared/types';
 import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -55,6 +55,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const modelPath = ref<string | null>(null);
   const modelsDirectory = ref<string | null>(null);
   const availableModels = ref<ModelInfo[]>([]);
+  const lastMetrics = ref<TranscriptionMetrics | null>(null);
 
   // Pending trigger phrases for auto-timemarks (keyed by trackId)
   const pendingTriggerPhrases = new Map<string, string[]>();
@@ -65,20 +66,33 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   // ─── Model checking ───
+  const moonshineModelAvailable = ref(false);
+
   async function checkModel(): Promise<boolean> {
+    // Always check whisper
     try {
       const customPath = getCustomPath();
       modelPath.value = await invoke<string>('check_whisper_model', { customPath });
-      return true;
-    } catch (e) {
+    } catch {
       modelPath.value = null;
       try {
         modelsDirectory.value = await invoke<string>('get_models_directory');
       } catch {
         modelsDirectory.value = null;
       }
-      return false;
     }
+
+    // Also check moonshine
+    try {
+      const customPath = getCustomPath();
+      await invoke<string>('check_moonshine_model', { customPath });
+      moonshineModelAvailable.value = true;
+    } catch {
+      moonshineModelAvailable.value = false;
+    }
+
+    const engine = settingsStore.settings.transcriptionEngine;
+    return engine === 'moonshine' ? moonshineModelAvailable.value : modelPath.value !== null;
   }
 
   async function loadAvailableModels(): Promise<void> {
@@ -91,7 +105,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  const hasModel = computed(() => modelPath.value !== null);
+  const hasModel = computed(() => {
+    const engine = settingsStore.settings.transcriptionEngine;
+    return engine === 'moonshine' ? moonshineModelAvailable.value : modelPath.value !== null;
+  });
 
   // ─── Debug: log Map state ───
   function logMapState(context: string): void {
@@ -748,23 +765,37 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  async function runTranscriptionFromFile(trackId: string, audioPath: string): Promise<void> {
-    if (trackId === tracksStore.selectedTrackId) {
-      progress.value = { stage: 'transcribing', progress: 15, message: 'Transcribing audio...' };
-    }
+  type InvokeResult = { words: Word[]; text: string; language: string; metrics?: TranscriptionMetrics };
 
+  async function invokeTranscription(audioPath: string): Promise<InvokeResult> {
+    const engine = settingsStore.settings.transcriptionEngine;
     const customPath = getCustomPath();
-    const opts = transcriptionOptions.value;
-    const result = await invoke<{ words: Word[]; text: string; language: string }>(
-      'transcribe_audio',
-      {
+
+    if (engine === 'moonshine') {
+      return invoke<InvokeResult>('transcribe_moonshine', {
         path: audioPath,
         modelsPath: customPath,
-        beamSize: opts.beamSize,
-        bestOf: opts.bestOf,
-        temperature: opts.temperature,
-      }
-    );
+      });
+    }
+
+    const opts = transcriptionOptions.value;
+    return invoke<InvokeResult>('transcribe_audio', {
+      path: audioPath,
+      modelsPath: customPath,
+      beamSize: opts.beamSize,
+      bestOf: opts.bestOf,
+      temperature: opts.temperature,
+    });
+  }
+
+  async function runTranscriptionFromFile(trackId: string, audioPath: string): Promise<void> {
+    if (trackId === tracksStore.selectedTrackId) {
+      const engineLabel = settingsStore.settings.transcriptionEngine === 'moonshine' ? 'Moonshine' : 'Whisper';
+      progress.value = { stage: 'transcribing', progress: 15, message: `Transcribing with ${engineLabel}...` };
+    }
+
+    const result = await invokeTranscription(audioPath);
+    if (result.metrics) lastMetrics.value = result.metrics;
 
     if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
@@ -816,21 +847,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
 
     if (trackId === tracksStore.selectedTrackId) {
-      progress.value = { stage: 'transcribing', progress: 30, message: 'Transcribing audio...' };
+      const engineLabel = settingsStore.settings.transcriptionEngine === 'moonshine' ? 'Moonshine' : 'Whisper';
+      progress.value = { stage: 'transcribing', progress: 30, message: `Transcribing with ${engineLabel}...` };
     }
 
-    const customPath = getCustomPath();
-    const opts = transcriptionOptions.value;
-    const result = await invoke<{ words: Word[]; text: string; language: string }>(
-      'transcribe_audio',
-      {
-        path: tempPath,
-        modelsPath: customPath,
-        beamSize: opts.beamSize,
-        bestOf: opts.bestOf,
-        temperature: opts.temperature,
-      }
-    );
+    const result = await invokeTranscription(tempPath);
+    if (result.metrics) lastMetrics.value = result.metrics;
 
     if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
@@ -928,6 +950,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Export helpers
     exportAsJSON,
     exportAsText,
+    // Metrics
+    lastMetrics,
     // Misc
     loading,
     progress,

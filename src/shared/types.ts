@@ -201,6 +201,7 @@ export interface SearchResult {
 }
 
 export type ASRModel = 'whisper-tiny' | 'whisper-base' | 'vosk';
+export type TranscriptionEngine = 'whisper' | 'moonshine';
 
 export type RecordingSource = 'microphone' | 'system';
 export type RecordingLargeFileFormat = 'split-tracks' | 'rf64';
@@ -238,6 +239,8 @@ export interface Settings {
   recordingChannelMode: 'mono' | 'stereo';
   // Recording large file format (>4GB)
   recordingLargeFileFormat: RecordingLargeFileFormat;
+  // Transcription engine selection
+  transcriptionEngine: TranscriptionEngine;
   // Bottom bar shortcut hints
   shortcutHints: string[];
 }
@@ -268,6 +271,18 @@ export interface ModelInfo {
   downloadUrl: string;
   path: string | null;
   available: boolean;
+}
+
+export interface TranscriptionMetrics {
+  engine: string;
+  modelName: string;
+  audioDurationSecs: number;
+  loadTimeMs: number;
+  inferenceTimeMs: number;
+  totalTimeMs: number;
+  wordCount: number;
+  wordsPerSecond: number;
+  realTimeFactor: number;
 }
 
 export interface WaveformBucket {

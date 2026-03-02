@@ -741,8 +741,29 @@ defineExpose({ focusSearch });
           </svg>
           {{ transcriptionStore.hasTranscription ? 'Re-transcribe' : 'Transcribe' }}
         </Button>
-        <!-- Quality selector -->
+        <!-- Engine selector -->
         <div class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
+          <button
+            v-for="eng in ([
+              { value: 'whisper', label: 'Whisper', title: 'Whisper ASR (word-level timestamps)' },
+              { value: 'moonshine', label: 'Moon', title: 'Moonshine ASR (faster, estimated timestamps)' },
+            ] as const)"
+            :key="eng.value"
+            type="button"
+            :class="[
+              'px-1.5 py-0.5 text-[10px] rounded transition-colors',
+              settingsStore.settings.transcriptionEngine === eng.value
+                ? 'bg-purple-600 text-white'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
+            ]"
+            :title="eng.title"
+            @click="settingsStore.setTranscriptionEngine(eng.value)"
+          >
+            {{ eng.label }}
+          </button>
+        </div>
+        <!-- Quality selector (whisper only) -->
+        <div v-if="settingsStore.settings.transcriptionEngine === 'whisper'" class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
           <button
             v-for="q in ([
               { value: 'fast', label: 'Fast', title: 'Greedy, best_of=1 — fastest' },
@@ -763,6 +784,15 @@ defineExpose({ focusSearch });
             {{ q.label }}
           </button>
         </div>
+        <!-- Last transcription metrics -->
+        <span
+          v-if="transcriptionStore.lastMetrics"
+          class="text-[10px] text-gray-500 ml-1"
+          :title="`${transcriptionStore.lastMetrics.engine}/${transcriptionStore.lastMetrics.modelName}: ${transcriptionStore.lastMetrics.totalTimeMs}ms total, load=${transcriptionStore.lastMetrics.loadTimeMs}ms, inference=${transcriptionStore.lastMetrics.inferenceTimeMs}ms, ${transcriptionStore.lastMetrics.wordCount} words, RTF=${transcriptionStore.lastMetrics.realTimeFactor.toFixed(2)}x`"
+        >
+          {{ transcriptionStore.lastMetrics.engine === 'moonshine' ? 'M' : 'W' }}:{{ (transcriptionStore.lastMetrics.totalTimeMs / 1000).toFixed(1) }}s
+          ({{ transcriptionStore.lastMetrics.realTimeFactor.toFixed(1) }}x)
+        </span>
 
         <!-- Transcript download buttons -->
         <Button
