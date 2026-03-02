@@ -81,7 +81,11 @@
       "Bash(git tag:*)",
       "WebFetch(domain:manual.audacityteam.org)",
       "WebFetch(domain:www.eleken.co)",
-      "Bash(npm ls:*)"
+      "Bash(npm ls:*)",
+      "Bash(ls .eslintrc*:*)",
+      "Bash(node_modules/.bin/eslint:*)",
+      "WebFetch(domain:usefulsensors.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
