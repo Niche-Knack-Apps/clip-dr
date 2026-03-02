@@ -118,7 +118,7 @@ const activeSessionCount = computed(() => recordingStore.sessions.filter(s => s.
 // Schedule modal
 const showScheduleModal = ref(false);
 
-function handleSchedule(config: { deviceId: string; startTime: number; endTime: number }) {
+function handleSchedule(config: { deviceIds: string[]; startTime: number; endTime: number }) {
   const success = recordingStore.scheduleRecording(config);
   if (success) {
     showScheduleModal.value = false;
@@ -126,6 +126,12 @@ function handleSchedule(config: { deviceId: string; startTime: number; endTime: 
 }
 
 function formatCountdown(seconds: number): string {
+  if (seconds >= 3600) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
@@ -197,7 +203,7 @@ onUnmounted(() => {
       <div class="ml-auto flex items-center gap-2">
         <!-- Schedule / Cancel Schedule button -->
         <button
-          v-if="!recordingStore.hasSchedule"
+          v-if="!recordingStore.hasSchedule && !recordingStore.isScheduledRecording"
           :disabled="anyRecording"
           class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium transition-colors"
           :class="anyRecording
@@ -212,9 +218,9 @@ onUnmounted(() => {
           Schedule
         </button>
         <button
-          v-else
+          v-else-if="recordingStore.hasSchedule || recordingStore.isScheduledRecording"
           class="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600/80 hover:bg-amber-600 text-white text-[10px] font-medium transition-colors"
-          title="Cancel scheduled recording"
+          :title="recordingStore.isScheduledRecording ? 'Cancel auto-stop' : 'Cancel scheduled recording'"
           @click="recordingStore.cancelSchedule()"
         >
           <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -252,7 +258,7 @@ onUnmounted(() => {
     <!-- Orphaned recording recovery banner -->
     <OrphanRecovery />
 
-    <!-- Schedule countdown -->
+    <!-- Schedule countdown (pending) -->
     <div
       v-if="recordingStore.hasSchedule"
       class="mb-3 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-950/20 flex items-center gap-2"
@@ -265,8 +271,49 @@ onUnmounted(() => {
           Starts in {{ formatCountdown(recordingStore.scheduleCountdown) }}
         </span>
         <span class="text-[10px] text-gray-400 ml-1.5 truncate">
-          ({{ recordingStore.schedule?.deviceName }})
+          ({{ recordingStore.schedule?.deviceNames.length === 1
+            ? recordingStore.schedule?.deviceNames[0]
+            : `${recordingStore.schedule?.deviceNames.length} devices` }})
         </span>
+      </div>
+    </div>
+
+    <!-- Schedule remaining time (recording) -->
+    <div
+      v-if="recordingStore.isScheduledRecording"
+      class="mb-3 px-3 py-2 rounded-lg border border-red-500/30 bg-red-950/20"
+    >
+      <div class="flex items-center gap-2 mb-1.5">
+        <svg class="w-3.5 h-3.5 text-red-400 shrink-0 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span v-if="recordingStore.schedule?.noEndTime" class="text-[10px] text-red-300 font-medium">
+          Manual stop
+        </span>
+        <span v-else class="text-[10px] text-red-300 font-medium">
+          {{ formatCountdown(recordingStore.scheduleRemaining) }} remaining
+        </span>
+      </div>
+      <div class="flex items-center gap-1 flex-wrap">
+        <template v-if="!recordingStore.schedule?.noEndTime">
+          <button
+            class="px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-600/30 text-red-300 hover:bg-red-600/50 transition-colors"
+            @click="recordingStore.extendSchedule(5 * 60 * 1000)"
+          >+5m</button>
+          <button
+            class="px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-600/30 text-red-300 hover:bg-red-600/50 transition-colors"
+            @click="recordingStore.extendSchedule(15 * 60 * 1000)"
+          >+15m</button>
+          <button
+            class="px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-600/30 text-red-300 hover:bg-red-600/50 transition-colors"
+            @click="recordingStore.extendSchedule(30 * 60 * 1000)"
+          >+30m</button>
+        </template>
+        <button
+          v-if="!recordingStore.schedule?.noEndTime"
+          class="px-1.5 py-0.5 rounded text-[9px] font-medium bg-gray-600/50 text-gray-300 hover:bg-gray-600 transition-colors"
+          @click="recordingStore.removeScheduleEndTime()"
+        >No limit</button>
       </div>
     </div>
 
@@ -292,7 +339,7 @@ onUnmounted(() => {
             <span class="text-xs text-gray-200 truncate flex-1">{{ device.name }}</span>
             <span v-if="device.is_default && !recordingStore.isDeviceRecording(device.id)" class="text-[9px] text-cyan-500/70 shrink-0">default</span>
             <span
-              v-if="recordingStore.schedule?.deviceId === device.id && recordingStore.hasSchedule"
+              v-if="recordingStore.schedule?.deviceIds.includes(device.id) && (recordingStore.hasSchedule || recordingStore.isScheduledRecording)"
               class="text-[9px] text-amber-400 shrink-0"
             >scheduled</span>
             <span
@@ -393,7 +440,7 @@ onUnmounted(() => {
           <div class="flex items-center gap-2 mb-1.5">
             <span class="text-xs text-gray-200 truncate flex-1">{{ device.name }}</span>
             <span
-              v-if="recordingStore.schedule?.deviceId === device.id && recordingStore.hasSchedule"
+              v-if="recordingStore.schedule?.deviceIds.includes(device.id) && (recordingStore.hasSchedule || recordingStore.isScheduledRecording)"
               class="text-[9px] text-amber-400 shrink-0"
             >scheduled</span>
             <span
