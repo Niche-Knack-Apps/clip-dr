@@ -105,10 +105,11 @@ export interface OrphanedRecording {
 }
 
 export interface ScheduledRecording {
-  deviceId: string;
-  deviceName: string;
+  deviceIds: string[];
+  deviceNames: string[];
   startTime: number;   // Unix ms
   endTime: number;     // Unix ms
+  noEndTime?: boolean; // true = manual stop, no auto-stop
   status: 'pending' | 'recording' | 'completed' | 'cancelled';
 }
 
@@ -179,6 +180,15 @@ export const useRecordingStore = defineStore('recording', () => {
   const scheduleCountdown = computed(() => {
     if (!schedule.value || schedule.value.status !== 'pending') return 0;
     return Math.max(0, Math.ceil((schedule.value.startTime - Date.now()) / 1000));
+  });
+
+  const isScheduledRecording = computed(() =>
+    schedule.value !== null && schedule.value.status === 'recording'
+  );
+
+  const scheduleRemaining = computed(() => {
+    if (!schedule.value || schedule.value.status !== 'recording' || schedule.value.noEndTime) return 0;
+    return Math.max(0, Math.ceil((schedule.value.endTime - Date.now()) / 1000));
   });
 
   let levelPollInterval: number | null = null;
@@ -1041,6 +1051,16 @@ export const useRecordingStore = defineStore('recording', () => {
         clearInterval(durationInterval);
         durationInterval = null;
       }
+      // Clean up scheduled recording if it was in 'recording' status
+      if (schedule.value && schedule.value.status === 'recording') {
+        schedule.value = { ...schedule.value, status: 'completed' };
+        if (scheduleCheckInterval) {
+          clearInterval(scheduleCheckInterval);
+          scheduleCheckInterval = null;
+        }
+        console.log('[Recording] Scheduled recording completed (manual stop)');
+        setTimeout(() => { schedule.value = null; }, 2000);
+      }
     }
 
     // Import the recording if we got a successful result
@@ -1130,7 +1150,7 @@ export const useRecordingStore = defineStore('recording', () => {
 
   // ── Scheduled Recording ──
 
-  function scheduleRecording(config: { deviceId: string; startTime: number; endTime: number }): boolean {
+  function scheduleRecording(config: { deviceIds: string[]; startTime: number; endTime: number }): boolean {
     const now = Date.now();
     if (config.startTime <= now || config.endTime <= config.startTime) {
       error.value = 'Invalid schedule: start must be in the future and end must be after start';
@@ -1140,10 +1160,14 @@ export const useRecordingStore = defineStore('recording', () => {
       error.value = 'Invalid schedule: duration must be at least 1 second';
       return false;
     }
+    if (config.deviceIds.length === 0) {
+      error.value = 'Please select at least one device';
+      return false;
+    }
 
-    const device = devices.value.find(d => d.id === config.deviceId);
-    if (!device) {
-      error.value = 'Selected device not found';
+    const resolvedDevices = config.deviceIds.map(id => devices.value.find(d => d.id === id));
+    if (resolvedDevices.some(d => !d)) {
+      error.value = 'One or more selected devices not found';
       return false;
     }
 
@@ -1154,14 +1178,15 @@ export const useRecordingStore = defineStore('recording', () => {
     }
 
     schedule.value = {
-      deviceId: config.deviceId,
-      deviceName: device.name,
+      deviceIds: config.deviceIds,
+      deviceNames: resolvedDevices.map(d => d!.name),
       startTime: config.startTime,
       endTime: config.endTime,
       status: 'pending',
     };
 
-    console.log('[Recording] Scheduled recording:', device.name,
+    const nameList = schedule.value.deviceNames.join(', ');
+    console.log('[Recording] Scheduled recording:', nameList,
       'from', new Date(config.startTime).toLocaleTimeString(),
       'to', new Date(config.endTime).toLocaleTimeString());
 
@@ -1185,23 +1210,47 @@ export const useRecordingStore = defineStore('recording', () => {
     }
   }
 
+  function extendSchedule(additionalMs: number): void {
+    if (!schedule.value || schedule.value.status !== 'recording') return;
+    schedule.value = { ...schedule.value, endTime: schedule.value.endTime + additionalMs };
+  }
+
+  function removeScheduleEndTime(): void {
+    if (!schedule.value || schedule.value.status !== 'recording') return;
+    schedule.value = { ...schedule.value, noEndTime: true };
+  }
+
   function checkSchedule(): void {
     if (!schedule.value) return;
     const now = Date.now();
 
     if (schedule.value.status === 'pending' && now >= schedule.value.startTime) {
-      // Time to start
+      // Time to start — launch a session per device
       schedule.value = { ...schedule.value, status: 'recording' };
-      selectDevice(schedule.value.deviceId);
-      startRecording();
-      console.log('[Recording] Scheduled recording started');
-    } else if (schedule.value.status === 'recording' && now >= schedule.value.endTime) {
-      // Time to stop
-      stopRecording();
-      // stopRecording handles setting status to completed
+      for (const deviceId of schedule.value.deviceIds) {
+        const sid = `sched_${deviceId.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50)}`;
+        startDeviceSession(deviceId, sid).catch(e => {
+          console.error('[Recording] Failed to start scheduled session for device:', deviceId, e);
+        });
+      }
+      console.log('[Recording] Scheduled recording started:', schedule.value.deviceNames.join(', '));
+    } else if (schedule.value.status === 'recording' && !schedule.value.noEndTime && now >= schedule.value.endTime) {
+      // Time to stop — stop all active sessions from this schedule
+      const activeSess = sessions.value.filter(s => s.active);
+      for (const sess of activeSess) {
+        stopDeviceSession(sess.sessionId).catch(e => {
+          console.error('[Recording] Failed to stop scheduled session:', sess.sessionId, e);
+        });
+      }
+      schedule.value = { ...schedule.value, status: 'completed' };
+      if (scheduleCheckInterval) {
+        clearInterval(scheduleCheckInterval);
+        scheduleCheckInterval = null;
+      }
       console.log('[Recording] Scheduled recording ended');
-    } else if (schedule.value.status === 'pending') {
-      // Touch the ref to drive countdown reactivity
+      setTimeout(() => { schedule.value = null; }, 2000);
+    } else if (schedule.value.status === 'pending' || schedule.value.status === 'recording') {
+      // Touch the ref to drive countdown / remaining reactivity
       schedule.value = { ...schedule.value };
     }
   }
@@ -1286,8 +1335,12 @@ export const useRecordingStore = defineStore('recording', () => {
     isDeviceRecording,
     getDeviceSession,
     // Schedule
+    isScheduledRecording,
+    scheduleRemaining,
     scheduleRecording,
     cancelSchedule,
+    extendSchedule,
+    removeScheduleEndTime,
     // Crash recovery
     orphanedRecordings,
     scanOrphanedRecordings,

@@ -8,13 +8,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
-  schedule: [config: { deviceId: string; startTime: number; endTime: number }];
+  schedule: [config: { deviceIds: string[]; startTime: number; endTime: number }];
 }>();
 
 const recordingStore = useRecordingStore();
 
 // Form state
-const deviceId = ref('');
+const selectedDeviceIds = ref<string[]>([]);
 const startDate = ref('');
 const startTime = ref('');
 const endDate = ref('');
@@ -54,7 +54,8 @@ function setSmartDefaults() {
   recomputeEnd();
 
   // Default device: currently selected or first available
-  deviceId.value = recordingStore.selectedDeviceId || recordingStore.devices[0]?.id || '';
+  const defaultId = recordingStore.selectedDeviceId || recordingStore.devices[0]?.id || '';
+  selectedDeviceIds.value = defaultId ? [defaultId] : [];
   validationError.value = '';
 }
 
@@ -136,8 +137,8 @@ function onDurationChanged() {
 
 function validate(): boolean {
   const now = Date.now();
-  if (!deviceId.value) {
-    validationError.value = 'Please select a device';
+  if (selectedDeviceIds.value.length === 0) {
+    validationError.value = 'Please select at least one device';
     return false;
   }
   if (!startMs.value) {
@@ -173,7 +174,7 @@ function handleSchedule() {
     : endMs.value;
 
   emit('schedule', {
-    deviceId: deviceId.value,
+    deviceIds: selectedDeviceIds.value,
     startTime: startMs.value,
     endTime: effectiveEnd,
   });
@@ -181,6 +182,15 @@ function handleSchedule() {
 
 function handleClose() {
   emit('close');
+}
+
+function toggleDevice(id: string) {
+  const idx = selectedDeviceIds.value.indexOf(id);
+  if (idx >= 0) {
+    selectedDeviceIds.value = selectedDeviceIds.value.filter(d => d !== id);
+  } else {
+    selectedDeviceIds.value = [...selectedDeviceIds.value, id];
+  }
 }
 
 function onOverlayClick(e: MouseEvent) {
@@ -214,17 +224,28 @@ onUnmounted(() => {
       <div class="bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-sm p-5" @click.stop>
         <h2 class="text-sm font-medium text-gray-200 mb-4">Schedule Recording</h2>
 
-        <!-- Device -->
+        <!-- Devices -->
         <div class="mb-3">
-          <label class="block text-[10px] text-gray-400 mb-1 uppercase tracking-wide">Device</label>
-          <select
-            v-model="deviceId"
-            class="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-cyan-500"
-          >
-            <option v-for="device in recordingStore.devices" :key="device.id" :value="device.id">
-              {{ device.name }}
-            </option>
-          </select>
+          <label class="block text-[10px] text-gray-400 mb-1 uppercase tracking-wide">
+            Devices
+            <span v-if="selectedDeviceIds.length > 0" class="text-gray-500 normal-case ml-1">({{ selectedDeviceIds.length }} selected)</span>
+          </label>
+          <div class="max-h-32 overflow-y-auto border border-gray-600 rounded bg-gray-700 p-1.5 space-y-0.5">
+            <label
+              v-for="device in recordingStore.devices"
+              :key="device.id"
+              class="flex items-center gap-2 px-1.5 py-1 rounded cursor-pointer hover:bg-gray-600/50 transition-colors"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedDeviceIds.includes(device.id)"
+                class="accent-cyan-500"
+                @change="toggleDevice(device.id)"
+              />
+              <span class="text-xs text-gray-200 truncate">{{ device.name }}</span>
+              <span v-if="device.is_default" class="text-[9px] text-cyan-500/70 ml-auto shrink-0">default</span>
+            </label>
+          </div>
         </div>
 
         <!-- Start Date + Time -->

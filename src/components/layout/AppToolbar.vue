@@ -221,6 +221,18 @@ async function handleDownloadTranscriptTXT() {
   if (path) await writeTextFile(path, txt);
 }
 
+function formatScheduleRemaining(seconds: number): string {
+  if (seconds >= 3600) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function focusSearch() {
   searchBarRef.value?.focus();
 }
@@ -374,6 +386,12 @@ defineExpose({ focusSearch });
       <!-- Time display -->
       <span class="text-xs font-mono text-gray-400 min-w-[70px]">
         {{ recordingStore.isRecording ? formatTime(recordingStore.recordingDuration) : formatTime(currentTime) }} / {{ formatTime(duration) }}
+        <span v-if="recordingStore.isScheduledRecording && !recordingStore.schedule?.noEndTime" class="text-red-400 ml-1">
+          (-{{ formatScheduleRemaining(recordingStore.scheduleRemaining) }})
+        </span>
+        <span v-else-if="recordingStore.isScheduledRecording && recordingStore.schedule?.noEndTime" class="text-red-400 ml-1">
+          (no limit)
+        </span>
       </span>
 
       <div class="w-px h-5 bg-gray-700" />
