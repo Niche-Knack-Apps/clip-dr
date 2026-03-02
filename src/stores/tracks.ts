@@ -6,6 +6,7 @@ import { generateId, binarySearch } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
+import { invoke } from '@tauri-apps/api/core';
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
@@ -144,6 +145,13 @@ export const useTracksStore = defineStore('tracks', () => {
     console.log('[Tracks] Created track:', track.name, 'duration:', track.duration, 'at:', track.trackStart, 'source:', sourcePath);
 
     return track;
+  }
+
+  // Insert a track at a specific position in the track list
+  function insertTrackAtIndex(track: Track, index: number): void {
+    const newTracks = [...tracks.value];
+    newTracks.splice(index, 0, track);
+    tracks.value = newTracks;
   }
 
   // Delete a track
@@ -450,40 +458,108 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Cut a region from a track, creating clips for the remaining audio
   // Returns the cut audio as a buffer (for clipboard) or null if cut failed
-  function cutRegionFromTrack(
+  async function cutRegionFromTrack(
     trackId: string,
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext,
     keepTrack = false
-  ): { buffer: AudioBuffer; waveformData: number[] } | null {
+  ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
     const track = tracks.value.find((t) => t.id === trackId);
     if (!track) {
       console.error('[Tracks] Track not found:', trackId);
       return null;
     }
 
-    // Size guard: estimate buffer bytes (duration * sampleRate * channels * 4bytes * 3 buffers)
-    {
-      const estDuration = outPoint - inPoint;
-      const estRate = track.audioData.sampleRate || 44100;
-      const estCh = track.audioData.channels || 2;
-      const estBytes = estDuration * estRate * estCh * 4 * 3;
-      if (estBytes > 1_073_741_824) {
-        console.error(`[Tracks] Cut region too large (${(estBytes / 1_073_741_824).toFixed(1)}GB). Try a smaller selection.`);
-        return null;
-      }
-    }
-
     useHistoryStore().pushState('Cut region');
 
     // ── Multi-clip track: process each clip individually ──
     if (track.clips && track.clips.length > 0) {
-      return cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, keepTrack);
+      return await cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, keepTrack);
     }
 
     // ── Single-buffer track (original path) ──
-    if (!track.audioData.buffer) return null; // Empty track, nothing to cut
+    if (!track.audioData.buffer) {
+      // Large-file EDL path: metadata-only cut (no file I/O, instant)
+      if (track.cachedAudioPath || track.sourcePath) {
+        const trackStart = track.trackStart;
+        const relativeIn = inPoint - trackStart;
+        const relativeOut = outPoint - trackStart;
+        const cutStart = Math.max(0, relativeIn);
+        const cutEnd = Math.min(track.duration, relativeOut);
+        if (cutEnd <= cutStart) return null;
+
+        const sourceFile = track.cachedAudioPath || track.sourcePath!;
+        console.log(`[Tracks] Large-file EDL cut: splitting ${(cutEnd - cutStart).toFixed(1)}s (metadata only)`);
+
+        // Extract the cut region for clipboard (reads just the small cut portion via Rust)
+        const cutBuffer = await extractRegionViaRust(track, cutStart, cutEnd, audioContext);
+        if (!cutBuffer) {
+          console.error('[Tracks] Large-file cut: extractRegionViaRust returned null');
+          return null;
+        }
+        const cutWaveform = generateWaveformFromBuffer(cutBuffer);
+
+        // Build before/after clips as EDL references (pure math, no file copying)
+        const newClips: TrackClip[] = [];
+        const existingWaveform = track.audioData.waveformData;
+        const bucketCount = existingWaveform.length / 2;
+
+        if (cutStart > 0.001) {
+          const beforeBucketEnd = Math.floor((cutStart / track.duration) * bucketCount);
+          const beforeWaveform = existingWaveform.slice(0, beforeBucketEnd * 2);
+          newClips.push({
+            id: `${trackId}-before`,
+            buffer: null,
+            waveformData: beforeWaveform,
+            clipStart: trackStart,
+            duration: cutStart,
+            sourceFile,
+            sourceOffset: 0,
+          });
+        }
+
+        if (cutEnd < track.duration - 0.001) {
+          const afterBucketStart = Math.ceil((cutEnd / track.duration) * bucketCount);
+          const afterWaveform = existingWaveform.slice(afterBucketStart * 2);
+          newClips.push({
+            id: `${trackId}-after`,
+            buffer: null,
+            waveformData: afterWaveform,
+            clipStart: trackStart + cutEnd,
+            duration: track.duration - cutEnd,
+            sourceFile,
+            sourceOffset: cutEnd,
+          });
+        }
+
+        // Update the track with clips (no Rust call, no file I/O)
+        const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+        if (trackIndex !== -1) {
+          const firstClipStart = newClips.length > 0 ? Math.min(...newClips.map(c => c.clipStart)) : trackStart;
+          const lastClipEnd = newClips.length > 0 ? Math.max(...newClips.map(c => c.clipStart + c.duration)) : trackStart;
+          const newDuration = lastClipEnd - firstClipStart;
+          // Splice the waveform to remove the cut region's buckets
+          const beforeBucketEnd = Math.floor((cutStart / track.duration) * bucketCount);
+          const afterBucketStart = Math.ceil((cutEnd / track.duration) * bucketCount);
+          const splicedWaveform = [
+            ...existingWaveform.slice(0, beforeBucketEnd * 2),
+            ...existingWaveform.slice(afterBucketStart * 2),
+          ];
+          tracks.value[trackIndex] = {
+            ...track,
+            audioData: { ...track.audioData, buffer: null, waveformData: splicedWaveform },
+            clips: newClips.length > 0 ? newClips : undefined,
+            duration: newDuration,
+          };
+          tracks.value = [...tracks.value];
+        }
+
+        console.log(`[Tracks] Large-file EDL cut: created ${newClips.length} clips, removed ${(cutEnd - cutStart).toFixed(1)}s (instant)`);
+        return { buffer: cutBuffer, waveformData: cutWaveform };
+      }
+      return null; // Empty track, nothing to cut
+    }
 
     // Convert timeline coordinates to track-relative
     const trackStart = track.trackStart;
@@ -497,6 +573,18 @@ export const useTracksStore = defineStore('tracks', () => {
     if (cutEnd <= cutStart) {
       console.log('[Tracks] Nothing to cut - region outside track bounds');
       return null;
+    }
+
+    // Size guard for in-memory path: needs ~3 buffer copies (before, cut, after)
+    {
+      const estDuration = cutEnd - cutStart;
+      const estRate = track.audioData.sampleRate || 44100;
+      const estCh = track.audioData.channels || 2;
+      const estBytes = estDuration * estRate * estCh * 4 * 3;
+      if (estBytes > 1_073_741_824) {
+        console.error(`[Tracks] Cut region too large (${(estBytes / 1_073_741_824).toFixed(1)}GB). Try a smaller selection.`);
+        return null;
+      }
     }
 
     const buffer = track.audioData.buffer;
@@ -609,32 +697,22 @@ export const useTracksStore = defineStore('tracks', () => {
     return { buffer: cutBuffer, waveformData: cutWaveform };
   }
 
-  // Cut a region from a multi-clip track, operating on each clip's own buffer
-  function cutRegionFromClips(
+  // Cut a region from a multi-clip track, operating on each clip individually
+  // Handles both in-memory clips (buffer set) and EDL clips (sourceFile/sourceOffset set, buffer null)
+  async function cutRegionFromClips(
     track: Track,
     trackId: string,
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext,
     keepTrack = false
-  ): { buffer: AudioBuffer; waveformData: number[] } | null {
-    // Size guard: estimate buffer bytes
-    {
-      const estDuration = outPoint - inPoint;
-      const estRate = track.audioData.sampleRate || 44100;
-      const estCh = track.audioData.channels || 2;
-      const estBytes = estDuration * estRate * estCh * 4 * 3;
-      if (estBytes > 1_073_741_824) {
-        console.error(`[Tracks] Cut region from clips too large (${(estBytes / 1_073_741_824).toFixed(1)}GB). Try a smaller selection.`);
-        return null;
-      }
-    }
-
+  ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
     const clips = track.clips!;
     const newClips: TrackClip[] = [];
     const cutContributions: { buffer: AudioBuffer; offsetInRegion: number }[] = [];
-    let maxChannels = 1;
-    let sampleRate = 44100;
+    let maxChannels = track.audioData.channels || 1;
+    let sampleRate = track.audioData.sampleRate || 44100;
+    let hasEDLClips = false;
 
     for (const clip of clips) {
       const clipEnd = clip.clipStart + clip.duration;
@@ -645,88 +723,148 @@ export const useTracksStore = defineStore('tracks', () => {
         continue;
       }
 
-      const buf = clip.buffer;
-      if (!buf) continue; // Skip large-file clips without buffers
-      sampleRate = buf.sampleRate;
-      maxChannels = Math.max(maxChannels, buf.numberOfChannels);
-
-      // Calculate overlap in timeline coordinates
+      // Calculate overlap
       const overlapStart = Math.max(clip.clipStart, inPoint);
       const overlapEnd = Math.min(clipEnd, outPoint);
+      const cutStartInClip = overlapStart - clip.clipStart;
+      const cutEndInClip = overlapEnd - clip.clipStart;
 
-      // Convert to clip-relative sample positions
-      const relOverlapStart = overlapStart - clip.clipStart;
-      const relOverlapEnd = overlapEnd - clip.clipStart;
-      const oStartSample = Math.floor(relOverlapStart * buf.sampleRate);
-      const oEndSample = Math.floor(relOverlapEnd * buf.sampleRate);
+      if (clip.sourceFile && !clip.buffer) {
+        // EDL clip: split by adjusting sourceOffset (pure math, no file I/O)
+        hasEDLClips = true;
+        const clipSourceOffset = clip.sourceOffset ?? 0;
 
-      // Extract the overlapping portion for the cut buffer
-      const oLength = oEndSample - oStartSample;
-      if (oLength > 0) {
-        const oBuf = audioContext.createBuffer(buf.numberOfChannels, oLength, buf.sampleRate);
-        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-          const src = buf.getChannelData(ch);
-          const dest = oBuf.getChannelData(ch);
-          for (let i = 0; i < oLength; i++) dest[i] = src[oStartSample + i];
+        // Extract the overlapping portion for clipboard via Rust
+        const extractTrack = { ...track, cachedAudioPath: clip.sourceFile, sourcePath: clip.sourceFile };
+        const cutBuf = await extractRegionViaRust(extractTrack, clipSourceOffset + cutStartInClip, clipSourceOffset + cutEndInClip, audioContext);
+        if (cutBuf) {
+          cutContributions.push({ buffer: cutBuf, offsetInRegion: overlapStart - inPoint });
+          sampleRate = cutBuf.sampleRate;
+          maxChannels = Math.max(maxChannels, cutBuf.numberOfChannels);
         }
-        cutContributions.push({ buffer: oBuf, offsetInRegion: overlapStart - inPoint });
-      }
 
-      // Keep audio BEFORE the cut region (if any)
-      if (oStartSample > 0) {
-        const beforeBuf = audioContext.createBuffer(buf.numberOfChannels, oStartSample, buf.sampleRate);
-        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-          const src = buf.getChannelData(ch);
-          const dest = beforeBuf.getChannelData(ch);
-          for (let i = 0; i < oStartSample; i++) dest[i] = src[i];
-        }
-        newClips.push({
-          id: generateId(),
-          buffer: beforeBuf,
-          waveformData: generateWaveformFromBuffer(beforeBuf),
-          clipStart: clip.clipStart,
-          duration: beforeBuf.duration,
-        });
-      }
+        // Waveform slicing helper
+        const wfLen = clip.waveformData.length / 2; // bucket count
+        const sliceBuckets = (startFrac: number, endFrac: number) => {
+          const s = Math.floor(startFrac * wfLen) * 2;
+          const e = Math.ceil(endFrac * wfLen) * 2;
+          return clip.waveformData.slice(s, e);
+        };
 
-      // Keep audio AFTER the cut region (if any)
-      const afterStart = oEndSample;
-      const afterLen = buf.length - afterStart;
-      if (afterLen > 0) {
-        const afterBuf = audioContext.createBuffer(buf.numberOfChannels, afterLen, buf.sampleRate);
-        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-          const src = buf.getChannelData(ch);
-          const dest = afterBuf.getChannelData(ch);
-          for (let i = 0; i < afterLen; i++) dest[i] = src[afterStart + i];
+        // Keep portion BEFORE the cut (if any)
+        if (cutStartInClip > 0.001) {
+          newClips.push({
+            id: generateId(),
+            buffer: null,
+            waveformData: sliceBuckets(0, cutStartInClip / clip.duration),
+            clipStart: clip.clipStart,
+            duration: cutStartInClip,
+            sourceFile: clip.sourceFile,
+            sourceOffset: clipSourceOffset,
+          });
         }
-        newClips.push({
-          id: generateId(),
-          buffer: afterBuf,
-          waveformData: generateWaveformFromBuffer(afterBuf),
-          clipStart: overlapEnd,
-          duration: afterBuf.duration,
-        });
+
+        // Keep portion AFTER the cut (if any)
+        if (cutEndInClip < clip.duration - 0.001) {
+          newClips.push({
+            id: generateId(),
+            buffer: null,
+            waveformData: sliceBuckets(cutEndInClip / clip.duration, 1),
+            clipStart: overlapEnd,
+            duration: clip.duration - cutEndInClip,
+            sourceFile: clip.sourceFile,
+            sourceOffset: clipSourceOffset + cutEndInClip,
+          });
+        }
+      } else if (clip.buffer) {
+        // In-memory clip: splice buffer
+        const buf = clip.buffer;
+        sampleRate = buf.sampleRate;
+        maxChannels = Math.max(maxChannels, buf.numberOfChannels);
+
+        const relOverlapStart = overlapStart - clip.clipStart;
+        const relOverlapEnd = overlapEnd - clip.clipStart;
+        const oStartSample = Math.floor(relOverlapStart * buf.sampleRate);
+        const oEndSample = Math.floor(relOverlapEnd * buf.sampleRate);
+
+        // Extract the overlapping portion for the cut buffer
+        const oLength = oEndSample - oStartSample;
+        if (oLength > 0) {
+          const oBuf = audioContext.createBuffer(buf.numberOfChannels, oLength, buf.sampleRate);
+          for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+            const src = buf.getChannelData(ch);
+            const dest = oBuf.getChannelData(ch);
+            for (let i = 0; i < oLength; i++) dest[i] = src[oStartSample + i];
+          }
+          cutContributions.push({ buffer: oBuf, offsetInRegion: overlapStart - inPoint });
+        }
+
+        // Keep audio BEFORE the cut region (if any)
+        if (oStartSample > 0) {
+          const beforeBuf = audioContext.createBuffer(buf.numberOfChannels, oStartSample, buf.sampleRate);
+          for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+            const src = buf.getChannelData(ch);
+            const dest = beforeBuf.getChannelData(ch);
+            for (let i = 0; i < oStartSample; i++) dest[i] = src[i];
+          }
+          newClips.push({
+            id: generateId(),
+            buffer: beforeBuf,
+            waveformData: generateWaveformFromBuffer(beforeBuf),
+            clipStart: clip.clipStart,
+            duration: beforeBuf.duration,
+          });
+        }
+
+        // Keep audio AFTER the cut region (if any)
+        const afterStart = oEndSample;
+        const afterLen = buf.length - afterStart;
+        if (afterLen > 0) {
+          const afterBuf = audioContext.createBuffer(buf.numberOfChannels, afterLen, buf.sampleRate);
+          for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+            const src = buf.getChannelData(ch);
+            const dest = afterBuf.getChannelData(ch);
+            for (let i = 0; i < afterLen; i++) dest[i] = src[afterStart + i];
+          }
+          newClips.push({
+            id: generateId(),
+            buffer: afterBuf,
+            waveformData: generateWaveformFromBuffer(afterBuf),
+            clipStart: overlapEnd,
+            duration: afterBuf.duration,
+          });
+        }
       }
     }
 
-    if (cutContributions.length === 0) return null;
+    if (cutContributions.length === 0 && !hasEDLClips) return null;
 
-    // Mix all cut portions into a single buffer
-    const cutDuration = outPoint - inPoint;
-    const totalSamples = Math.ceil(cutDuration * sampleRate);
-    const mixedCut = audioContext.createBuffer(maxChannels, totalSamples, sampleRate);
-    for (const { buffer, offsetInRegion } of cutContributions) {
-      const offsetSamples = Math.floor(offsetInRegion * sampleRate);
-      for (let ch = 0; ch < maxChannels; ch++) {
-        const dest = mixedCut.getChannelData(ch);
-        const srcCh = Math.min(ch, buffer.numberOfChannels - 1);
-        const src = buffer.getChannelData(srcCh);
-        for (let i = 0; i < src.length && (offsetSamples + i) < totalSamples; i++) {
-          dest[offsetSamples + i] += src[i];
+    // Mix all cut portions into a single buffer for the clipboard
+    let mixedCut: AudioBuffer;
+    let cutWaveform: number[];
+    if (cutContributions.length > 0) {
+      const cutDuration = outPoint - inPoint;
+      const totalSamples = Math.ceil(cutDuration * sampleRate);
+      mixedCut = audioContext.createBuffer(maxChannels, totalSamples, sampleRate);
+      for (const { buffer, offsetInRegion } of cutContributions) {
+        const offsetSamples = Math.floor(offsetInRegion * sampleRate);
+        for (let ch = 0; ch < maxChannels; ch++) {
+          const dest = mixedCut.getChannelData(ch);
+          const srcCh = Math.min(ch, buffer.numberOfChannels - 1);
+          const src = buffer.getChannelData(srcCh);
+          for (let i = 0; i < src.length && (offsetSamples + i) < totalSamples; i++) {
+            dest[offsetSamples + i] += src[i];
+          }
         }
       }
+      cutWaveform = generateWaveformFromBuffer(mixedCut);
+    } else {
+      // EDL clips where extraction failed — create a silent placeholder for the clipboard
+      const cutDuration = outPoint - inPoint;
+      const totalSamples = Math.ceil(cutDuration * sampleRate);
+      mixedCut = audioContext.createBuffer(maxChannels, Math.max(1, totalSamples), sampleRate);
+      cutWaveform = [];
     }
-    const cutWaveform = generateWaveformFromBuffer(mixedCut);
 
     // Update track with remaining clips
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
@@ -734,16 +872,13 @@ export const useTracksStore = defineStore('tracks', () => {
 
     if (newClips.length === 0) {
       if (keepTrack) {
-        // Clear audio but preserve the empty track shell
-        if (trackIndex !== -1) {
-          tracks.value[trackIndex] = {
-            ...track,
-            audioData: { buffer: null, waveformData: [], sampleRate, channels: maxChannels },
-            clips: undefined,
-            duration: 0,
-          };
-          tracks.value = [...tracks.value];
-        }
+        tracks.value[trackIndex] = {
+          ...track,
+          audioData: { buffer: null, waveformData: [], sampleRate, channels: maxChannels },
+          clips: undefined,
+          duration: 0,
+        };
+        tracks.value = [...tracks.value];
         console.log('[Tracks] All clips cut from track, kept empty');
       } else {
         deleteTrack(trackId);
@@ -797,6 +932,8 @@ export const useTracksStore = defineStore('tracks', () => {
       waveformData: track.audioData.waveformData,
       clipStart,
       duration: track.duration,
+      sourceFile: track.cachedAudioPath || track.sourcePath,
+      sourceOffset: 0,
     }];
   }
 
@@ -976,12 +1113,62 @@ export const useTracksStore = defineStore('tracks', () => {
     });
   }
 
+  // Extract a region from a large file (no in-memory buffer) via Rust mmap
+  // For clip-based tracks, routes to the correct clip's sourceFile + sourceOffset
+  async function extractRegionViaRust(
+    track: Track, relStartTime: number, relEndTime: number, audioContext: AudioContext
+  ): Promise<AudioBuffer | null> {
+    // If track has clips, find the clip containing the start of the region
+    if (track.clips && track.clips.length > 0) {
+      for (const clip of track.clips) {
+        const clipRelStart = clip.clipStart - track.trackStart;
+        const clipRelEnd = clipRelStart + clip.duration;
+        if (relStartTime >= clipRelStart && relStartTime < clipRelEnd) {
+          const sourceFile = clip.sourceFile || track.cachedAudioPath || track.sourcePath;
+          if (!sourceFile) return null;
+          // Convert to source-file-relative coordinates
+          const fileStart = (clip.sourceOffset ?? 0) + (relStartTime - clipRelStart);
+          const fileEnd = (clip.sourceOffset ?? 0) + Math.min(relEndTime - clipRelStart, clip.duration);
+          return await invokeExtractRegion(sourceFile, fileStart, fileEnd, audioContext);
+        }
+      }
+      return null;
+    }
+
+    // Non-clip track: use existing path
+    const sourcePath = track.cachedAudioPath || track.sourcePath;
+    if (!sourcePath) return null;
+    return await invokeExtractRegion(sourcePath, relStartTime, relEndTime, audioContext);
+  }
+
+  // Low-level Rust extract call
+  async function invokeExtractRegion(
+    sourcePath: string, startTime: number, endTime: number, audioContext: AudioContext
+  ): Promise<AudioBuffer | null> {
+    try {
+      const result = await invoke<{ channels: number[][]; sampleRate: number; channelCount: number }>(
+        'extract_audio_region_samples',
+        { sourcePath, startTime, endTime }
+      );
+      const frames = result.channels[0]?.length ?? 0;
+      if (frames === 0) return null;
+      const buffer = audioContext.createBuffer(result.channelCount, frames, result.sampleRate);
+      for (let ch = 0; ch < result.channelCount; ch++) {
+        buffer.getChannelData(ch).set(new Float32Array(result.channels[ch]));
+      }
+      return buffer;
+    } catch (err) {
+      console.error('[Tracks] extractRegionViaRust failed:', err);
+      return null;
+    }
+  }
+
   // Ripple delete: cut [inPoint, outPoint] from ALL tracks and close the gap
-  function rippleDeleteRegion(
+  async function rippleDeleteRegion(
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext
-  ): { buffers: AudioBuffer[]; waveforms: number[][] } {
+  ): Promise<{ buffers: AudioBuffer[]; waveforms: number[][] }> {
     useHistoryStore().pushState('Ripple delete');
     const gapDuration = outPoint - inPoint;
     const cutResults: { buffers: AudioBuffer[]; waveforms: number[][] } = {
@@ -999,7 +1186,7 @@ export const useTracksStore = defineStore('tracks', () => {
       // Check overlap
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-      const result = cutRegionFromTrack(trackId, inPoint, outPoint, audioContext, true);
+      const result = await cutRegionFromTrack(trackId, inPoint, outPoint, audioContext, true);
       if (result) {
         cutResults.buffers.push(result.buffer);
         cutResults.waveforms.push(result.waveformData);
@@ -1020,11 +1207,11 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Extract audio from the [inPoint, outPoint] region across ALL tracks and mix into one buffer
-  function extractRegionFromAllTracks(
+  async function extractRegionFromAllTracks(
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext
-  ): { buffer: AudioBuffer; waveformData: number[] } | null {
+  ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
     const regionDuration = outPoint - inPoint;
     if (regionDuration <= 0) return null;
 
@@ -1043,7 +1230,23 @@ export const useTracksStore = defineStore('tracks', () => {
       if (overlapEnd <= overlapStart) continue;
 
       const buffer = track.audioData.buffer;
-      if (!buffer) continue; // Empty track, skip
+      if (!buffer) {
+        // Large-file fallback: extract via Rust mmap
+        if (track.cachedAudioPath || track.sourcePath) {
+          const relStart = overlapStart - track.trackStart;
+          const relEnd = overlapEnd - track.trackStart;
+          const rustBuffer = await extractRegionViaRust(track, relStart, relEnd, audioContext);
+          if (rustBuffer) {
+            sampleRate = rustBuffer.sampleRate;
+            maxChannels = Math.max(maxChannels, rustBuffer.numberOfChannels);
+            contributions.push({
+              buffer: rustBuffer,
+              offsetInRegion: overlapStart - inPoint,
+            });
+          }
+        }
+        continue;
+      }
       sampleRate = buffer.sampleRate;
       maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
 
@@ -1799,6 +2002,7 @@ export const useTracksStore = defineStore('tracks', () => {
     timelineDuration,
     hasAudio,
     createTrackFromBuffer,
+    insertTrackAtIndex,
     deleteTrack,
     clearTrackAudio,
     selectTrack,
@@ -1825,6 +2029,7 @@ export const useTracksStore = defineStore('tracks', () => {
     slideTracksLeft,
     rippleDeleteRegion,
     extractRegionFromAllTracks,
+    extractRegionViaRust,
     finalizeClipPositions,
     deleteClipFromTrack,
     removeClipKeepTrack,

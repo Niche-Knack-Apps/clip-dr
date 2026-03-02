@@ -31,6 +31,8 @@ pub struct PlaybackTrackConfig {
     pub volume: f32,
     pub muted: bool,
     #[serde(default)]
+    pub file_offset: f64,  // EDL: seconds offset into source file (0 = start)
+    #[serde(default)]
     pub volume_envelope: Option<Vec<AutomationPoint>>,
 }
 
@@ -829,6 +831,13 @@ fn decode_to_temp_wav_with_progress(
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
+    // Fast path: WAV/RF64 files can be used directly via mmap — no decode needed.
+    // This also fixes RF64 files which symphonia cannot parse.
+    if super::import::try_wav_metadata(Path::new(path)).is_some() {
+        log::info!("[Playback] Source is valid WAV/RF64, no decode needed: {}", path);
+        return Ok(PathBuf::from(path));
+    }
+
     let src_path = Path::new(path);
     let file_hash = decode_cache_key(src_path)
         .ok_or_else(|| format!("Cannot stat source file: {}", path))?;
@@ -1193,10 +1202,10 @@ fn build_output_stream(
                         base_vol
                     };
 
-                    // Convert to sample position in the source
+                    // Convert to sample position in the source (file_offset shifts into source file for EDL clips)
                     let src_rate = track_src.sample_rate as f64;
                     let src_ch = track_src.channels as usize;
-                    let sample_idx = (rel_pos * src_rate) as usize;
+                    let sample_idx = ((track_src.config.file_offset + rel_pos) * src_rate) as usize;
                     let interleaved_idx = sample_idx * src_ch;
 
                     // Read source sample(s) — lock-free for Stream, slice for Mmap/Vec
@@ -1293,7 +1302,7 @@ fn build_output_stream(
                     if rel_pos > 0.0 {
                         let src_rate = track_src.sample_rate as f64;
                         let src_ch = track_src.channels as usize;
-                        let sample_idx = (rel_pos * src_rate) as usize;
+                        let sample_idx = ((track_src.config.file_offset + rel_pos) * src_rate) as usize;
                         let idx = sample_idx * src_ch;
                         update_read_cursor(buf, idx);
                     }

@@ -69,6 +69,10 @@ export interface TrackClip {
   clipStart: number;
   /** Duration of this clip (in seconds) */
   duration: number;
+  /** EDL: path to source audio file (large-file non-destructive editing) */
+  sourceFile?: string;
+  /** EDL: offset in seconds within the source file where this clip's audio begins */
+  sourceOffset?: number;
 }
 
 /** A keyframe point on a volume automation envelope */
