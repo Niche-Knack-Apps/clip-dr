@@ -175,19 +175,6 @@ export function useWaveform() {
       }
     }
 
-    // If all upsampled buckets are zero, try expanding the neighborhood to find non-zero data
-    const allZero = buckets.every(b => b.min === 0 && b.max === 0);
-    if (allZero && rangeBuckets > 0) {
-      const expandedStart = Math.max(0, clampedStart - 2);
-      const expandedEnd = Math.min(totalBuckets, clampedEnd + 2);
-      for (let j = expandedStart; j < expandedEnd; j++) {
-        const idx = j * 2;
-        if (idx < data.length - 1 && (data[idx] !== 0 || data[idx + 1] !== 0)) {
-          return buckets.map(() => ({ min: data[idx], max: data[idx + 1] }));
-        }
-      }
-    }
-
     return buckets;
   }
 
