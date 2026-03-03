@@ -201,8 +201,12 @@ export const useAudioStore = defineStore('audio', () => {
       // Set up listeners for background cache decode events (large files)
       let unlistenCacheProgress: (() => void) | undefined;
       let unlistenCacheReady: (() => void) | undefined;
+      let unlistenCacheError: (() => void) | undefined;
 
       if (isLargeFile) {
+        // Early: mark as large-file now so finalizeImportWaveform (peak cache hit path) sees it
+        tracksStore.setImportLargeFile(trackId);
+
         unlistenCacheProgress = await listen<{ trackId: string; progress: number }>('audio-cache-progress', (event) => {
           if (event.payload.trackId !== trackId) return;
           tracksStore.updateImportDecodeProgress(trackId, event.payload.progress);
@@ -217,6 +221,20 @@ export const useAudioStore = defineStore('audio', () => {
             .catch(e => console.warn('[Audio] swap_to_cache:', e));
           unlistenCacheProgress?.();
           unlistenCacheReady?.();
+          unlistenCacheError?.();
+        });
+
+        unlistenCacheError = await listen<{ trackId: string; error: string }>('audio-cache-error', (event) => {
+          if (event.payload.trackId !== trackId) return;
+          console.error(`[Audio] [${ms()}] Cache decode failed for ${trackId}: ${event.payload.error}`);
+          // Downgrade from 'caching' → 'large-file': track remains playable via Rust streaming
+          tracksStore.setImportLargeFile(trackId);
+          import('./ui').then(({ useUIStore }) => {
+            useUIStore().showToast(`Failed to cache "${fileName}" — file may be corrupted or disk is full`, 'error');
+          });
+          unlistenCacheProgress?.();
+          unlistenCacheReady?.();
+          unlistenCacheError?.();
         });
       }
 
@@ -271,8 +289,7 @@ export const useAudioStore = defineStore('audio', () => {
       // Skipped for large files to avoid WebView OOM crashes
       let audioBuffer: AudioBuffer | null = null;
       if (isLargeFile) {
-        // Skip browser decode — mark as large-file then start background cache
-        tracksStore.setImportLargeFile(trackId);
+        // Skip browser decode — setImportLargeFile already called above; start background cache
         tracksStore.setImportCaching(trackId);
         console.log(`[Audio] [${ms()}] Phase 3 skipped: file too large for browser decode`);
         console.log(`[Audio] [${ms()}] Background cache started via prepare_audio_cache`);
