@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, triggerRef } from 'vue';
 import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent, VolumeAutomationPoint } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId, binarySearch } from '@/shared/utils';
@@ -1113,8 +1113,8 @@ export const useTracksStore = defineStore('tracks', () => {
       minTimelineDuration.value = newExtent;
     }
 
-    // Trigger reactivity
-    tracks.value = [...tracks.value];
+    // Trigger reactivity without allocating a new array
+    triggerRef(tracks);
   }
 
   /**
@@ -1916,8 +1916,8 @@ export const useTracksStore = defineStore('tracks', () => {
   function setHasPeakPyramid(trackId: string): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
-    tracks.value[idx] = { ...tracks.value[idx], hasPeakPyramid: true };
-    tracks.value = [...tracks.value];
+    tracks.value[idx].hasPeakPyramid = true;
+    triggerRef(tracks);
   }
 
   /** Add a timemark to any track (not just during recording) */

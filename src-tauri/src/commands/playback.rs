@@ -1557,6 +1557,25 @@ pub fn playback_set_track_muted(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+pub struct TrackMuteUpdate {
+    pub track_id: String,
+    pub muted: bool,
+}
+
+/// Set mute state for multiple tracks in a single lock acquisition (PERF-08).
+#[tauri::command]
+pub fn playback_set_muted_batch(
+    updates: Vec<TrackMuteUpdate>,
+    state: tauri::State<'_, PlaybackEngine>,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    for u in updates {
+        inner.track_muted.insert(u.track_id, u.muted);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn playback_set_loop(
     enabled: bool,

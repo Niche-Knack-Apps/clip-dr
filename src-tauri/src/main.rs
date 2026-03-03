@@ -129,6 +129,7 @@ fn main() {
             playback::playback_set_track_volume,
             playback::playback_set_track_envelope,
             playback::playback_set_track_muted,
+            playback::playback_set_muted_batch,
             playback::playback_set_loop,
             playback::playback_get_position,
             playback::playback_get_meter_levels,

@@ -1,4 +1,4 @@
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { TRACK_COLORS } from '@/shared/types';
@@ -59,9 +59,27 @@ export function useCompositeWaveform() {
     }
   }
 
+  // Version hash tracking waveform data content (changes when clips are added/removed/edited,
+  // but NOT when only clip positions change during drag)
+  const waveformVersion = computed(() =>
+    tracksStore.tracks.map(t =>
+      tracksStore.getTrackClips(t.id).map(c => c.waveformData.length).join(',')
+    ).join('|')
+  );
+
+  // Cache for composite during drag — waveform data doesn't meaningfully change during position-only drag
+  const cachedComposite = ref<number[]>([]);
+  const cachedCompositeVersion = ref<string>('');
+
   // Compute composite waveform data by merging all tracks
   const compositeWaveformData = computed(() => {
     const tracks = tracksStore.tracks;
+    const version = waveformVersion.value;
+
+    // During drag, return cached composite if waveform data content hasn't changed
+    if (tracksStore.activeDrag && version === cachedCompositeVersion.value && cachedComposite.value.length > 0) {
+      return cachedComposite.value;
+    }
 
     if (tracks.length === 0) {
       return [];
@@ -91,6 +109,10 @@ export function useCompositeWaveform() {
         addClipToComposite(composite, clip, timelineDuration, bucketDuration);
       }
     }
+
+    // Update cache
+    cachedComposite.value = composite;
+    cachedCompositeVersion.value = version;
 
     return composite;
   });

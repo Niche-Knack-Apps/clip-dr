@@ -174,19 +174,20 @@ export const usePlaybackStore = defineStore('playback', () => {
     const allTracks = tracksStore.tracks;
     const hasSolo = allTracks.some(t => t.solo && !t.muted);
 
+    // Batch all mute updates into a single IPC call (PERF-08)
+    const updates: { track_id: string; muted: boolean }[] = [];
     for (const track of getPlayableTracks()) {
       let muted = track.muted;
       if (hasSolo) {
         muted = !track.solo || track.muted;
       }
-
       const clips = tracksStore.getTrackClips(track.id);
       for (const clip of clips) {
-        await invoke('playback_set_track_muted', {
-          trackId: `${track.id}:${clip.id}`,
-          muted,
-        });
+        updates.push({ track_id: `${track.id}:${clip.id}`, muted });
       }
+    }
+    if (updates.length > 0) {
+      await invoke('playback_set_muted_batch', { updates });
     }
   }
 
