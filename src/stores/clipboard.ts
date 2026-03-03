@@ -10,8 +10,7 @@ import { useUIStore } from './ui';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
 import { encodeWavFloat32 } from '@/shared/audio-utils';
-import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
+import { writeTempFile } from '@/shared/fs-utils';
 
 export interface VirtualClipboardSegment {
   sourceFile: string;
@@ -63,10 +62,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
         try {
           const wavData = encodeWavFloat32(clip.buffer);
-          const fileName = `clip_${clip.id}_${Date.now()}.wav`;
-          await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
-          const tmpDir = await tempDir();
-          clip.sourceFile = `${tmpDir}${tmpDir.endsWith('/') ? '' : '/'}${fileName}`;
+          clip.sourceFile = await writeTempFile(`clip_${clip.id}_${Date.now()}.wav`, wavData);
           clip.sourceOffset = 0;
         } catch (err) {
           console.error('[Clipboard] Failed to cache clip WAV:', err);

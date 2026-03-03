@@ -1,5 +1,28 @@
+import type { Track, TrackClip } from '@/shared/types';
+
 export function generateId(): string {
   return crypto.randomUUID();
+}
+
+/**
+ * Canonical source path resolver for a track.
+ * Returns cachedAudioPath (managed cache) > sourcePath (user-granted path) > undefined.
+ * Use this wherever you need the best available source file for a track.
+ */
+export function getTrackSourcePath(track: Pick<Track, 'cachedAudioPath' | 'sourcePath'>): string | undefined {
+  return track.cachedAudioPath || track.sourcePath || undefined;
+}
+
+/**
+ * Canonical source path resolver for a clip within a track.
+ * Returns clip.sourceFile > cachedAudioPath > sourcePath > undefined.
+ * Use this wherever you need the best available source file for a specific clip.
+ */
+export function getClipSourcePath(
+  clip: Pick<TrackClip, 'sourceFile'>,
+  track: Pick<Track, 'cachedAudioPath' | 'sourcePath'>
+): string | undefined {
+  return clip.sourceFile || track.cachedAudioPath || track.sourcePath || undefined;
 }
 
 /**

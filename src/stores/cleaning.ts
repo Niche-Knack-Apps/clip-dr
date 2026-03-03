@@ -1,8 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
+import { writeTempFile } from '@/shared/fs-utils';
 import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
 import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
@@ -106,10 +105,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
 
         // Encode to WAV and write to temp file
         const wavData = encodeWav(mixedBuffer);
-        const sourceFileName = `clean_source_${Date.now()}.wav`;
-        await writeFile(sourceFileName, wavData, { baseDir: BaseDirectory.Temp });
-        const tempDirPath = await tempDir();
-        sourcePath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${sourceFileName}`;
+        sourcePath = await writeTempFile(`clean_source_${Date.now()}.wav`, wavData);
         cleanDuration = mixedBuffer.duration;
 
         console.log('[Clean] Using current buffer state, temp file:', sourcePath);

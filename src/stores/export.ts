@@ -2,8 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
-import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
+import { writeTempFile } from '@/shared/fs-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
@@ -273,13 +272,8 @@ export const useExportStore = defineStore('export', () => {
       }
       progress.value = 50;
 
-      const tempDirPath = await tempDir();
-      const ensurePath = (fileName: string) => `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${fileName}`;
-
       const wavData = encodeWav(mixedBuffer);
-      const tempFileName = `mixed_temp_${Date.now()}.wav`;
-      await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-      const tempPath = ensurePath(tempFileName);
+      const tempPath = await writeTempFile(`mixed_temp_${Date.now()}.wav`, wavData);
       progress.value = 70;
 
       if (format === 'mp3') {
@@ -404,10 +398,7 @@ export const useExportStore = defineStore('export', () => {
       }
 
       const wavData = encodeWav(trackBuffer);
-      const tempFileName = `track_export_${Date.now()}.wav`;
-      await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-      const tempDirPath = await tempDir();
-      const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
+      const tempPath = await writeTempFile(`track_export_${Date.now()}.wav`, wavData);
 
       if (format === 'mp3') {
         await invoke('export_audio_mp3', {

@@ -1,8 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
+import { writeTempFile } from '@/shared/fs-utils';
 import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark, TranscriptionMetrics } from '@/shared/types';
 import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { useAudioStore } from './audio';
@@ -847,10 +846,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     const wavData = encodeWav(mixedBuffer);
 
-    const tempFileName = `transcribe_buffer_${Date.now()}.wav`;
-    await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-    const tempDirPath = await tempDir();
-    const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
+    const tempPath = await writeTempFile(`transcribe_buffer_${Date.now()}.wav`, wavData);
 
     if (trackId === tracksStore.selectedTrackId) {
       const engineLabel = settingsStore.settings.transcriptionEngine === 'moonshine' ? 'Moonshine' : 'Whisper';

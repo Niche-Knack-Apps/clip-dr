@@ -1,8 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
+import { writeTempFile } from '@/shared/fs-utils';
 import type { SilenceRegion, Track } from '@/shared/types';
 import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { useVadStore } from './vad';
@@ -311,10 +310,7 @@ export const useSilenceStore = defineStore('silence', () => {
 
       // Encode to WAV and write to temp file
       const wavData = encodeWav(mixedBuffer);
-      const sourceFileName = `cut_source_${Date.now()}.wav`;
-      await writeFile(sourceFileName, wavData, { baseDir: BaseDirectory.Temp });
-      const tempDirPath = await tempDir();
-      const sourcePath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${sourceFileName}`;
+      const sourcePath = await writeTempFile(`cut_source_${Date.now()}.wav`, wavData);
 
       console.log('[CutSilence] Using current buffer state, temp file:', sourcePath);
 
