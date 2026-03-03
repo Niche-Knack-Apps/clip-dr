@@ -391,6 +391,109 @@ describe('EDL Editing Architecture', () => {
     });
   });
 
+  describe('edit-only cut never calls Rust extraction', () => {
+    it('does not invoke Rust when mode is edit-only', async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const { useTracksStore } = await import('@/stores/tracks');
+
+      const tracksStore = useTracksStore();
+      const buffer = createMockAudioBuffer(10);
+      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+
+      vi.mocked(invoke).mockClear();
+
+      const ctx = new AudioContext();
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+
+      expect(invoke).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('undo/redo preserves EDL fields', () => {
+    it('undo restores original clip, redo restores split clips with EDL fields', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const { useHistoryStore } = await import('@/stores/history');
+
+      const tracksStore = useTracksStore();
+      const historyStore = useHistoryStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      // Replace with an EDL clip (buffer=null, sourceFile set)
+      tracksStore.tracks[trackIdx] = {
+        ...tracksStore.tracks[trackIdx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        clips: [{
+          id: 'edl-clip-undo',
+          buffer: null,
+          waveformData: new Array(200).fill(0.5),
+          clipStart: 0,
+          duration: 10,
+          sourceFile: '/tmp/undo-test.wav',
+          sourceOffset: 0,
+        }],
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Push state so we can undo back to it
+      historyStore.pushState('Before cut');
+
+      const ctx = new AudioContext();
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx);
+
+      // Verify 2 clips after cut
+      const afterCut = tracksStore.tracks.find(t => t.id === track.id);
+      expect(afterCut!.clips!.length).toBe(2);
+
+      // Undo — should restore original single EDL clip
+      historyStore.undo();
+      const afterUndo = tracksStore.tracks.find(t => t.id === track.id);
+      expect(afterUndo!.clips!.length).toBe(1);
+      expect(afterUndo!.clips![0].sourceFile).toBe('/tmp/undo-test.wav');
+      expect(afterUndo!.clips![0].sourceOffset).toBe(0);
+
+      // Redo — should restore split clips with correct EDL fields
+      historyStore.redo();
+      const afterRedo = tracksStore.tracks.find(t => t.id === track.id);
+      expect(afterRedo!.clips!.length).toBe(2);
+
+      const beforeClip = afterRedo!.clips!.find(c => c.clipStart < 3);
+      const afterClip = afterRedo!.clips!.find(c => c.clipStart >= 5);
+      expect(beforeClip!.sourceFile).toBe('/tmp/undo-test.wav');
+      expect(beforeClip!.sourceOffset).toBe(0);
+      expect(afterClip!.sourceFile).toBe('/tmp/undo-test.wav');
+      expect(afterClip!.sourceOffset).toBeCloseTo(5, 0);
+    });
+  });
+
+  describe('small-file cut preserves sourceFile/sourceOffset', () => {
+    it('before and after clips get sourceFile and sourceOffset from track', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+
+      const tracksStore = useTracksStore();
+      const buffer = createMockAudioBuffer(10);
+      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0, '/tmp/small-file.wav');
+
+      const ctx = new AudioContext();
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+
+      const updated = tracksStore.tracks.find(t => t.id === track.id);
+      expect(updated!.clips).toBeDefined();
+      expect(updated!.clips!.length).toBe(2);
+
+      const beforeClip = updated!.clips!.find(c => c.clipStart < 3);
+      const afterClip = updated!.clips!.find(c => c.clipStart >= 5);
+
+      expect(beforeClip!.sourceFile).toBe('/tmp/small-file.wav');
+      expect(beforeClip!.sourceOffset).toBe(0);
+
+      expect(afterClip!.sourceFile).toBe('/tmp/small-file.wav');
+      expect(afterClip!.sourceOffset).toBeCloseTo(5, 0);
+    });
+  });
+
   describe('Clip (c) behavior', () => {
     it('clip inserts below current track and mutes existing tracks', async () => {
       const { useTracksStore } = await import('@/stores/tracks');

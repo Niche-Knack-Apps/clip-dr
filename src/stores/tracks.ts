@@ -651,6 +651,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Create clips for remaining audio
     const newClips: TrackClip[] = [];
+    const sourceFile = track.cachedAudioPath || track.sourcePath;
 
     if (hasAudioBefore) {
       // Create clip for audio before cut
@@ -669,6 +670,8 @@ export const useTracksStore = defineStore('tracks', () => {
         waveformData: generateWaveformFromBuffer(beforeBuffer),
         clipStart: trackStart,
         duration: beforeBuffer.duration,
+        sourceFile,
+        sourceOffset: 0,
       });
     }
 
@@ -691,6 +694,8 @@ export const useTracksStore = defineStore('tracks', () => {
         waveformData: generateWaveformFromBuffer(afterBuffer),
         clipStart: trackStart + cutEnd,
         duration: afterBuffer.duration,
+        sourceFile,
+        sourceOffset: cutEnd,
       });
     }
 
@@ -762,7 +767,6 @@ export const useTracksStore = defineStore('tracks', () => {
             sampleRate = cutBuf.sampleRate;
             maxChannels = Math.max(maxChannels, cutBuf.numberOfChannels);
           }
-        } else {
         }
 
         // Waveform slicing helper
@@ -835,6 +839,8 @@ export const useTracksStore = defineStore('tracks', () => {
             waveformData: generateWaveformFromBuffer(beforeBuf),
             clipStart: clip.clipStart,
             duration: beforeBuf.duration,
+            sourceFile: clip.sourceFile,
+            sourceOffset: clip.sourceOffset,
           });
         }
 
@@ -854,6 +860,8 @@ export const useTracksStore = defineStore('tracks', () => {
             waveformData: generateWaveformFromBuffer(afterBuf),
             clipStart: overlapEnd,
             duration: afterBuf.duration,
+            sourceFile: clip.sourceFile,
+            sourceOffset: (clip.sourceOffset ?? 0) + relOverlapEnd,
           });
         }
       }
