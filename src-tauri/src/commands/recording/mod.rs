@@ -58,7 +58,7 @@ use crate::audio_util::{Rf64Writer, AudioWriter};
 pub(super) struct RecordingSession {
     pub(super) input: Option<Box<dyn InputHandle>>,
     pub(super) ring_buffer: Option<Arc<RecordingRingBuffer>>,
-    pub(super) writer_handle: Option<JoinHandle<(AudioWriter, usize, Vec<PathBuf>)>>,
+    pub(super) writer_handle: Option<JoinHandle<(AudioWriter, usize, Vec<PathBuf>, u32)>>,
     /// Per-session active flag (checked by audio callback)
     pub(super) active: Arc<AtomicBool>,
     /// Per-session peak level (updated by audio callback, read by polling)
@@ -749,7 +749,7 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
     }
 
     // Signal ring buffer to stop and join writer thread to get writer back
-    let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) = (session.ring_buffer.take(), session.writer_handle.take()) {
+    let (writer, sample_count, completed_segments, err_count) = if let (Some(ring), Some(handle)) = (session.ring_buffer.take(), session.writer_handle.take()) {
         // Log telemetry before joining
         let overruns = ring.overrun_count.load(Ordering::Relaxed);
         let max_fill = ring.max_fill_level.load(Ordering::Relaxed);
@@ -762,7 +762,7 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
 
         ring.active.store(false, Ordering::Release);
         match handle.join() {
-            Ok((w, count, segments)) => (Some(w), count, segments),
+            Ok((w, count, segments, errs)) => (Some(w), count, segments, errs),
             Err(_) => {
                 log::error!("Writer thread panicked");
                 return Err("Writer thread panicked".to_string());
@@ -840,6 +840,7 @@ pub async fn stop_recording(mgr: State<'_, RecordingManager>) -> Result<Recordin
         channels: final_channels,
         extra_segments,
         pre_record_seconds: session.pre_record_seconds,
+        write_error_count: err_count,
     })
 }
 
@@ -1007,7 +1008,7 @@ pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec
             let _ = input.stop();
         }
 
-        let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
+        let (writer, sample_count, completed_segments, err_count) = if let (Some(ring), Some(handle)) =
             (session.ring_buffer.take(), session.writer_handle.take())
         {
             let overruns = ring.overrun_count.load(Ordering::Relaxed);
@@ -1016,14 +1017,14 @@ pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec
             }
             ring.active.store(false, Ordering::Release);
             match handle.join() {
-                Ok((w, count, segments)) => (Some(w), count, segments),
+                Ok((w, count, segments, errs)) => (Some(w), count, segments, errs),
                 Err(_) => {
                     log::error!("Session '{}': writer thread panicked", session_id);
                     continue;
                 }
             }
         } else {
-            (None, 0usize, Vec::new())
+            (None, 0usize, Vec::new(), 0u32)
         };
 
         if sample_count == 0 {
@@ -1084,6 +1085,7 @@ pub async fn stop_all_recordings(mgr: State<'_, RecordingManager>) -> Result<Vec
                 channels: final_channels,
                 extra_segments,
                 pre_record_seconds: session.pre_record_seconds,
+                write_error_count: err_count,
             },
             start_offset_us: session.start_offset_us,
         });
@@ -1262,7 +1264,7 @@ pub async fn stop_session(
         let _ = input.stop();
     }
 
-    let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
+    let (writer, sample_count, completed_segments, err_count) = if let (Some(ring), Some(handle)) =
         (session.ring_buffer.take(), session.writer_handle.take())
     {
         let overruns = ring.overrun_count.load(Ordering::Relaxed);
@@ -1271,14 +1273,14 @@ pub async fn stop_session(
         }
         ring.active.store(false, Ordering::Release);
         match handle.join() {
-            Ok((w, count, segments)) => (Some(w), count, segments),
+            Ok((w, count, segments, errs)) => (Some(w), count, segments, errs),
             Err(_) => {
                 log::error!("Session '{}': writer thread panicked", session_id);
                 return Err(format!("Session '{}': writer thread panicked", session_id));
             }
         }
     } else {
-        (None, 0usize, Vec::new())
+        (None, 0usize, Vec::new(), 0u32)
     };
 
     if sample_count == 0 {
@@ -1345,6 +1347,7 @@ pub async fn stop_session(
             channels: final_channels,
             extra_segments,
             pre_record_seconds: session.pre_record_seconds,
+            write_error_count: err_count,
         },
         start_offset_us: session.start_offset_us,
     })
@@ -1474,7 +1477,7 @@ pub async fn cancel_recording(mgr: State<'_, RecordingManager>) -> Result<(), St
         }
         if let Some(handle) = session.writer_handle.take() {
             match handle.join() {
-                Ok((_writer, _count, completed)) => {
+                Ok((_writer, _count, completed, _)) => {
                     for seg in &completed {
                         let _ = std::fs::remove_file(seg);
                     }

@@ -22,7 +22,7 @@ pub fn segment_path(base: &Path, index: usize) -> PathBuf {
 }
 
 /// Spawn a dedicated writer thread that drains the ring buffer to an AudioWriter.
-/// Returns a JoinHandle that yields (AudioWriter, total_sample_count, completed_segments) on join.
+/// Returns a JoinHandle that yields (AudioWriter, total_sample_count, completed_segments, write_error_count) on join.
 /// Supports automatic WAV segment splitting (split-tracks mode) or RF64 single-file mode.
 pub fn spawn_wav_writer_thread(
     ring: Arc<RecordingRingBuffer>,
@@ -32,7 +32,7 @@ pub fn spawn_wav_writer_thread(
     base_path: PathBuf,
     wav_spec: WavSpec,
     use_rf64: bool,
-) -> JoinHandle<(AudioWriter, usize, Vec<PathBuf>)> {
+) -> JoinHandle<(AudioWriter, usize, Vec<PathBuf>, u32)> {
     std::thread::Builder::new()
         .name("wav-writer".into())
         .spawn(move || {
@@ -42,8 +42,11 @@ pub fn spawn_wav_writer_thread(
             let mut segment_data_bytes: usize = 0;
             let mut segment_index: usize = 1;
             let mut completed_segments: Vec<PathBuf> = Vec::new();
+            let mut write_error_count: u32 = 0;
+            let mut consecutive_errors: u32 = 0;
+            const MAX_CONSECUTIVE_ERRORS: u32 = 100;
 
-            loop {
+            'drain: loop {
                 let wp = ring.write_pos.load(std::sync::atomic::Ordering::Acquire);
                 let rp = ring.read_pos.load(std::sync::atomic::Ordering::Relaxed);
                 let available = wp.wrapping_sub(rp);
@@ -103,10 +106,22 @@ pub fn spawn_wav_writer_thread(
                     segment_index += 1;
                     segment_data_bytes = 0;
                     let new_path = segment_path(&base_path, segment_index);
-                    let f = File::create(&new_path).expect("Failed to create segment file");
-                    writer = AudioWriter::Hound(WavWriter::new(BufWriter::new(f), wav_spec)
-                        .expect("Failed to create segment writer"));
-                    log::info!("Mic recording: started new segment {:?}", new_path);
+                    match File::create(&new_path) {
+                        Ok(f) => {
+                            match WavWriter::new(BufWriter::new(f), wav_spec) {
+                                Ok(w) => {
+                                    writer = AudioWriter::Hound(w);
+                                    log::info!("Mic recording: started new segment {:?}", new_path);
+                                }
+                                Err(e) => {
+                                    log::error!("[WAVWriter] Segment writer init failed: {} — continuing in current file", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("[WAVWriter] Segment create failed: {} — continuing in current file", e);
+                        }
+                    }
                 }
 
                 // Drain available samples to writer
@@ -120,11 +135,51 @@ pub fn spawn_wav_writer_thread(
                         let s0 = unsafe { *ring.data_ptr.add(idx0) };
                         let s1 = unsafe { *ring.data_ptr.add(idx1) };
                         if bad_ch == 1 {
-                            let _ = writer.write_sample(s1);
-                            let _ = writer.write_sample(s1);
+                            match writer.write_sample(s1) {
+                                Ok(_) => { consecutive_errors = 0; }
+                                Err(e) => {
+                                    write_error_count += 1; consecutive_errors += 1;
+                                    if write_error_count == 1 { log::error!("[WAVWriter] Write error: {}. File may be truncated.", e); }
+                                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                        log::error!("[WAVWriter] {} consecutive failures — stopping drain.", consecutive_errors);
+                                        break 'drain;
+                                    }
+                                }
+                            }
+                            match writer.write_sample(s1) {
+                                Ok(_) => { consecutive_errors = 0; }
+                                Err(e) => {
+                                    write_error_count += 1; consecutive_errors += 1;
+                                    if write_error_count == 1 { log::error!("[WAVWriter] Write error: {}. File may be truncated.", e); }
+                                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                        log::error!("[WAVWriter] {} consecutive failures — stopping drain.", consecutive_errors);
+                                        break 'drain;
+                                    }
+                                }
+                            }
                         } else {
-                            let _ = writer.write_sample(s0);
-                            let _ = writer.write_sample(s0);
+                            match writer.write_sample(s0) {
+                                Ok(_) => { consecutive_errors = 0; }
+                                Err(e) => {
+                                    write_error_count += 1; consecutive_errors += 1;
+                                    if write_error_count == 1 { log::error!("[WAVWriter] Write error: {}. File may be truncated.", e); }
+                                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                        log::error!("[WAVWriter] {} consecutive failures — stopping drain.", consecutive_errors);
+                                        break 'drain;
+                                    }
+                                }
+                            }
+                            match writer.write_sample(s0) {
+                                Ok(_) => { consecutive_errors = 0; }
+                                Err(e) => {
+                                    write_error_count += 1; consecutive_errors += 1;
+                                    if write_error_count == 1 { log::error!("[WAVWriter] Write error: {}. File may be truncated.", e); }
+                                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                        log::error!("[WAVWriter] {} consecutive failures — stopping drain.", consecutive_errors);
+                                        break 'drain;
+                                    }
+                                }
+                            }
                         }
                     }
                     let consumed = pairs * 2;
@@ -137,7 +192,17 @@ pub fn spawn_wav_writer_thread(
                     for i in 0..available {
                         let idx = (rp + i) % ring.capacity;
                         let sample = unsafe { *ring.data_ptr.add(idx) };
-                        let _ = writer.write_sample(sample);
+                        match writer.write_sample(sample) {
+                            Ok(_) => { consecutive_errors = 0; }
+                            Err(e) => {
+                                write_error_count += 1; consecutive_errors += 1;
+                                if write_error_count == 1 { log::error!("[WAVWriter] Write error: {}. File may be truncated.", e); }
+                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                    log::error!("[WAVWriter] {} consecutive failures — stopping drain.", consecutive_errors);
+                                    break 'drain;
+                                }
+                            }
+                        }
                     }
                     new_rp = rp + available;
                     ring.read_pos.store(new_rp, std::sync::atomic::Ordering::Release);
@@ -161,7 +226,17 @@ pub fn spawn_wav_writer_thread(
             for i in 0..remaining {
                 let idx = (rp + i) % ring.capacity;
                 let sample = unsafe { *ring.data_ptr.add(idx) };
-                let _ = writer.write_sample(sample);
+                match writer.write_sample(sample) {
+                    Ok(_) => { consecutive_errors = 0; }
+                    Err(e) => {
+                        write_error_count += 1; consecutive_errors += 1;
+                        if write_error_count == 1 { log::error!("[WAVWriter] Write error: {}. File may be truncated.", e); }
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            log::error!("[WAVWriter] {} consecutive failures — stopping final drain.", consecutive_errors);
+                            break;
+                        }
+                    }
+                }
             }
             total_written += remaining;
 
@@ -179,7 +254,7 @@ pub fn spawn_wav_writer_thread(
                 log::warn!("Recording had {} ring buffer overruns — potential audio gaps", overruns);
             }
 
-            (writer, total_written, completed_segments)
+            (writer, total_written, completed_segments, write_error_count)
         })
         .expect("Failed to spawn wav-writer thread")
 }

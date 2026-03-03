@@ -60,6 +60,8 @@ export interface RecordingResult {
   extra_segments: string[];
   /** Seconds of pre-record buffer audio prepended to the recording */
   pre_record_seconds: number;
+  /** Number of write errors during recording (0 = clean) */
+  write_error_count?: number;
 }
 
 export interface RecordingSession {
@@ -575,6 +577,11 @@ export const useRecordingStore = defineStore('recording', () => {
         result = await invoke<RecordingResult>('stop_system_audio_recording');
       } else {
         result = await invoke<RecordingResult>('stop_recording');
+      }
+
+      // Surface write errors before clearing recording state
+      if (result.write_error_count && result.write_error_count > 0) {
+        error.value = `Recording may be incomplete — ${result.write_error_count} write error(s) occurred. Check disk space.`;
       }
 
       isRecording.value = false;

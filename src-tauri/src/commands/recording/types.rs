@@ -69,6 +69,9 @@ pub struct RecordingResult {
     /// Seconds of pre-record buffer audio prepended to the recording
     #[serde(default)]
     pub pre_record_seconds: f64,
+    /// Number of write errors that occurred during recording (0 = clean)
+    #[serde(default)]
+    pub write_error_count: u32,
 }
 
 /// Configuration for a single device in a multi-source recording.
