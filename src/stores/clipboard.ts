@@ -275,16 +275,20 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
       let extracted: { buffer: AudioBuffer; waveformData: number[] } | null = null;
       let virtualSegments: VirtualClipboardSegment[] | null = null;
+      let sr = 44100;
+      let ch = 2;
+      let clipWaveform: number[] = [];
 
       if (hasLargeFile) {
         // Large file: collect virtual clipboard segments (instant, metadata only)
+        // Capture format and waveform BEFORE ripple delete modifies/removes tracks
         virtualSegments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
+        ({ sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint));
+        clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
       } else {
         // Small file: extract audio (fast, in-memory)
         extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
       }
-
-      console.log(`[EDL] cut hasLargeFile=${hasLargeFile} virtualSegments=${virtualSegments?.length}`);
 
       // Ripple delete — ALWAYS edit-only (no extraction)
       const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, { mode: 'edit-only' });
@@ -303,9 +307,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
             copiedAt: Date.now(),
           };
         } else if (virtualSegments && virtualSegments.length > 0) {
-          // Large file: store virtual clipboard reference
-          const { sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint);
-          const clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
+          // Large file: store virtual clipboard reference (format/waveform captured above)
           clipboardBuffer.value = null;
           clipboard.value = {
             samples: [],

@@ -501,8 +501,6 @@ export const useTracksStore = defineStore('tracks', () => {
 
         const sourceFile = track.cachedAudioPath || track.sourcePath!;
         const { mode = 'edit-only' } = opts;
-        console.log(`[EDL] cutRegionFromTrack mode=${mode} track=${trackId}`);
-
         let cutBuffer: AudioBuffer | null = null;
         let cutWaveform: number[] = [];
 
@@ -765,7 +763,6 @@ export const useTracksStore = defineStore('tracks', () => {
             maxChannels = Math.max(maxChannels, cutBuf.numberOfChannels);
           }
         } else {
-          console.log('[EDL] edit-only clip split, skipping extraction');
         }
 
         // Waveform slicing helper
@@ -1527,6 +1524,8 @@ export const useTracksStore = defineStore('tracks', () => {
       waveformData: generateWaveformFromBuffer(beforeBuffer),
       clipStart: clip.clipStart,
       duration: beforeBuffer.duration,
+      sourceFile: clip.sourceFile,
+      sourceOffset: clip.sourceOffset,
     };
 
     const afterClip: TrackClip = {
@@ -1535,6 +1534,8 @@ export const useTracksStore = defineStore('tracks', () => {
       waveformData: generateWaveformFromBuffer(afterBuffer),
       clipStart: splitTime,
       duration: afterBuffer.duration,
+      sourceFile: clip.sourceFile,
+      sourceOffset: clip.sourceOffset != null ? clip.sourceOffset + relSplit : undefined,
     };
 
     return { before: beforeClip, after: afterClip };
@@ -1567,6 +1568,8 @@ export const useTracksStore = defineStore('tracks', () => {
         waveformData: track.audioData.waveformData,
         clipStart: track.trackStart,
         duration: track.duration,
+        sourceFile: track.cachedAudioPath || track.sourcePath,
+        sourceOffset: 0,
       }];
     } else {
       // Empty track — start with no existing clips
@@ -2064,17 +2067,22 @@ export const useTracksStore = defineStore('tracks', () => {
     return segments;
   }
 
-  /** Get sample rate/channels from the first contributing track in the region */
+  /** Get highest sample rate/channels from contributing tracks in the region */
   function getContributingFormat(inPoint: number, outPoint: number): { sampleRate: number; channels: number } {
+    let sampleRate = 0;
+    let channels = 0;
     for (const track of tracks.value) {
       const trackEnd = track.trackStart + track.duration;
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
-      return {
-        sampleRate: track.audioData.sampleRate || 44100,
-        channels: track.audioData.channels || 2,
-      };
+      const sr = track.audioData.sampleRate || 44100;
+      const ch = track.audioData.channels || 2;
+      if (sampleRate && sr !== sampleRate) {
+        console.warn(`[EDL] Sample rate mismatch: ${sampleRate} vs ${sr} — using ${Math.max(sampleRate, sr)}`);
+      }
+      sampleRate = Math.max(sampleRate, sr);
+      channels = Math.max(channels, ch);
     }
-    return { sampleRate: 44100, channels: 2 };
+    return { sampleRate: sampleRate || 44100, channels: channels || 2 };
   }
 
   /** Slice and merge waveform data from tracks overlapping [inPoint, outPoint] */
@@ -2121,8 +2129,6 @@ export const useTracksStore = defineStore('tracks', () => {
     const totalDuration = Math.max(...vs.segments.map(s => s.offsetInRegion + s.duration));
     const totalSamples = Math.ceil(totalDuration * vs.sampleRate);
     if (totalSamples <= 0) return null;
-
-    console.log(`[EDL] materializing ${vs.segments.length} segments (${totalDuration.toFixed(1)}s)`);
 
     const mixed = audioContext.createBuffer(vs.channels, totalSamples, vs.sampleRate);
 
