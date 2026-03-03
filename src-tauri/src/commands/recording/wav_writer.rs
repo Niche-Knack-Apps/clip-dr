@@ -95,31 +95,31 @@ pub fn spawn_wav_writer_thread(
 
                 // Check if segment split is needed (only in split-tracks mode, not RF64)
                 if !use_rf64 && segment_data_bytes + write_bytes > WAV_SEGMENT_MAX_DATA_BYTES {
-                    let current_seg = segment_path(&base_path, segment_index);
-                    match writer.finalize() {
-                        Ok(()) => {
-                            let _ = patch_wav_header_if_needed(&current_seg);
-                            completed_segments.push(current_seg);
-                        }
-                        Err(e) => log::error!("Failed to finalize segment: {}", e),
-                    }
-                    segment_index += 1;
-                    segment_data_bytes = 0;
-                    let new_path = segment_path(&base_path, segment_index);
-                    match File::create(&new_path) {
-                        Ok(f) => {
-                            match WavWriter::new(BufWriter::new(f), wav_spec) {
-                                Ok(w) => {
-                                    writer = AudioWriter::Hound(w);
-                                    log::info!("Mic recording: started new segment {:?}", new_path);
+                    let next_index = segment_index + 1;
+                    let new_path = segment_path(&base_path, next_index);
+                    // Create the new writer BEFORE finalizing the old one — finalize() takes ownership
+                    let new_writer_result = File::create(&new_path)
+                        .map_err(|e| format!("create: {}", e))
+                        .and_then(|f| WavWriter::new(BufWriter::new(f), wav_spec)
+                            .map_err(|e| format!("init: {}", e)));
+                    match new_writer_result {
+                        Ok(new_w) => {
+                            let current_seg = segment_path(&base_path, segment_index);
+                            match writer.finalize() {
+                                Ok(()) => {
+                                    let _ = patch_wav_header_if_needed(&current_seg);
+                                    completed_segments.push(current_seg);
                                 }
-                                Err(e) => {
-                                    log::error!("[WAVWriter] Segment writer init failed: {} — continuing in current file", e);
-                                }
+                                Err(e) => log::error!("Failed to finalize segment: {}", e),
                             }
+                            segment_index = next_index;
+                            segment_data_bytes = 0;
+                            writer = AudioWriter::Hound(new_w);
+                            log::info!("Mic recording: started new segment {:?}", new_path);
                         }
                         Err(e) => {
-                            log::error!("[WAVWriter] Segment create failed: {} — continuing in current file", e);
+                            // Keep writing to current segment — do not finalize/move writer
+                            log::error!("[WAVWriter] Segment switch failed: {} — continuing in current segment", e);
                         }
                     }
                 }

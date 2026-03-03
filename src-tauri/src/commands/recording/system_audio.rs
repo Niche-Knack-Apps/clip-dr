@@ -463,7 +463,7 @@ pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Re
         log::info!("Stopping system audio recording...");
 
         // Signal ring buffer to stop and join writer thread (same path as mic recording)
-        let (writer, sample_count, completed_segments) = if let (Some(ring), Some(handle)) =
+        let (writer, sample_count, completed_segments, err_count) = if let (Some(ring), Some(handle)) =
             (session.ring_buffer.take(), session.writer_handle.take())
         {
             let overruns = ring.overrun_count.load(Ordering::Relaxed);
@@ -477,7 +477,7 @@ pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Re
 
             ring.active.store(false, Ordering::Release);
             match handle.join() {
-                Ok((w, count, segments)) => (Some(w), count, segments),
+                Ok((w, count, segments, errs)) => (Some(w), count, segments, errs),
                 Err(_) => {
                     log::error!("System audio writer thread panicked");
                     return Err("Writer thread panicked".to_string());
@@ -550,6 +550,7 @@ pub async fn stop_system_audio_recording(mgr: State<'_, RecordingManager>) -> Re
             channels: final_channels,
             extra_segments,
             pre_record_seconds: 0.0,
+            write_error_count: err_count,
         })
     }
 
@@ -585,5 +586,6 @@ pub fn recover_recording(path: String) -> Result<RecordingResult, String> {
         channels,
         extra_segments: Vec::new(),
         pre_record_seconds: 0.0,
+        write_error_count: 0,
     })
 }
