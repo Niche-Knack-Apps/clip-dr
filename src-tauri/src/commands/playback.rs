@@ -165,7 +165,10 @@ impl StreamBuffer {
             return None;
         }
 
-        let local = (absolute_idx - base) % self.capacity;
+        // Use absolute_idx % capacity (standard ring buffer formula).
+        // Do NOT use (absolute_idx - base) — base may have advanced since the
+        // sample was written, which would compute the wrong physical slot.
+        let local = absolute_idx % self.capacity;
         // Safety: local < capacity, data_ptr valid for capacity f32s
         Some(unsafe { *self.data_ptr.add(local) })
     }
@@ -191,7 +194,8 @@ impl StreamBuffer {
             }
         }
 
-        let local = (wh - self.base_offset.load(Ordering::Relaxed)) % self.capacity;
+        // Use wh % capacity (standard ring buffer formula), consistent with read_sample.
+        let local = wh % self.capacity;
         // Safety: local < capacity, only one writer thread
         unsafe { *self.data_ptr.add(local) = value; }
         self.write_head.store(wh + 1, Ordering::Release);
@@ -1542,6 +1546,16 @@ pub fn playback_set_track_volume(
     state: tauri::State<'_, PlaybackEngine>,
 ) -> Result<(), String> {
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    // Match both the plain ID and any compound IDs of the form "<trackId>:<clipId>"
+    let prefix = format!("{}:", track_id);
+    let matching: Vec<String> = inner.tracks.iter()
+        .map(|t| t.config.track_id.clone())
+        .filter(|tid| *tid == track_id || tid.starts_with(&prefix))
+        .collect();
+    for tid in matching {
+        inner.track_volumes.insert(tid, volume);
+    }
+    // Also store under plain ID (handles single-source tracks / direct lookups)
     inner.track_volumes.insert(track_id, volume);
     Ok(())
 }
@@ -1635,9 +1649,15 @@ pub fn playback_set_track_envelope(
     state: tauri::State<'_, PlaybackEngine>,
 ) -> Result<(), String> {
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    if let Some(idx) = inner.tracks.iter().position(|t| t.config.track_id == track_id) {
+    // Match both the plain ID and any compound IDs of the form "<trackId>:<clipId>"
+    let prefix = format!("{}:", track_id);
+    let indices: Vec<usize> = inner.tracks.iter().enumerate()
+        .filter(|(_, t)| t.config.track_id == track_id || t.config.track_id.starts_with(&prefix))
+        .map(|(i, _)| i)
+        .collect();
+    for idx in indices {
         if idx < inner.track_envelopes.len() {
-            inner.track_envelopes[idx] = envelope;
+            inner.track_envelopes[idx] = envelope.clone();
             inner.envelope_indices[idx] = 0; // reset walking pointer
         }
     }
@@ -1653,18 +1673,25 @@ pub fn playback_get_meter_levels(
     let count = meter.track_count.load(Ordering::Acquire);
     let ids = meter.track_ids.lock().map_err(|e| e.to_string())?;
 
-    let tracks: Vec<TrackMeterLevel> = (0..count.min(ids.len()))
-        .map(|i| TrackMeterLevel {
-            track_id: ids[i].clone(),
-            peak_l: MeterData::load_f32(&meter.track_peak_l[i]),
-            peak_r: MeterData::load_f32(&meter.track_peak_r[i]),
-            rms_l: MeterData::load_f32(&meter.track_rms_l[i]),
-            rms_r: MeterData::load_f32(&meter.track_rms_r[i]),
-        })
-        .collect();
+    // Aggregate clip-level meters into per-track meters (compound ID "trackId:clipId" → base trackId)
+    let mut track_map: HashMap<String, TrackMeterLevel> = HashMap::new();
+    for i in 0..count.min(ids.len()) {
+        let base_id = ids[i].split(':').next().unwrap_or(&ids[i]).to_string();
+        let peak_l = MeterData::load_f32(&meter.track_peak_l[i]);
+        let peak_r = MeterData::load_f32(&meter.track_peak_r[i]);
+        let rms_l  = MeterData::load_f32(&meter.track_rms_l[i]);
+        let rms_r  = MeterData::load_f32(&meter.track_rms_r[i]);
+        let entry = track_map.entry(base_id.clone()).or_insert(TrackMeterLevel {
+            track_id: base_id, peak_l: 0.0, peak_r: 0.0, rms_l: 0.0, rms_r: 0.0,
+        });
+        entry.peak_l = entry.peak_l.max(peak_l);
+        entry.peak_r = entry.peak_r.max(peak_r);
+        entry.rms_l  = entry.rms_l.max(rms_l);
+        entry.rms_r  = entry.rms_r.max(rms_r);
+    }
 
     Ok(MeterLevels {
-        tracks,
+        tracks: track_map.into_values().collect(),
         master_peak_l: MeterData::load_f32(&meter.master_peak_l),
         master_peak_r: MeterData::load_f32(&meter.master_peak_r),
         master_rms_l: MeterData::load_f32(&meter.master_rms_l),
@@ -1681,19 +1708,29 @@ pub fn playback_swap_to_cache(
     state: tauri::State<'_, PlaybackEngine>,
 ) -> Result<(), String> {
     let swap_start = std::time::Instant::now();
-    let (pcm, sr, ch) = load_wav_mmap(&cached_path)?;
     let size_mb = fs::metadata(&cached_path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0);
 
+    // Match both plain ID and compound IDs of the form "<trackId>:<clipId>"
+    let prefix = format!("{}:", track_id);
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    if let Some(track) = inner.tracks.iter_mut().find(|t| t.config.track_id == track_id) {
-        // Stop streaming decode thread if active
-        if let PcmData::Stream(buf) = &track.pcm {
-            buf.stop.store(true, Ordering::Release);
+    let mut swapped = 0usize;
+    for track in inner.tracks.iter_mut() {
+        if track.config.track_id == track_id || track.config.track_id.starts_with(&prefix) {
+            // Stop streaming decode thread if active
+            if let PcmData::Stream(buf) = &track.pcm {
+                buf.stop.store(true, Ordering::Release);
+            }
+            // Mmap doesn't implement Clone — open a fresh mmap per clip segment (trivial cost)
+            let (pcm, sr, ch) = load_wav_mmap(&cached_path)?;
+            track.pcm = pcm;
+            track.sample_rate = sr;
+            track.channels = ch;
+            swapped += 1;
         }
-        track.pcm = pcm;
-        track.sample_rate = sr;
-        track.channels = ch;
-        log::info!("[Playback] Hot-swap stream→mmap for track {} ({:.1}MB, {:.0}ms)", track_id, size_mb, swap_start.elapsed().as_secs_f64() * 1000.0);
+    }
+    if swapped > 0 {
+        log::info!("[Playback] Hot-swap stream→mmap for track {} ({} clip(s), {:.1}MB, {:.0}ms)",
+            track_id, swapped, size_mb, swap_start.elapsed().as_secs_f64() * 1000.0);
     }
     Ok(())
 }

@@ -230,7 +230,12 @@ export const useAudioStore = defineStore('audio', () => {
           // Downgrade from 'caching' → 'large-file': track remains playable via Rust streaming
           tracksStore.setImportLargeFile(trackId);
           import('./ui').then(({ useUIStore }) => {
-            useUIStore().showToast(`Failed to cache "${fileName}" — file may be corrupted or disk is full`, 'error');
+            const isTooLarge = event.payload.error.includes('too large for WAV cache');
+            if (isTooLarge) {
+              useUIStore().showToast(`"${fileName}" exceeds 4 GB WAV cache limit — using streaming decode`, 'info');
+            } else {
+              useUIStore().showToast(`Failed to cache "${fileName}" — file may be corrupted or disk is full`, 'error');
+            }
           });
           unlistenCacheProgress?.();
           unlistenCacheReady?.();
