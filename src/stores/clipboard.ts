@@ -467,20 +467,12 @@ export const useClipboardStore = defineStore('clipboard', () => {
     } finally { historyStore.endBatch(); }
   }
 
-  // Delete: selected clip > I/O points > entire track
+  // Delete: I/O points > selected clip > entire track
   async function deleteSelected(): Promise<boolean> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Delete');
     try {
-    // Priority 1: Selected clip
-    const selClip = tracksStore.selectedClip;
-    if (selClip) {
-      tracksStore.deleteClipFromTrack(selClip.trackId, selClip.clip.id);
-      tracksStore.clearClipSelection();
-      return true;
-    }
-
-    // Priority 2: I/O points
+    // Priority 1: I/O points (precision editing takes precedence)
     const { inPoint, outPoint } = selectionStore.inOutPoints;
 
     if (inPoint !== null && outPoint !== null) {
@@ -516,16 +508,24 @@ export const useClipboardStore = defineStore('clipboard', () => {
         playbackStore.seek(Math.max(0, inPoint - 1.0));
       }
       return cutCount > 0;
-    } else {
-      // Priority 3: Entire target track
-      const selectedTrack = getTargetTrack();
-      if (!selectedTrack) {
-          return false;
-      }
-      transcriptionStore.removeTranscription(selectedTrack.id);
-      tracksStore.deleteTrack(selectedTrack.id);
+    }
+
+    // Priority 2: Selected clip
+    const selClip = tracksStore.selectedClip;
+    if (selClip) {
+      tracksStore.deleteClipFromTrack(selClip.trackId, selClip.clip.id);
+      tracksStore.clearClipSelection();
       return true;
     }
+
+    // Priority 3: Entire target track
+    const selectedTrack = getTargetTrack();
+    if (!selectedTrack) {
+        return false;
+    }
+    transcriptionStore.removeTranscription(selectedTrack.id);
+    tracksStore.deleteTrack(selectedTrack.id);
+    return true;
     } finally { historyStore.endBatch(); }
   }
 
