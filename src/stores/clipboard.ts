@@ -453,12 +453,20 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const waveform = [...clipboard.value.waveformData];
       console.log(`[Clipboard] Inserting ${clipboard.value.duration.toFixed(2)}s at playhead ${playheadTime.toFixed(2)}s in track "${selectedTrack.name}"`);
 
+      // Satisfy C2: resolve sourceFile from the source track so new clip has EDL metadata immediately
+      const sourceTrack = clipboard.value.sourceTrackId
+        ? tracksStore.tracks.find(t => t.id === clipboard.value!.sourceTrackId)
+        : undefined;
+      const pasteSourceFile = sourceTrack?.cachedAudioPath || sourceTrack?.sourcePath;
+
       const success = tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
         waveform,
         playheadTime,
-        ctx
+        ctx,
+        pasteSourceFile,
+        0
       );
 
       if (success) {

@@ -1278,60 +1278,53 @@ export const useTracksStore = defineStore('tracks', () => {
 
     for (const track of tracks.value) {
       const trackEnd = track.trackStart + track.duration;
-      // Check overlap
+      // Quick reject: track has no overlap with extraction region
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-      const overlapStart = Math.max(track.trackStart, inPoint);
-      const overlapEnd = Math.min(trackEnd, outPoint);
-      if (overlapEnd <= overlapStart) continue;
+      const clips = getTrackClips(track.id);
+      for (const clip of clips) {
+        const clipEnd = clip.clipStart + clip.duration;
+        if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
 
-      const buffer = track.audioData.buffer;
-      if (!buffer) {
-        // Large-file fallback: extract via Rust mmap
-        if (track.cachedAudioPath || track.sourcePath) {
-          const relStart = overlapStart - track.trackStart;
-          const relEnd = overlapEnd - track.trackStart;
-          const rustBuffer = await extractRegionViaRust(track, relStart, relEnd, audioContext);
+        const overlapStart = Math.max(clip.clipStart, inPoint);
+        const overlapEnd = Math.min(clipEnd, outPoint);
+        if (overlapEnd <= overlapStart) continue;
+
+        if (clip.buffer) {
+          // In-memory path: slice AudioBuffer directly
+          const buffer = clip.buffer;
+          sampleRate = buffer.sampleRate;
+          maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
+
+          const relStart = overlapStart - clip.clipStart;
+          const relEnd = overlapEnd - clip.clipStart;
+          const startSample = Math.floor(relStart * buffer.sampleRate);
+          const endSample = Math.floor(relEnd * buffer.sampleRate);
+          const length = endSample - startSample;
+          if (length <= 0) continue;
+
+          const extractedBuffer = audioContext.createBuffer(buffer.numberOfChannels, length, buffer.sampleRate);
+          for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+            const src = buffer.getChannelData(ch);
+            const dest = extractedBuffer.getChannelData(ch);
+            for (let i = 0; i < length; i++) dest[i] = src[startSample + i];
+          }
+          contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
+        } else if (clip.sourceFile) {
+          // EDL path: Rust extraction with sourceOffset
+          const regionOffset = overlapStart - clip.clipStart;
+          const fileStart = (clip.sourceOffset ?? 0) + regionOffset;
+          const fileEnd = fileStart + (overlapEnd - overlapStart);
+          const rustBuffer = await invokeExtractRegion(clip.sourceFile, fileStart, fileEnd, audioContext);
           if (rustBuffer) {
             sampleRate = rustBuffer.sampleRate;
             maxChannels = Math.max(maxChannels, rustBuffer.numberOfChannels);
-            contributions.push({
-              buffer: rustBuffer,
-              offsetInRegion: overlapStart - inPoint,
-            });
+            contributions.push({ buffer: rustBuffer, offsetInRegion: overlapStart - inPoint });
           }
-        }
-        continue;
-      }
-      sampleRate = buffer.sampleRate;
-      maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
-
-      // Extract the overlapping portion from this track's buffer
-      const relStart = overlapStart - track.trackStart;
-      const relEnd = overlapEnd - track.trackStart;
-      const startSample = Math.floor(relStart * buffer.sampleRate);
-      const endSample = Math.floor(relEnd * buffer.sampleRate);
-      const length = endSample - startSample;
-
-      if (length <= 0) continue;
-
-      const extractedBuffer = audioContext.createBuffer(
-        buffer.numberOfChannels,
-        length,
-        buffer.sampleRate
-      );
-      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-        const src = buffer.getChannelData(ch);
-        const dest = extractedBuffer.getChannelData(ch);
-        for (let i = 0; i < length; i++) {
-          dest[i] = src[startSample + i];
+        } else {
+          console.warn(`[Tracks] extractRegion: clip ${clip.id} has no buffer or sourceFile — skipping`);
         }
       }
-
-      contributions.push({
-        buffer: extractedBuffer,
-        offsetInRegion: overlapStart - inPoint,
-      });
     }
 
     if (contributions.length === 0) return null;
@@ -1522,7 +1515,32 @@ export const useTracksStore = defineStore('tracks', () => {
 
     const relSplit = splitTime - clip.clipStart;
     const buffer = clip.buffer;
-    if (!buffer) return null; // Can't split large-file clips without buffers
+
+    // EDL path: null-buffer clip — split by metadata + proportional waveform slice
+    if (!buffer) {
+      const fraction = relSplit / clip.duration;
+      const splitBucket = Math.floor(fraction * (clip.waveformData.length / 2));
+      return {
+        before: {
+          id: generateId(),
+          buffer: null,
+          waveformData: clip.waveformData.slice(0, splitBucket * 2),
+          clipStart: clip.clipStart,
+          duration: relSplit,
+          sourceFile: clip.sourceFile,
+          sourceOffset: clip.sourceOffset,
+        },
+        after: {
+          id: generateId(),
+          buffer: null,
+          waveformData: clip.waveformData.slice(splitBucket * 2),
+          clipStart: splitTime,
+          duration: clip.duration - relSplit,
+          sourceFile: clip.sourceFile,
+          sourceOffset: (clip.sourceOffset ?? 0) + relSplit,
+        },
+      };
+    }
     const sampleRate = buffer.sampleRate;
     const channels = buffer.numberOfChannels;
     const splitSample = Math.floor(relSplit * sampleRate);
@@ -1573,7 +1591,9 @@ export const useTracksStore = defineStore('tracks', () => {
     buffer: AudioBuffer,
     waveformData: number[],
     playheadTime: number,
-    audioContext: AudioContext
+    audioContext: AudioContext,
+    sourceFile?: string,
+    sourceOffset?: number
   ): boolean {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return false;
@@ -1625,12 +1645,15 @@ export const useTracksStore = defineStore('tracks', () => {
     });
 
     // Insert the new clip at the playhead position
+    // Satisfy C2: sourceFile/sourceOffset must be set immediately (cacheClipsForPlayback may update later)
     const newClip: TrackClip = {
       id: generateId(),
       buffer,
       waveformData,
       clipStart: playheadTime,
       duration: pasteDuration,
+      sourceFile,
+      sourceOffset,
     };
     currentClips.push(newClip);
 
