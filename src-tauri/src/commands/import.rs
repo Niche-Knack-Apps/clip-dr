@@ -179,53 +179,64 @@ pub async fn import_audio_start(
     let path_ref = Path::new(&path);
 
     // Phase 1: Probe metadata (no decode, ~100ms)
-    let file = File::open(path_ref).map_err(|e| format!("Failed to open file: {}", e))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path_ref.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let format_opts = FormatOptions::default();
-    let metadata_opts = MetadataOptions::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|e| format!("Failed to probe format: {}", e))?;
-
-    let format = probed.format;
-
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-        .ok_or("No audio tracks found")?;
-
-    let codec_params = &track.codec_params;
-    let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-    let channels = codec_params.channels.map(|c| c.count() as u32).unwrap_or(2);
-    let bit_depth = codec_params.bits_per_sample.unwrap_or(16);
-
-    let duration = if let Some(n_frames) = codec_params.n_frames {
-        n_frames as f64 / sample_rate as f64
+    // Try WAV/RF64 header first — symphonia doesn't support RF64 format
+    let metadata = if let Some(wav_meta) = try_wav_metadata(path_ref) {
+        log::info!(
+            "[Import] WAV/RF64 header metadata: {}ch {}Hz {:.1}s",
+            wav_meta.channels, wav_meta.sample_rate, wav_meta.duration
+        );
+        wav_meta
     } else {
-        0.0
-    };
+        // Symphonia probe for compressed formats (MP3, FLAC, OGG, M4A)
+        let file = File::open(path_ref).map_err(|e| format!("Failed to open file: {}", e))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
-    let format_name = path_ref
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("unknown")
-        .to_uppercase();
+        let mut hint = Hint::new();
+        if let Some(ext) = path_ref.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
 
-    let metadata = AudioMetadata {
-        duration,
-        sample_rate,
-        channels,
-        bit_depth,
-        format: format_name,
+        let format_opts = FormatOptions::default();
+        let metadata_opts = MetadataOptions::default();
+
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &format_opts, &metadata_opts)
+            .map_err(|e| format!("Failed to probe format: {}", e))?;
+
+        let format = probed.format;
+
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+            .ok_or("No audio tracks found")?;
+
+        let codec_params = &track.codec_params;
+        let sample_rate = codec_params.sample_rate.unwrap_or(44100);
+        let channels = codec_params.channels.map(|c| c.count() as u32).unwrap_or(2);
+        let bit_depth = codec_params.bits_per_sample.unwrap_or(16);
+
+        let duration = if let Some(n_frames) = codec_params.n_frames {
+            n_frames as f64 / sample_rate as f64
+        } else {
+            0.0
+        };
+
+        let format_name = path_ref
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("unknown")
+            .to_uppercase();
+
+        AudioMetadata {
+            duration,
+            sample_rate,
+            channels,
+            bit_depth,
+            format: format_name,
+        }
     };
+    let duration = metadata.duration;
 
     let session_id = Uuid::new_v4().to_string();
 
@@ -381,22 +392,23 @@ impl BucketAccumulator {
 // Parse RIFF WAV header, mmap the file, compute peaks directly from mapped
 // PCM samples. Avoids full symphonia decode for WAV files (near-instant).
 
-struct WavInfo {
-    data_offset: usize,
-    data_size: usize,
-    sample_rate: u32,
-    channels: u16,
-    bits_per_sample: u16,
+pub(crate) struct WavInfo {
+    pub(crate) data_offset: usize,
+    pub(crate) data_size: usize,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) bits_per_sample: u16,
     /// Audio format: 1 = PCM integer, 3 = IEEE float
-    audio_format: u16,
+    pub(crate) audio_format: u16,
 }
 
-/// Try to parse a RIFF WAV header and return data chunk info.
+/// Try to parse a RIFF WAV or RF64 header and return data chunk info.
 /// Returns None for non-WAV files or unsupported formats.
-fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
+pub(crate) fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
     if data.len() < 44 { return None; }
-    // RIFF header
-    if &data[0..4] != b"RIFF" { return None; }
+    let is_riff = &data[0..4] == b"RIFF";
+    let is_rf64 = &data[0..4] == b"RF64";
+    if !is_riff && !is_rf64 { return None; }
     if &data[8..12] != b"WAVE" { return None; }
 
     let mut pos = 12;
@@ -406,14 +418,20 @@ fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
     let mut bits_per_sample: u16 = 0;
     let mut data_offset: usize = 0;
     let mut data_size: usize = 0;
+    let mut ds64_data_size: u64 = 0;
     let mut found_fmt = false;
     let mut found_data = false;
+    let mut found_ds64 = false;
 
     while pos + 8 <= data.len() {
         let chunk_id = &data[pos..pos + 4];
         let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
 
-        if chunk_id == b"fmt " && chunk_size >= 16 {
+        if chunk_id == b"ds64" && pos + 8 + 28 <= data.len() {
+            // ds64 payload: u64 riff_size, u64 data_size, u64 sample_count
+            ds64_data_size = u64::from_le_bytes(data[pos + 16..pos + 24].try_into().ok()?);
+            found_ds64 = true;
+        } else if chunk_id == b"fmt " && chunk_size >= 16 {
             audio_format = u16::from_le_bytes(data[pos + 8..pos + 10].try_into().ok()?);
             channels = u16::from_le_bytes(data[pos + 10..pos + 12].try_into().ok()?);
             sample_rate = u32::from_le_bytes(data[pos + 12..pos + 16].try_into().ok()?);
@@ -429,14 +447,21 @@ fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
             found_fmt = true;
         } else if chunk_id == b"data" {
             data_offset = pos + 8;
-            data_size = chunk_size;
+            // For RF64, the data chunk size field is 0xFFFFFFFF — use ds64 value instead
+            if is_rf64 && found_ds64 && ds64_data_size > 0 {
+                data_size = (ds64_data_size as usize).min(data.len() - data_offset);
+            } else {
+                data_size = chunk_size;
+            }
             found_data = true;
             break; // data is the last chunk we need
         }
 
         // Advance to next chunk (chunks are word-aligned)
-        pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 { pos += 1; }
+        // RF64 chunks may have 0xFFFFFFFF size — avoid overflow
+        let advance = if chunk_size == 0xFFFFFFFF { 0 } else { chunk_size };
+        pos += 8 + advance;
+        if advance % 2 != 0 { pos += 1; }
     }
 
     if !found_fmt || !found_data { return None; }
@@ -456,6 +481,35 @@ fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
         channels,
         bits_per_sample,
         audio_format,
+    })
+}
+
+/// Try to extract metadata from a WAV/RF64 file by parsing its header directly.
+/// Returns None for non-WAV files or parse failures.
+/// This is much faster than symphonia probe and correctly handles RF64 files
+/// (which symphonia does not support).
+pub(crate) fn try_wav_metadata(path: &Path) -> Option<super::audio::AudioMetadata> {
+    let file = File::open(path).ok()?;
+    let mmap = unsafe { Mmap::map(&file) }.ok()?;
+    let wav = parse_wav_header(&mmap)?;
+
+    let bytes_per_sample = (wav.bits_per_sample / 8) as usize;
+    let frame_size = bytes_per_sample * wav.channels as usize;
+    let total_frames = if frame_size > 0 { wav.data_size / frame_size } else { 0 };
+    let duration = total_frames as f64 / wav.sample_rate as f64;
+
+    let format_name = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("unknown")
+        .to_uppercase();
+
+    Some(super::audio::AudioMetadata {
+        duration,
+        sample_rate: wav.sample_rate,
+        channels: wav.channels as u32,
+        bit_depth: wav.bits_per_sample as u32,
+        format: format_name,
     })
 }
 

@@ -53,6 +53,8 @@ fn main() {
             audio::get_audio_metadata,
             audio::load_audio_buffer,
             audio::load_audio_complete,
+            audio::extract_audio_region_samples,
+            audio::splice_wav_remove_region,
             waveform::extract_waveform,
             transcribe::transcribe_audio,
             transcribe::check_whisper_model,
