@@ -203,6 +203,18 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- Quick Session Mode -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-medium text-gray-300">Quick Session Mode</p>
+            <p class="text-xs text-gray-400 mt-0.5">Automatically start a new session when all tracks are deleted</p>
+          </div>
+          <Toggle
+            :model-value="settingsStore.settings.quickSessionMode"
+            @update:model-value="settingsStore.setQuickSessionMode($event)"
+          />
+        </div>
+
         <!-- Clipboard -->
         <div>
           <h3 class="text-sm font-medium text-gray-300 mb-3">Clipboard</h3>

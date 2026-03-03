@@ -337,9 +337,10 @@ useKeyboardShortcuts({
   },
   // Quick Re-Export (Ctrl+Shift+E)
   onQuickExport: () => exportStore.quickReExport(),
-  // Project save/open (Ctrl+S / Ctrl+O)
+  // Project save/open/new (Ctrl+S / Ctrl+O / Ctrl+N)
   onSaveProject: () => projectStore.saveProject(),
   onOpenProject: () => projectStore.openProject(),
+  onNewProject: () => projectStore.newProject(),
   // Help modal
   onShowHelp: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   // Loop mode shortcuts (Q/W/E/R/T) — also enables looping if disabled

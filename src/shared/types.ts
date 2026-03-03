@@ -233,6 +233,8 @@ export interface Settings {
   transcriptionEngine: TranscriptionEngine;
   // Bottom bar shortcut hints
   shortcutHints: string[];
+  // Quick Session Mode: auto-start new session when all tracks are deleted
+  quickSessionMode: boolean;
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';

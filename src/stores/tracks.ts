@@ -1,11 +1,15 @@
 import { defineStore } from 'pinia';
-import { ref, computed, triggerRef } from 'vue';
+import { ref, computed, triggerRef, watch } from 'vue';
 import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent, VolumeAutomationPoint } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId, binarySearch } from '@/shared/utils';
 import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
+import { useSettingsStore } from './settings';
+// Lazy store access (avoid circular dep with project.ts which imports tracks.ts):
+import { useProjectStore } from './project';
+import { useUIStore } from './ui';
 import { invoke } from '@tauri-apps/api/core';
 import type { VirtualClipboardSegment } from './clipboard';
 
@@ -2307,6 +2311,23 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value, newTrack];
     return newTrack;
   }
+
+  // Quick Session Mode: auto-start new session when all tracks are deleted
+  watch(
+    () => tracks.value.length,
+    (len, oldLen) => {
+      if (len === 0 && oldLen > 0) {
+        // Lazy store access to avoid circular dependency at module init time
+        const settingsStore = useSettingsStore();
+        if (settingsStore.settings.quickSessionMode) {
+          const projectStore = useProjectStore();
+          projectStore.newProject({ skipConfirm: true });
+          const uiStore = useUIStore();
+          uiStore.showToast('New session started', 'info');
+        }
+      }
+    }
+  );
 
   return {
     tracks,

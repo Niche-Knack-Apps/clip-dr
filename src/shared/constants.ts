@@ -60,6 +60,8 @@ export const DEFAULT_SETTINGS = {
   transcriptionEngine: 'whisper' as const,
   // Bottom bar shortcut hints
   shortcutHints: ['help', 'jkl', 'cut', 'delete'],
+  // Quick Session Mode: auto-start new session when all tracks are deleted
+  quickSessionMode: false,
 };
 
 export const KEYBOARD_SHORTCUTS = {

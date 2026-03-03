@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { open, save, ask } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ProjectFile, ProjectTrack, ProjectTrackClip, Track, TrackClip } from '@/shared/types';
 import { useTracksStore } from './tracks';
@@ -316,6 +316,43 @@ export const useProjectStore = defineStore('project', () => {
     updateWindowTitle();
   }
 
+  // ── New Project ─────────────────────────────────────────────────────
+
+  async function newProject(opts?: { skipConfirm?: boolean }): Promise<void> {
+    if (!opts?.skipConfirm && dirty.value) {
+      const confirmed = await ask(
+        'You have unsaved changes. Discard and start a new project?',
+        { title: 'New Project', kind: 'warning' }
+      );
+      if (!confirmed) return;
+    }
+
+    loadGuard = true;
+    try {
+      const playbackStore = usePlaybackStore();
+      const audioStore = useAudioStore();
+      const historyStore = useHistoryStore();
+      const tracksStore = useTracksStore();
+      const selectionStore = useSelectionStore();
+      const silenceStore = useSilenceStore();
+
+      playbackStore.stop();
+      audioStore.unloadAll();
+      silenceStore.clearWithoutHistory();
+      tracksStore.clearTracks();
+      selectionStore.clearInOutPoints();
+      historyStore.clear();
+
+      projectPath.value = null;
+      projectName.value = 'Untitled';
+      createdAt = null;
+      dirty.value = false;
+      updateWindowTitle();
+    } finally {
+      loadGuard = false;
+    }
+  }
+
   // ── Window title ────────────────────────────────────────────────────
 
   function updateWindowTitle(): void {
@@ -355,5 +392,6 @@ export const useProjectStore = defineStore('project', () => {
     loadProject,
     setupDirtyTracking,
     renameProject,
+    newProject,
   };
 });

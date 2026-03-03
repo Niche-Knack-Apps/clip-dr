@@ -49,9 +49,10 @@ export interface KeyboardActions {
   onQuickExport?: () => void;
   // Loop mode shortcuts (Q/W/E/R/T)
   onSetLoopMode?: (mode: LoopMode) => void;
-  // Project save/open
+  // Project save/open/new
   onSaveProject?: () => void;
   onOpenProject?: () => void;
+  onNewProject?: () => void;
   // Help modal
   onShowHelp?: () => void;
 }
@@ -160,6 +161,11 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
           event.preventDefault();
           console.log('[Keyboard] Ctrl+O (open project)');
           actions.onOpenProject?.();
+          return;
+        case 'n':
+          event.preventDefault();
+          console.log('[Keyboard] Ctrl+N (new project)');
+          actions.onNewProject?.();
           return;
       }
     }

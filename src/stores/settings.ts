@@ -271,6 +271,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setQuickSessionMode(enabled: boolean): void {
+    settings.value.quickSessionMode = enabled;
+    saveSettings();
+  }
+
   function setLastExportPath(path: string): void {
     settings.value.lastExportPath = path;
     saveSettings();
@@ -374,5 +379,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setTranscriptionEngine,
     // Bottom bar shortcut hints
     setShortcutHints,
+    // Quick Session Mode
+    setQuickSessionMode,
   };
 });
