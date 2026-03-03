@@ -1,6 +1,6 @@
 [package]
 name = "clip-dr"
-version = "0.16.1"
+version = "0.16.2"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
-symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "ogg", "vorbis", "wav"] }
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav"] }
 rubato = "0.14"
 hound = "3.5"
 uuid = { version = "1", features = ["v4"] }

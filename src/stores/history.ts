@@ -47,6 +47,8 @@ function cloneClip(clip: TrackClip): TrackClip {
     waveformData: clip.waveformData,   // shared by reference (immutable display data)
     clipStart: clip.clipStart,
     duration: clip.duration,
+    sourceFile: clip.sourceFile,        // EDL: preserve source reference for undo/redo
+    sourceOffset: clip.sourceOffset,    // EDL: preserve offset for undo/redo
   };
 }
 
