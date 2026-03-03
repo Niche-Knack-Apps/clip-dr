@@ -12,6 +12,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip, VolumeAutomationPoint } from '@/shared/types';
 import { encodeWav } from '@/shared/audio-utils';
 import { isTrackPlayable } from '@/shared/utils';
+import { useUIStore } from './ui';
 
 const FORMAT_LABELS: Record<string, string> = {
   mp3: 'MP3 Audio',
@@ -213,6 +214,10 @@ export const useExportStore = defineStore('export', () => {
    * Falls back to JS AudioBuffer mixing for tracks without source paths.
    */
   async function doMixedExport(outputPath: string, format: ExportFormat, bitrate: number, oggQuality?: number): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     loading.value = true;
     error.value = null;
     progress.value = 10;

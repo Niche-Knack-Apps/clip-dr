@@ -54,6 +54,14 @@ export const useTracksStore = defineStore('tracks', () => {
     return color;
   }
 
+  /** Bump the editEpoch on a track so concurrent async ops can detect stale state. */
+  function bumpEpoch(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx !== -1) {
+      tracks.value[idx].editEpoch = (tracks.value[idx].editEpoch ?? 0) + 1;
+    }
+  }
+
   // Computed: Get selected track (null if 'ALL' or no selection)
   const selectedTrack = computed(() => {
     if (selectedTrackId.value === 'ALL' || selectedTrackId.value === null) {
@@ -464,6 +472,7 @@ export const useTracksStore = defineStore('tracks', () => {
       return null;
     }
 
+    bumpEpoch(trackId);
     useHistoryStore().pushState('Cut region');
 
     const { keepTrack = false } = opts;
@@ -717,6 +726,8 @@ export const useTracksStore = defineStore('tracks', () => {
   ): Promise<{ buffer: AudioBuffer | null; waveformData: number[] } | null> {
     const { keepTrack = false, mode = 'edit-only' } = opts;
     const clips = track.clips!;
+    // Capture epoch at entry; abort if track is mutated by another op during extraction
+    const epochAtEntry = track.editEpoch ?? 0;
     const newClips: TrackClip[] = [];
     const cutContributions: { buffer: AudioBuffer; offsetInRegion: number }[] = [];
     let maxChannels = track.audioData.channels || 1;
@@ -747,6 +758,12 @@ export const useTracksStore = defineStore('tracks', () => {
           // Extract the overlapping portion for clipboard via Rust
           const extractTrack = { ...track, cachedAudioPath: clip.sourceFile, sourcePath: clip.sourceFile };
           const cutBuf = await extractRegionViaRust(extractTrack, clipSourceOffset + cutStartInClip, clipSourceOffset + cutEndInClip, audioContext);
+          // CON-C2: abort if another operation mutated this track while we were extracting
+          const freshTrack = tracks.value.find(t => t.id === trackId);
+          if (!freshTrack || (freshTrack.editEpoch ?? 0) !== epochAtEntry) {
+            console.warn('[Tracks] cutRegionFromClips: track modified during extraction, aborting');
+            return null;
+          }
           if (cutBuf) {
             cutContributions.push({ buffer: cutBuf, offsetInRegion: overlapStart - inPoint });
             sampleRate = cutBuf.sampleRate;
@@ -1199,6 +1216,11 @@ export const useTracksStore = defineStore('tracks', () => {
   ): Promise<{ affectedCount: number; buffers: AudioBuffer[]; waveforms: number[][] }> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Ripple delete');
+    // Bump epoch on all tracks that will be affected so concurrent ops can detect stale state
+    for (const t of tracks.value) {
+      const trackEnd = t.trackStart + t.duration;
+      if (t.trackStart < outPoint && trackEnd > inPoint) bumpEpoch(t.id);
+    }
     const gapDuration = outPoint - inPoint;
     const cutResults: { buffers: AudioBuffer[]; waveforms: number[][] } = {
       buffers: [],
@@ -1377,6 +1399,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function deleteClipFromTrack(trackId: string, clipId: string): void {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return;
+    bumpEpoch(trackId);
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Delete clip');
     try {

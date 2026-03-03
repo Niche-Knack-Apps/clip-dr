@@ -801,6 +801,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
     }
 
+    // CON-H3: discard result if the track was deleted while transcription was running
+    if (!tracksStore.tracks.find(t => t.id === trackId)) {
+      console.warn('[Transcription] Track deleted during transcription, discarding result:', trackId);
+      return;
+    }
+
     logMapState(`BEFORE set in runTranscriptionFromFile(${trackId.slice(0, 8)})`);
     transcriptions.value.set(trackId, {
       trackId,
@@ -856,6 +862,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
+    }
+
+    // CON-H3: discard result if the track was deleted while transcription was running
+    if (!tracksStore.tracks.find(t => t.id === trackId)) {
+      console.warn('[Transcription] Track deleted during transcription, discarding result:', trackId);
+      return;
     }
 
     logMapState(`BEFORE set in runTranscriptionFromBuffer(${trackId.slice(0, 8)})`);

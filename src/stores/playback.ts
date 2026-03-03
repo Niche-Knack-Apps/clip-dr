@@ -259,30 +259,36 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Set playing flag immediately to prevent race conditions
     isPlaying.value = true;
 
-    // Wait for any pending WAV recache from cut/delete to complete
-    if (tracksStore.pendingRecache) {
-      await tracksStore.pendingRecache;
+    try {
+      // Wait for any pending WAV recache from cut/delete to complete
+      if (tracksStore.pendingRecache) {
+        await tracksStore.pendingRecache;
+      }
+
+      // Sync state to Rust engine (only reloads files if track list changed)
+      await syncTracksToRust();
+      await syncLoopToRust();
+      await invoke('playback_set_speed', { speed: playbackSpeed.value });
+      await invoke('playback_set_volume', { volume: volume.value });
+
+      // Clamp position to active region
+      const region = getActiveRegion();
+      let playStart = currentTime.value;
+      if (playStart < region.start || playStart >= region.end) {
+        playStart = playbackSpeed.value >= 0 ? region.start : region.end;
+        currentTime.value = playStart;
+      }
+
+      await invoke('playback_seek', { position: playStart });
+      await invoke('playback_play');
+
+      startPositionPoll();
+      useMeterStore().startPolling();
+    } catch (err) {
+      console.error('[Playback] play() failed:', err);
+      isPlaying.value = false;
+      stopPositionPoll();
     }
-
-    // Sync state to Rust engine (only reloads files if track list changed)
-    await syncTracksToRust();
-    await syncLoopToRust();
-    await invoke('playback_set_speed', { speed: playbackSpeed.value });
-    await invoke('playback_set_volume', { volume: volume.value });
-
-    // Clamp position to active region
-    const region = getActiveRegion();
-    let playStart = currentTime.value;
-    if (playStart < region.start || playStart >= region.end) {
-      playStart = playbackSpeed.value >= 0 ? region.start : region.end;
-      currentTime.value = playStart;
-    }
-
-    await invoke('playback_seek', { position: playStart });
-    await invoke('playback_play');
-
-    startPositionPoll();
-    useMeterStore().startPolling();
   }
 
   function pause(): void {

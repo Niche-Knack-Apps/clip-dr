@@ -6,6 +6,7 @@ import { useSelectionStore } from './selection';
 import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
+import { useUIStore } from './ui';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
 import { encodeWavFloat32 } from '@/shared/audio-utils';
@@ -45,6 +46,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
   const playbackStore = usePlaybackStore();
   const settingsStore = useSettingsStore();
   const transcriptionStore = useTranscriptionStore();
+
+  // Mutex: prevent concurrent cut/paste/delete operations
+  const operationInProgress = ref(false);
 
   // Cache small-file clips as individual WAVs for Rust playback
   // EDL clips (with sourceFile) already point to their source — no caching needed
@@ -203,6 +207,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
   // Cut: selected clip > I/O region ripple delete > entire track
   async function cut(): Promise<boolean> {
+    if (operationInProgress.value) {
+      useUIStore().showToast('Another edit is in progress. Please wait.', 'warn');
+      return false;
+    }
+    operationInProgress.value = true;
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Cut');
     try {
@@ -368,7 +377,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
       console.log(`[Clipboard] Cut entire track ${selectedTrack.id}, kept empty, slid remaining tracks left`);
       return true;
     }
-    } finally { historyStore.endBatch(); }
+    } finally {
+      historyStore.endBatch();
+      operationInProgress.value = false;
+    }
   }
 
   const PASTE_MATERIALIZE_CEILING_SECS = 300; // 5 minutes max for in-memory paste
@@ -379,6 +391,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
       console.log('[Clipboard] Nothing to paste');
       return null;
     }
+    if (operationInProgress.value) {
+      useUIStore().showToast('Another edit is in progress. Please wait.', 'warn');
+      return null;
+    }
+    operationInProgress.value = true;
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Paste');
     try {
@@ -466,11 +483,19 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
     console.log(`[Clipboard] Pasted ${clipboard.value.duration.toFixed(2)}s, new track ID: ${newTrack.id}`);
     return newTrack;
-    } finally { historyStore.endBatch(); }
+    } finally {
+      historyStore.endBatch();
+      operationInProgress.value = false;
+    }
   }
 
   // Delete: I/O points > selected clip > entire track
   async function deleteSelected(): Promise<boolean> {
+    if (operationInProgress.value) {
+      useUIStore().showToast('Another edit is in progress. Please wait.', 'warn');
+      return false;
+    }
+    operationInProgress.value = true;
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Delete');
     try {
@@ -528,7 +553,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
     transcriptionStore.removeTranscription(selectedTrack.id);
     tracksStore.deleteTrack(selectedTrack.id);
     return true;
-    } finally { historyStore.endBatch(); }
+    } finally {
+      historyStore.endBatch();
+      operationInProgress.value = false;
+    }
   }
 
   // NOTE: createClip() moved to useClipping.ts composable (insert below + solo behavior)

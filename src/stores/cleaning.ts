@@ -10,6 +10,7 @@ import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useVadStore } from './vad';
 import { useHistoryStore } from './history';
+import { useUIStore } from './ui';
 
 interface CleanedAudioEntry {
   path: string;
@@ -67,6 +68,10 @@ export const useCleaningStore = defineStore('cleaning', () => {
   async function cleanSelectedTrack(): Promise<Track | null> {
     if (!tracksStore.hasAudio || !tracksStore.selectedTrack) {
       error.value = 'No track selected';
+      return null;
+    }
+    if (loading.value) {
+      useUIStore().showToast('Cleaning already in progress.', 'warn');
       return null;
     }
 

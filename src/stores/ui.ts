@@ -34,6 +34,18 @@ export const useUIStore = defineStore('ui', () => {
   // Follow playhead in zoomed view (on by default)
   const followPlayhead = ref(true);
 
+  // Toast notification (shown by error surfaces from stores)
+  const toastMessage = ref<string | null>(null);
+  const toastType = ref<'info' | 'warn' | 'error'>('info');
+  let toastTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  function showToast(message: string, type: 'info' | 'warn' | 'error' = 'info', durationMs = 4000): void {
+    if (toastTimeoutId !== null) clearTimeout(toastTimeoutId);
+    toastMessage.value = message;
+    toastType.value = type;
+    toastTimeoutId = setTimeout(() => { toastMessage.value = null; }, durationMs);
+  }
+
   // Snap clips to edges (prevents overlap)
   const snapEnabled = ref(true);
 
@@ -134,6 +146,9 @@ export const useUIStore = defineStore('ui', () => {
   return {
     trackPanelWidth,
     waveformHeight,
+    toastMessage,
+    toastType,
+    showToast,
     zoomedHeight,
     followPlayhead,
     snapEnabled,
