@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import type { Track, TrackClip } from '@/shared/types';
 
 interface Props {
@@ -70,6 +71,15 @@ const audioBuffer = computed(() => {
   return props.track.audioData.buffer;
 });
 
+// EDL clip source info for peak tile fetching
+const sourceFile = computed(() => props.clip?.sourceFile ?? null);
+const sourceOffset = computed(() => props.clip?.sourceOffset ?? 0);
+
+// Peak tile cache for EDL clips (no AudioBuffer available)
+const peakTileData = ref<number[] | null>(null);
+const peakTileFetching = ref(false);
+const peakTileCacheKey = ref('');
+
 // Waveform color: darker version of track color (~50% opacity)
 const waveformColor = computed(() => {
   if (props.track.muted) return 'rgba(75, 85, 99, 0.6)';
@@ -113,6 +123,30 @@ function extractHiResPeaks(buffer: AudioBuffer, targetBuckets: number): number[]
   return waveform;
 }
 
+async function fetchClipPeakTile(targetBuckets: number, cacheKey: string) {
+  peakTileFetching.value = true;
+  try {
+    const data = await invoke<number[]>('get_peak_tile', {
+      path: sourceFile.value,
+      startTime: sourceOffset.value,
+      endTime: sourceOffset.value + clipDuration.value,
+      bucketCount: targetBuckets,
+    });
+    peakTileData.value = data;
+    peakTileCacheKey.value = cacheKey;
+    nextTick(drawWaveform);
+  } catch {
+    // Peak pyramid not available — keep using overview data
+  } finally {
+    peakTileFetching.value = false;
+  }
+}
+
+watch([sourceFile, sourceOffset, clipDuration], () => {
+  peakTileData.value = null;
+  peakTileCacheKey.value = '';
+});
+
 function drawWaveform() {
   const canvas = canvasRef.value;
   if (!canvas) return;
@@ -153,6 +187,17 @@ function drawWaveform() {
     const targetBuckets = Math.min(barsNeeded, 8000); // cap to avoid huge arrays
     data = extractHiResPeaks(audioBuffer.value, targetBuckets);
     bucketCount = targetBuckets;
+  } else if (barsNeeded > overviewBuckets * 1.5 && !audioBuffer.value && sourceFile.value) {
+    // EDL clip: no buffer, but has source file → fetch peak tile from Rust
+    const targetBuckets = Math.min(barsNeeded, 4000);
+    const cacheKey = `${sourceFile.value}:${sourceOffset.value}:${clipDuration.value}:${targetBuckets}`;
+
+    if (peakTileData.value && peakTileCacheKey.value === cacheKey) {
+      data = peakTileData.value;
+      bucketCount = data.length / 2;
+    } else if (!peakTileFetching.value) {
+      fetchClipPeakTile(targetBuckets, cacheKey);
+    }
   }
 
   const centerY = pixelHeight / 2;
