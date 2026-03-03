@@ -294,6 +294,14 @@ export interface WaveformBucket {
   max: number;
 }
 
+export interface WaveformLayerClip {
+  clipStart: number;
+  duration: number;
+  sourceFile?: string;       // large-file EDL clips
+  sourceOffset: number;
+  buffer?: AudioBuffer;      // small-file clips: hi-res extraction from memory
+}
+
 export interface WaveformLayer {
   trackId: string;
   color: string;
@@ -302,6 +310,7 @@ export interface WaveformLayer {
   duration: number;
   sourcePath?: string;
   hasPeakPyramid?: boolean;
+  clips?: WaveformLayerClip[];
 }
 
 export interface AudioMetadata {

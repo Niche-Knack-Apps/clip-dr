@@ -1,7 +1,8 @@
 import { computed } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
-import type { TrackClip, WaveformLayer, Track } from '@/shared/types';
+import { TRACK_COLORS } from '@/shared/types';
+import type { TrackClip, WaveformLayer, WaveformLayerClip, Track } from '@/shared/types';
 
 /**
  * Composable that creates a composite waveform from all tracks.
@@ -135,6 +136,34 @@ export function useCompositeWaveform() {
         addClipToComposite(trackBuckets, clip, timelineDuration, bucketDuration);
       }
 
+      // Build WaveformLayerClip array for ALL multi-clip tracks:
+      // EDL clips have sourceFile; small-file clips have buffer
+      const layerClips: WaveformLayerClip[] = [];
+      let hasAnyHiRes = false;
+      for (const c of track.clips!) {
+        if (c.buffer) {
+          // Small-file clip: hi-res from AudioBuffer (shared ref, not cloned)
+          layerClips.push({
+            clipStart: c.clipStart,
+            duration: c.duration,
+            sourceOffset: 0,
+            buffer: c.buffer,
+          });
+          hasAnyHiRes = true;
+        } else if (c.sourceFile) {
+          // EDL clip: peak tiles from Rust
+          layerClips.push({
+            clipStart: c.clipStart,
+            duration: c.duration,
+            sourceFile: c.sourceFile,
+            sourceOffset: c.sourceOffset ?? 0,
+          });
+          hasAnyHiRes = true;
+        }
+      }
+
+      const isEDL = layerClips.length > 0 && layerClips.every(c => c.sourceFile);
+
       layers.push({
         trackId: track.id,
         color: track.color,
@@ -142,8 +171,19 @@ export function useCompositeWaveform() {
         trackStart: track.trackStart,
         duration: track.duration,
         sourcePath: track.sourcePath,
-        hasPeakPyramid: track.hasPeakPyramid,
+        hasPeakPyramid: isEDL ? true : track.hasPeakPyramid,
+        clips: hasAnyHiRes ? layerClips : undefined,
       });
+    }
+
+    // Deduplicate layer colors — reassign duplicates from unused TRACK_COLORS
+    const usedColors = new Set<string>();
+    for (const layer of layers) {
+      if (usedColors.has(layer.color)) {
+        const unused = TRACK_COLORS.find(c => !usedColors.has(c));
+        if (unused) layer.color = unused;
+      }
+      usedColors.add(layer.color);
     }
 
     return layers;

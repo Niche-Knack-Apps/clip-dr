@@ -2,7 +2,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useTracksStore } from '@/stores/tracks';
-import type { WaveformBucket, WaveformLayer } from '@/shared/types';
+import type { WaveformBucket, WaveformLayer, WaveformLayerClip } from '@/shared/types';
 
 export interface WaveformRenderOptions {
   width: number;
@@ -246,6 +246,132 @@ export function useWaveform() {
     ctx.fill();
   }
 
+  /**
+   * Extract hi-res peaks from an AudioBuffer for a sub-range.
+   * Adapted from ClipRegion.vue's extractHiResPeaks but works on a time range
+   * within the buffer rather than the whole buffer.
+   */
+  function extractHiResPeaksForRange(
+    buffer: AudioBuffer,
+    rangeStartSec: number,
+    rangeEndSec: number,
+    targetBuckets: number,
+  ): WaveformBucket[] {
+    const channelData = buffer.getChannelData(0);
+    const sampleRate = buffer.sampleRate;
+    const startSample = Math.max(0, Math.floor(rangeStartSec * sampleRate));
+    const endSample = Math.min(channelData.length, Math.ceil(rangeEndSec * sampleRate));
+    const totalSamples = endSample - startSample;
+    if (totalSamples <= 0) return new Array(targetBuckets).fill({ min: 0, max: 0 });
+
+    const samplesPerBucket = Math.max(1, Math.ceil(totalSamples / targetBuckets));
+    const buckets: WaveformBucket[] = [];
+
+    for (let i = 0; i < targetBuckets; i++) {
+      const bStart = startSample + i * samplesPerBucket;
+      const bEnd = Math.min(bStart + samplesPerBucket, endSample);
+      let min = 0;
+      let max = 0;
+      for (let j = bStart; j < bEnd; j++) {
+        const s = channelData[j];
+        if (s < min) min = s;
+        if (s > max) max = s;
+      }
+      buckets.push({ min, max });
+    }
+
+    return buckets;
+  }
+
+  /**
+   * Clip-aware peak fetching for layers with clips.
+   * Handles both EDL clips (sourceFile → peak tile from Rust) and
+   * small-file clips (buffer → hi-res extraction from AudioBuffer).
+   * Gaps between clips produce silence (min=0, max=0).
+   */
+  function getClipAwareBucketsForLayer(
+    clips: WaveformLayerClip[],
+    start: number,
+    end: number,
+    bucketCount: number,
+    fallbackBuckets: WaveformBucket[],
+  ): WaveformBucket[] {
+    const viewRange = end - start;
+    const bucketDuration = viewRange / bucketCount;
+
+    // Initialize with silence (gaps between clips)
+    const output: WaveformBucket[] = new Array(bucketCount);
+    for (let i = 0; i < bucketCount; i++) {
+      output[i] = { min: 0, max: 0 };
+    }
+
+    let anyMissing = false;
+
+    for (const clip of clips) {
+      const clipEnd = clip.clipStart + clip.duration;
+
+      // Skip clips outside the view
+      if (clipEnd <= start || clip.clipStart >= end) continue;
+
+      // Intersection of clip with view
+      const overlapStart = Math.max(start, clip.clipStart);
+      const overlapEnd = Math.min(end, clipEnd);
+
+      // Output bucket range for this clip
+      const outStartIdx = Math.max(0, Math.floor((overlapStart - start) / bucketDuration));
+      const outEndIdx = Math.min(bucketCount, Math.ceil((overlapEnd - start) / bucketDuration));
+
+      if (clip.buffer) {
+        // Small-file clip: extract hi-res peaks directly from AudioBuffer
+        const bufferDuration = clip.buffer.duration;
+        const rangeStart = clip.sourceOffset + (overlapStart - clip.clipStart);
+        const rangeEnd = Math.min(clip.sourceOffset + (overlapEnd - clip.clipStart), bufferDuration);
+        const clipBucketCount = outEndIdx - outStartIdx;
+        if (clipBucketCount <= 0) continue;
+
+        const peaks = extractHiResPeaksForRange(clip.buffer, rangeStart, rangeEnd, clipBucketCount);
+        for (let i = 0; i < clipBucketCount; i++) {
+          output[outStartIdx + i] = peaks[i];
+        }
+      } else if (clip.sourceFile) {
+        // EDL clip: fetch peak tile from Rust backend
+        const srcStart = clip.sourceOffset + (overlapStart - clip.clipStart);
+        const srcEnd = clip.sourceOffset + (overlapEnd - clip.clipStart);
+
+        const { qStart, qEnd } = quantizeRange(srcStart, srcEnd);
+        const tileBuckets = Math.max(bucketCount, 256);
+        const cacheKey = `${clip.sourceFile}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${tileBuckets}`;
+
+        const cached = getCachedTile(cacheKey);
+        if (!cached || cached.length < tileBuckets * 2) {
+          anyMissing = true;
+          if (!inFlightKeys.has(cacheKey)) {
+            inFlightKeys.add(cacheKey);
+            fetchPeakTile(clip.sourceFile, qStart, qEnd, tileBuckets, cacheKey);
+          }
+          continue;
+        }
+
+        // Place cached peak data into the correct output buckets
+        const tileRange = qEnd - qStart;
+        for (let i = Math.max(0, outStartIdx); i < Math.min(bucketCount, outEndIdx); i++) {
+          const bucketTime = start + i * bucketDuration;
+          const offsetInClip = bucketTime - clip.clipStart;
+          const sourceTime = clip.sourceOffset + offsetInClip;
+          const frac = (sourceTime - qStart) / tileRange;
+          const srcIdx = Math.min(Math.max(0, Math.floor(frac * tileBuckets)), tileBuckets - 1);
+          output[i] = { min: cached[srcIdx * 2], max: cached[srcIdx * 2 + 1] };
+        }
+      }
+      // Clips with neither buffer nor sourceFile → silence (already initialized)
+    }
+
+    // If any EDL clip's tile is missing, fall back to overview data to avoid jarring partial hi-res
+    if (anyMissing) return fallbackBuckets;
+
+    return output;
+  }
+
   function getBucketsForRangeForLayer(
     layer: WaveformLayer,
     start: number,
@@ -263,7 +389,13 @@ export function useWaveform() {
     const endBucket = Math.ceil((end / dur) * totalBuckets);
     const rangeBuckets = endBucket - startBucket;
 
-    // Use peak tiles when overview data is insufficient
+    // Clip-aware peak tiles for EDL layers
+    if (rangeBuckets < bucketCount * 2 && layer.clips && layer.clips.length > 0) {
+      const fallback = stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
+      return getClipAwareBucketsForLayer(layer.clips, start, end, bucketCount, fallback);
+    }
+
+    // Use peak tiles when overview data is insufficient (single-source-file path)
     if (rangeBuckets < bucketCount * 2 && layer.hasPeakPyramid && layer.sourcePath) {
       const relStart = Math.max(0, start - layer.trackStart);
       const relEnd = Math.min(layer.duration, end - layer.trackStart);
