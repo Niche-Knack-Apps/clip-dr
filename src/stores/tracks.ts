@@ -753,13 +753,17 @@ export const useTracksStore = defineStore('tracks', () => {
         hasEDLClips = true;
         const clipSourceOffset = clip.sourceOffset ?? 0;
 
-        // Extract the overlapping portion for clipboard via Rust
-        const extractTrack = { ...track, cachedAudioPath: clip.sourceFile, sourcePath: clip.sourceFile };
-        const cutBuf = await extractRegionViaRust(extractTrack, clipSourceOffset + cutStartInClip, clipSourceOffset + cutEndInClip, audioContext);
-        if (cutBuf) {
-          cutContributions.push({ buffer: cutBuf, offsetInRegion: overlapStart - inPoint });
-          sampleRate = cutBuf.sampleRate;
-          maxChannels = Math.max(maxChannels, cutBuf.numberOfChannels);
+        if (mode === 'extract-for-clipboard') {
+          // Extract the overlapping portion for clipboard via Rust
+          const extractTrack = { ...track, cachedAudioPath: clip.sourceFile, sourcePath: clip.sourceFile };
+          const cutBuf = await extractRegionViaRust(extractTrack, clipSourceOffset + cutStartInClip, clipSourceOffset + cutEndInClip, audioContext);
+          if (cutBuf) {
+            cutContributions.push({ buffer: cutBuf, offsetInRegion: overlapStart - inPoint });
+            sampleRate = cutBuf.sampleRate;
+            maxChannels = Math.max(maxChannels, cutBuf.numberOfChannels);
+          }
+        } else {
+          console.log('[EDL] edit-only clip split, skipping extraction');
         }
 
         // Waveform slicing helper
@@ -859,8 +863,8 @@ export const useTracksStore = defineStore('tracks', () => {
     if (cutContributions.length === 0 && !hasEDLClips) return null;
 
     // Mix all cut portions into a single buffer for the clipboard
-    let mixedCut: AudioBuffer;
-    let cutWaveform: number[];
+    let mixedCut: AudioBuffer | null = null;
+    let cutWaveform: number[] = [];
     if (cutContributions.length > 0) {
       const cutDuration = outPoint - inPoint;
       const totalSamples = Math.ceil(cutDuration * sampleRate);
@@ -877,12 +881,22 @@ export const useTracksStore = defineStore('tracks', () => {
         }
       }
       cutWaveform = generateWaveformFromBuffer(mixedCut);
-    } else {
-      // EDL clips where extraction failed — create a silent placeholder for the clipboard
-      const cutDuration = outPoint - inPoint;
-      const totalSamples = Math.ceil(cutDuration * sampleRate);
-      mixedCut = audioContext.createBuffer(maxChannels, Math.max(1, totalSamples), sampleRate);
-      cutWaveform = [];
+    } else if (hasEDLClips) {
+      // EDL clips in edit-only mode — slice waveform from existing clip data
+      for (const clip of clips) {
+        const clipEnd = clip.clipStart + clip.duration;
+        if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
+        if (clip.waveformData.length > 0) {
+          const overlapStart = Math.max(clip.clipStart, inPoint);
+          const overlapEnd = Math.min(clipEnd, outPoint);
+          const wfLen = clip.waveformData.length / 2;
+          const startFrac = (overlapStart - clip.clipStart) / clip.duration;
+          const endFrac = (overlapEnd - clip.clipStart) / clip.duration;
+          const s = Math.floor(startFrac * wfLen) * 2;
+          const e = Math.ceil(endFrac * wfLen) * 2;
+          cutWaveform.push(...clip.waveformData.slice(s, e));
+        }
+      }
     }
 
     // Update track with remaining clips
