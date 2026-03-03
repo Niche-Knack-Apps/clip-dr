@@ -569,6 +569,7 @@ export const useTracksStore = defineStore('tracks', () => {
             audioData: { ...track.audioData, buffer: null, waveformData: splicedWaveform },
             clips: newClips.length > 0 ? newClips : undefined,
             duration: newDuration,
+            hasPeakPyramid: false,
           };
           tracks.value = [...tracks.value];
         }
