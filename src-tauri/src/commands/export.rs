@@ -218,6 +218,9 @@ pub struct ExportEDLTrack {
     pub track_start: f64,  // timeline offset in seconds
     pub duration: f64,
     pub volume: f32,
+    /// Offset into the source file in seconds where this clip's audio begins (EDL clips).
+    #[serde(default)]
+    pub file_offset: f64,
     #[serde(default)]
     pub volume_envelope: Option<Vec<AutomationPoint>>,
 }
@@ -226,6 +229,8 @@ pub struct ExportEDLTrack {
 struct EdlSource {
     track_start: f64,
     duration: f64,
+    /// Offset into the loaded PCM data in seconds (for EDL clips with file_offset)
+    file_offset: f64,
     volume: f32,
     volume_envelope: Option<Vec<AutomationPoint>>,
     pcm: PcmData,
@@ -258,6 +263,7 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
         sources.push(EdlSource {
             track_start: track.track_start,
             duration: track.duration,
+            file_offset: track.file_offset,
             volume: track.volume,
             volume_envelope: track.volume_envelope.clone(),
             pcm,
@@ -265,6 +271,9 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
             channels,
         });
     }
+
+    // Sort by timeline position for deterministic mixing
+    sources.sort_by(|a, b| a.track_start.partial_cmp(&b.track_start).unwrap_or(std::cmp::Ordering::Equal));
 
     let total_frames = ((edl.end_time - edl.start_time) * edl.sample_rate as f64) as usize;
 
@@ -316,7 +325,8 @@ fn mix_chunk(
                 _ => src.volume,
             };
 
-            let src_frame = (rel_t * src_rate) as usize;
+            // Apply file_offset: rel_t is position within the clip; add offset to reach into source file
+            let src_frame = ((rel_t + src.file_offset) * src_rate) as usize;
             let interleaved_idx = src_frame * src_ch;
             if interleaved_idx >= samples.len() { continue; }
 

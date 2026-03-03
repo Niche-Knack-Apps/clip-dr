@@ -143,38 +143,61 @@ export const useExportStore = defineStore('export', () => {
   }
 
   /**
-   * Check if all active tracks have source paths (can use EDL export).
+   * Check if all active tracks can use EDL streaming export.
+   * Returns true when every clip in every track has a resolvable source path.
    */
   function canUseEdlExport(tracks: Track[]): boolean {
-    return tracks.length > 0 && tracks.every(t =>
-      !!(t.cachedAudioPath || t.sourcePath) && (!t.clips || t.clips.length === 0)
-    );
+    return tracks.length > 0 && tracks.every(t => {
+      const clips = tracksStore.getTrackClips(t.id);
+      return clips.length > 0 && clips.every(c =>
+        !!(c.sourceFile || t.cachedAudioPath || t.sourcePath)
+      );
+    });
   }
 
   /**
    * Build an EDL from active tracks for Rust-side streaming export.
+   * Flattens per-track → per-clip so edited (multi-clip) tracks export correctly.
+   * Rebases volume envelope times to each clip's local origin.
    */
   function buildEdl(tracks: Track[], outputPath: string, format: ExportFormat, bitrate: number, oggQuality?: number): ExportEDL {
-    // Use the sample rate of the first track, or default to 44100
     const firstTrack = tracks[0];
     const sampleRate = firstTrack?.audioData.sampleRate || 44100;
     const channels = Math.min(firstTrack?.audioData.channels || 2, 2) as number;
 
-    const edlTracks: ExportEDLTrack[] = tracks.map(t => ({
-      source_path: t.cachedAudioPath || t.sourcePath!,
-      track_start: t.trackStart,
-      duration: t.duration,
-      volume: t.volume,
-      volume_envelope: t.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })),
-    }));
+    const edlTracks: ExportEDLTrack[] = [];
+    for (const t of tracks) {
+      const clips = tracksStore.getTrackClips(t.id);
+      for (const clip of clips) {
+        const sourcePath = clip.sourceFile || t.cachedAudioPath || t.sourcePath!;
+        // Envelope times are track-relative (relative to t.trackStart).
+        // Rebase them to each clip's local origin so Rust gets clip-local times.
+        const envelopeOffset = clip.clipStart - (t.trackStart ?? 0);
+        const clipEnvelope = t.volumeEnvelope
+          ?.map(p => ({ time: p.time - envelopeOffset, value: p.value }))
+          .filter(p => p.time >= 0 && p.time <= clip.duration);
+        edlTracks.push({
+          source_path: sourcePath,
+          track_start: clip.clipStart,
+          duration: clip.duration,
+          volume: t.volume,
+          file_offset: clip.sourceOffset ?? 0,
+          volume_envelope: clipEnvelope,
+        });
+      }
+    }
 
-    // Timeline range: from 0 to the end of the last track
-    const endTime = Math.max(...tracks.map(t => t.trackStart + t.duration));
+    // Sort by timeline position for deterministic mixing
+    edlTracks.sort((a, b) => a.track_start - b.track_start);
+
+    const endTime = edlTracks.length > 0
+      ? Math.max(...edlTracks.map(e => e.track_start + e.duration))
+      : 0;
 
     return {
       tracks: edlTracks,
       output_path: outputPath,
-      format: format,
+      format,
       sample_rate: sampleRate,
       channels,
       mp3_bitrate: format === 'mp3' ? bitrate : undefined,
@@ -204,6 +227,16 @@ export const useExportStore = defineStore('export', () => {
 
       // Read tracks AFTER recache so clips are cleared and cachedAudioPath is set
       const tracks = activeTracks.value;
+
+      // Explicit error: clips with no buffer and no source file cannot be exported
+      const unresolvable = tracks.flatMap(t => tracksStore.getTrackClips(t.id))
+        .filter(c => c.buffer === null && !c.sourceFile);
+      if (unresolvable.length > 0) {
+        throw new Error(
+          `Cannot export: ${unresolvable.length} clip(s) have no audio buffer and no source file. ` +
+          `Try re-importing the source file.`
+        );
+      }
 
       // Use EDL streaming export when possible (required for large files)
       if (canUseEdlExport(tracks)) {
@@ -338,8 +371,8 @@ export const useExportStore = defineStore('export', () => {
         throw new Error('Track was removed');
       }
 
-      // Use EDL path for tracks with source paths and no unflattened clips
-      if ((currentTrack.cachedAudioPath || currentTrack.sourcePath) && (!currentTrack.clips || currentTrack.clips.length === 0)) {
+      // Use EDL path when all clips have a resolvable source (handles multi-clip edited tracks)
+      if (canUseEdlExport([currentTrack])) {
         const edl = buildEdl([currentTrack], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
 
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {

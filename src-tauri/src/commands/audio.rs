@@ -10,6 +10,16 @@ use symphonia::core::probe::Hint;
 
 use super::playback::{load_wav_mmap, load_compressed};
 
+/// Returns true for formats that require full symphonia decode (no mmap seek).
+/// Used by PERF-01 guard to prevent OOM on large compressed extractions.
+fn is_compressed_format(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+    matches!(ext.as_deref(), Some("mp3") | Some("ogg") | Some("flac") | Some("m4a") | Some("aac"))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioMetadata {
@@ -357,9 +367,19 @@ pub async fn extract_audio_region_samples(
     }
 
     // Try WAV mmap first (fast path), fall back to compressed decode
+    // PERF-01 mitigation: refuse >5min extraction from compressed formats to prevent OOM
     let (pcm, sample_rate, channels) = match load_wav_mmap(&source_path) {
         Ok(result) => result,
-        Err(_) => load_compressed(&source_path)?,
+        Err(_) => {
+            let duration = end_time - start_time;
+            if is_compressed_format(&source_path) && duration > 300.0 {
+                return Err(format!(
+                    "Extracting {:.0}min from a compressed file is not supported. Re-import as WAV first.",
+                    duration / 60.0
+                ));
+            }
+            load_compressed(&source_path)?
+        }
     };
 
     let ch = channels as usize;
