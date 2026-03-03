@@ -152,6 +152,11 @@ export function useClipping() {
       }
 
       playbackStore.seek(inPoint);
+
+      // Zoom ZoomedWaveform to the new clip and clear I/O markers
+      selectionStore.setSelection(inPoint, outPoint);
+      selectionStore.clearInOutPoints();
+
       return newTrack;
     } finally {
       historyStore.endBatch();
