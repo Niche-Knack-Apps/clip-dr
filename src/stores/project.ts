@@ -3,7 +3,7 @@ import { ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { ProjectFile, ProjectTrack } from '@/shared/types';
+import type { ProjectFile, ProjectTrack, ProjectTrackClip, Track, TrackClip } from '@/shared/types';
 import { useTracksStore } from './tracks';
 import { useSelectionStore } from './selection';
 import { useSilenceStore } from './silence';
@@ -64,6 +64,17 @@ export const useProjectStore = defineStore('project', () => {
 
   // ── Serialization ──────────────────────────────────────────────────
 
+  /** Source stability policy: prefer user-granted path over cache over clip temp path. */
+  function stableSourcePath(clip: TrackClip, track: Track): string {
+    return track.sourcePath || clip.sourceFile || '';
+  }
+
+  function sourceKind(clip: TrackClip, track: Track): ProjectTrackClip['source_kind'] {
+    if (track.sourcePath) return 'original';
+    if (track.cachedAudioPath && clip.sourceFile === track.cachedAudioPath) return 'managed-cache';
+    return 'temp';
+  }
+
   function serializeProject(): ProjectFile {
     const tracksStore = useTracksStore();
     const selectionStore = useSelectionStore();
@@ -71,25 +82,39 @@ export const useProjectStore = defineStore('project', () => {
 
     const baseDir = projectPath.value ? getDirectory(projectPath.value) : '.';
 
-    const tracks: ProjectTrack[] = tracksStore.tracks.map(t => ({
-      id: t.id,
-      name: t.name,
-      sourcePath: t.sourcePath ? toRelativePath(t.sourcePath, baseDir) : '',
-      trackStart: t.trackStart,
-      duration: t.duration,
-      color: t.color,
-      muted: t.muted,
-      solo: t.solo,
-      volume: t.volume,
-      tag: t.tag,
-      timemarks: t.timemarks,
-      volumeEnvelope: t.volumeEnvelope,
-      cachedAudioPath: t.cachedAudioPath ? toRelativePath(t.cachedAudioPath, baseDir) : null,
-    }));
+    const tracks: ProjectTrack[] = tracksStore.tracks.map(t => {
+      const base: ProjectTrack = {
+        id: t.id,
+        name: t.name,
+        sourcePath: t.sourcePath ? toRelativePath(t.sourcePath, baseDir) : '',
+        trackStart: t.trackStart,
+        duration: t.duration,
+        color: t.color,
+        muted: t.muted,
+        solo: t.solo,
+        volume: t.volume,
+        tag: t.tag,
+        timemarks: t.timemarks,
+        volumeEnvelope: t.volumeEnvelope,
+        cachedAudioPath: t.cachedAudioPath ? toRelativePath(t.cachedAudioPath, baseDir) : null,
+      };
+      // Persist EDL clip state (v2+)
+      if (t.clips && t.clips.length > 0) {
+        base.clips = t.clips.map(c => ({
+          id: c.id,
+          clipStart: c.clipStart,
+          duration: c.duration,
+          sourceFile: stableSourcePath(c, t),
+          sourceOffset: c.sourceOffset ?? 0,
+          source_kind: sourceKind(c, t),
+        }));
+      }
+      return base;
+    });
 
     const now = new Date().toISOString();
     return {
-      version: 1,
+      version: 2,
       name: projectName.value,
       createdAt: createdAt ?? now,
       modifiedAt: now,
@@ -161,8 +186,8 @@ export const useProjectStore = defineStore('project', () => {
       const json = await invoke<string>('load_project', { path });
       const project: ProjectFile = JSON.parse(json);
 
-      // Validate version
-      if (project.version !== 1) {
+      // Validate version (1 = original, 2 = adds clip EDL state)
+      if (project.version !== 1 && project.version !== 2) {
         throw new Error(`Unsupported project version: ${project.version}`);
       }
 
@@ -211,6 +236,28 @@ export const useProjectStore = defineStore('project', () => {
             if (pt.tag) lastTrack.tag = pt.tag;
             if (pt.timemarks) lastTrack.timemarks = pt.timemarks;
             if (pt.volumeEnvelope) lastTrack.volumeEnvelope = pt.volumeEnvelope;
+
+            // v2: restore EDL clip state
+            if (project.version === 2 && pt.clips && pt.clips.length > 0) {
+              // Surface any temp-path clips as errors (source stability policy)
+              const tempClips = pt.clips.filter(c => c.source_kind === 'temp');
+              if (tempClips.length > 0) {
+                errors.push(
+                  `Track "${pt.name}": ${tempClips.length} clip(s) used a temp source path — needs relink`
+                );
+              }
+              // Reconstruct clips with null buffers; waveforms filled by finalizeClipWaveforms
+              const reconstructed: TrackClip[] = pt.clips.map(c => ({
+                id: c.id,
+                buffer: null,
+                waveformData: [],
+                clipStart: c.clipStart,
+                duration: c.duration,
+                sourceFile: c.sourceFile,
+                sourceOffset: c.sourceOffset,
+              }));
+              tracksStore.setTrackClips(lastTrack.id, reconstructed);
+            }
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);

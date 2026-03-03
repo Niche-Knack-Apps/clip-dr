@@ -1749,6 +1749,50 @@ export const useTracksStore = defineStore('tracks', () => {
       importSessionId: undefined, // waveform session done
     };
     tracks.value = [...tracks.value];
+    // Propagate settled waveform into restored EDL clips (if any)
+    finalizeClipWaveforms(trackId);
+  }
+
+  /**
+   * Set the clips array for a track (used by project load to restore EDL state).
+   * Also triggers finalizeClipWaveforms if the track already has waveform data.
+   */
+  function setTrackClips(trackId: string, clips: TrackClip[]): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    tracks.value[idx] = { ...tracks.value[idx], clips };
+    tracks.value = [...tracks.value];
+    // Fill waveforms immediately if parent waveform already available
+    finalizeClipWaveforms(trackId);
+  }
+
+  /**
+   * Proportionally slice the parent track waveform into each clip's waveformData.
+   * Called after import settles (importStatus → ready/large-file/caching) or
+   * immediately after setTrackClips if waveform already exists.
+   * Waveforms are eventually-consistent UI data — empty arrays are valid.
+   */
+  function finalizeClipWaveforms(trackId: string): void {
+    const track = tracks.value.find(t => t.id === trackId);
+    if (!track?.clips || track.clips.length === 0) return;
+    const parentWaveform = track.audioData.waveformData;
+    if (parentWaveform.length === 0) return;
+    const totalDuration = track.duration;
+    if (totalDuration <= 0) return;
+    const buckets = parentWaveform.length / 2;
+
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    tracks.value[idx] = {
+      ...track,
+      clips: track.clips.map(clip => {
+        const startFrac = clip.clipStart / totalDuration;
+        const endFrac = (clip.clipStart + clip.duration) / totalDuration;
+        const startBucket = Math.floor(startFrac * buckets);
+        const endBucket = Math.ceil(endFrac * buckets);
+        return { ...clip, waveformData: parentWaveform.slice(startBucket * 2, endBucket * 2) };
+      }),
+    };
+    tracks.value = [...tracks.value];
   }
 
   // Update decode/fetch progress (hot path ~60Hz — mutate in-place, no array copy)
@@ -2276,6 +2320,8 @@ export const useTracksStore = defineStore('tracks', () => {
     adjustVolumeEnvelopeForCut,
     adjustVolumeEnvelopeForDelete,
     adjustVolumeEnvelopeForInsert,
+    setTrackClips,
+    finalizeClipWaveforms,
     createImportingTrack,
     updateImportWaveform,
     finalizeImportWaveform,

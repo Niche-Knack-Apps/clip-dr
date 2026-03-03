@@ -399,7 +399,18 @@ export interface SilenceRegion {
   enabled: boolean;   // If false, this region is "restored" (not cut)
 }
 
-/** EDL (Edit Decision List) for Rust-side streaming export */
+/** A clip as serialized in a v2 .clipdr project file */
+export interface ProjectTrackClip {
+  id: string;
+  clipStart: number;
+  duration: number;
+  /** Stable source path (see source stability policy in docs/EDL_CONTRACTS.md) */
+  sourceFile: string;
+  sourceOffset: number;
+  /** 'original' = user-granted import path, 'managed-cache' = app cache, 'temp' = volatile */
+  source_kind: 'original' | 'managed-cache' | 'temp';
+}
+
 /** A track as serialized in a .clipdr project file */
 export interface ProjectTrack {
   id: string;
@@ -415,11 +426,13 @@ export interface ProjectTrack {
   timemarks?: TimeMark[];
   volumeEnvelope?: VolumeAutomationPoint[];
   cachedAudioPath?: string | null;
+  /** Present in v2+ files when track has been edited into multiple clips */
+  clips?: ProjectTrackClip[];
 }
 
 /** .clipdr project file format */
 export interface ProjectFile {
-  version: 1;
+  version: 1 | 2;
   name: string;
   createdAt: string;
   modifiedAt: string;
