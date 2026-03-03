@@ -3,10 +3,13 @@ import { useTracksStore } from '@/stores/tracks';
 import { useSelectionStore } from '@/stores/selection';
 import { useAudioStore } from '@/stores/audio';
 import { usePlaybackStore } from '@/stores/playback';
+import { useHistoryStore } from '@/stores/history';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
 import { encodeWavFloat32 } from '@/shared/audio-utils';
-import type { Track } from '@/shared/types';
+import { generateId } from '@/shared/utils';
+import type { Track, TrackClip } from '@/shared/types';
+import { TRACK_COLORS } from '@/shared/types';
 
 export function useClipping() {
   const tracksStore = useTracksStore();
@@ -30,45 +33,129 @@ export function useClipping() {
   });
 
   // Create a new track from audio across ALL tracks between in/out points
-  function createClip(): Track | null {
+  // Inserts directly below the current track and mutes all other tracks (solo behavior)
+  async function createClip(): Promise<Track | null> {
     const { inPoint, outPoint } = selectionStore.inOutPoints;
     if (inPoint === null || outPoint === null) {
       console.log('[Clipping] In/Out points not set');
       return null;
     }
 
-    const ctx = audioStore.getAudioContext();
-    const extracted = tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
-    if (!extracted) {
-      console.log('[Clipping] No audio found in I/O region');
-      return null;
-    }
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Create clip');
+    try {
+      // Detect large files (same check as clipboard.cut)
+      const hasLargeFile = tracksStore.tracks.some(t => {
+        const trackEnd = t.trackStart + t.duration;
+        if (t.trackStart >= outPoint || trackEnd <= inPoint) return false;
+        return !t.audioData.buffer;
+      });
 
-    // Place the clip at the in-point so it lines up with the original audio position
-    const clipName = `Clip ${tracksStore.tracks.length + 1}`;
-    const newTrack = tracksStore.createTrackFromBuffer(
-      extracted.buffer,
-      extracted.waveformData,
-      clipName,
-      inPoint
-    );
+      let newTrack: Track;
 
-    // Write temp WAV so Rust playback engine can access this clip
-    const cachePromise = cacheClipForPlayback(newTrack.id, extracted.buffer);
-    tracksStore.setPendingRecache(cachePromise);
+      if (hasLargeFile) {
+        // Large file: create EDL track with virtual references (instant, no extraction)
+        const segments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
+        if (segments.length === 0) {
+          console.log('[Clipping] No segments found in I/O region');
+          return null;
+        }
+        const { sampleRate, channels } = tracksStore.getContributingFormat(inPoint, outPoint);
+        const waveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
+        const clipName = `Clip ${tracksStore.tracks.length + 1}`;
+        const totalDuration = outPoint - inPoint;
 
-    // Mute source tracks that contributed audio to the clip
-    for (const t of tracksStore.tracks) {
-      if (t.id === newTrack.id) continue;
-      if (t.trackStart < outPoint && t.trackStart + t.duration > inPoint) {
-        tracksStore.setTrackMuted(t.id, true);
+        // Build EDL clips from virtual segments
+        const clips: TrackClip[] = segments.map(seg => ({
+          id: generateId(),
+          buffer: null,
+          waveformData: [] as number[],
+          clipStart: inPoint + seg.offsetInRegion,
+          duration: seg.duration,
+          sourceFile: seg.sourceFile,
+          sourceOffset: seg.sourceOffset,
+        }));
+
+        // Distribute waveform data across clips proportionally
+        const bucketCount = waveform.length / 2;
+        for (let i = 0; i < clips.length; i++) {
+          const seg = segments[i];
+          const startFrac = seg.offsetInRegion / totalDuration;
+          const endFrac = (seg.offsetInRegion + seg.duration) / totalDuration;
+          const startBucket = Math.floor(startFrac * bucketCount);
+          const endBucket = Math.ceil(endFrac * bucketCount);
+          clips[i].waveformData = waveform.slice(startBucket * 2, endBucket * 2);
+        }
+
+        newTrack = {
+          id: generateId(),
+          name: clipName,
+          audioData: { buffer: null, waveformData: waveform, sampleRate, channels },
+          trackStart: inPoint,
+          duration: totalDuration,
+          color: TRACK_COLORS[tracksStore.tracks.length % TRACK_COLORS.length],
+          muted: false,
+          solo: false,
+          volume: 1,
+          clips,
+        };
+
+        console.log(`[Clipping] Created EDL clip "${clipName}" (${totalDuration.toFixed(2)}s) with ${segments.length} segment(s)`);
+      } else {
+        // Small file: extract audio (fast, in-memory) — existing path
+        const ctx = audioStore.getAudioContext();
+        const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
+        if (!extracted) {
+          console.log('[Clipping] No audio found in I/O region');
+          return null;
+        }
+        const clipName = `Clip ${tracksStore.tracks.length + 1}`;
+        newTrack = {
+          id: generateId(),
+          name: clipName,
+          audioData: {
+            buffer: extracted.buffer,
+            waveformData: extracted.waveformData,
+            sampleRate: extracted.buffer.sampleRate,
+            channels: extracted.buffer.numberOfChannels,
+          },
+          trackStart: inPoint,
+          duration: extracted.buffer.duration,
+          color: TRACK_COLORS[tracksStore.tracks.length % TRACK_COLORS.length],
+          muted: false,
+          solo: false,
+          volume: 1,
+        };
       }
-    }
 
-    // Position playhead at the beginning of the new clip
-    playbackStore.seek(inPoint);
-    console.log(`[Clipping] Created clip (${(outPoint - inPoint).toFixed(2)}s) at timeline ${inPoint.toFixed(2)}s`);
-    return newTrack;
+      // Mute all existing tracks (within batch so undo restores mute states)
+      for (const track of tracksStore.tracks) {
+        if (!track.muted) {
+          tracksStore.setTrackMuted(track.id, true);
+        }
+      }
+
+      // Insert below current selected track
+      const currentTrackId = tracksStore.selectedTrackId;
+      let insertIndex = tracksStore.tracks.length;
+      if (currentTrackId && currentTrackId !== 'ALL') {
+        const idx = tracksStore.tracks.findIndex(t => t.id === currentTrackId);
+        if (idx !== -1) insertIndex = idx + 1;
+      }
+
+      tracksStore.insertTrackAtIndex(newTrack, insertIndex);
+
+      // Only cache WAV for small-file clips; EDL clips use sourceFile/sourceOffset
+      if (newTrack.audioData.buffer) {
+        const cachePromise = cacheClipForPlayback(newTrack.id, newTrack.audioData.buffer);
+        tracksStore.setPendingRecache(cachePromise);
+      }
+
+      playbackStore.seek(inPoint);
+      return newTrack;
+    } finally {
+      historyStore.endBatch();
+    }
   }
 
   // Write a clip's AudioBuffer to a temp WAV and set cachedAudioPath for Rust playback
