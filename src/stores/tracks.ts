@@ -7,6 +7,7 @@ import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
 import { invoke } from '@tauri-apps/api/core';
+import type { VirtualClipboardSegment } from './clipboard';
 
 export type CutMode = 'edit-only' | 'extract-for-clipboard';
 
@@ -2030,6 +2031,183 @@ export const useTracksStore = defineStore('tracks', () => {
     });
   }
 
+  // ── EDL helper functions ──
+
+  /** Collect virtual clipboard segments for large-file regions (instant, metadata only) */
+  function collectVirtualClipboardSegments(inPoint: number, outPoint: number): VirtualClipboardSegment[] {
+    const segments: VirtualClipboardSegment[] = [];
+    for (const track of tracks.value) {
+      const trackEnd = track.trackStart + track.duration;
+      if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
+
+      const clips = getTrackClips(track.id);
+      for (const clip of clips) {
+        const clipEnd = clip.clipStart + clip.duration;
+        if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
+
+        const overlapStart = Math.max(clip.clipStart, inPoint);
+        const overlapEnd = Math.min(clipEnd, outPoint);
+        const sourceFile = clip.sourceFile || track.cachedAudioPath || track.sourcePath;
+        if (!sourceFile) continue;
+
+        const clipOffset = overlapStart - clip.clipStart;
+        segments.push({
+          sourceFile,
+          sourceOffset: (clip.sourceOffset ?? 0) + clipOffset,
+          duration: overlapEnd - overlapStart,
+          offsetInRegion: overlapStart - inPoint,
+          gain: track.volume,
+        });
+      }
+    }
+    return segments;
+  }
+
+  /** Get sample rate/channels from the first contributing track in the region */
+  function getContributingFormat(inPoint: number, outPoint: number): { sampleRate: number; channels: number } {
+    for (const track of tracks.value) {
+      const trackEnd = track.trackStart + track.duration;
+      if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
+      return {
+        sampleRate: track.audioData.sampleRate || 44100,
+        channels: track.audioData.channels || 2,
+      };
+    }
+    return { sampleRate: 44100, channels: 2 };
+  }
+
+  /** Slice and merge waveform data from tracks overlapping [inPoint, outPoint] */
+  function sliceWaveformForRegion(inPoint: number, outPoint: number): number[] {
+    const allSlices: number[][] = [];
+
+    for (const track of tracks.value) {
+      const trackEnd = track.trackStart + track.duration;
+      if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
+      const waveform = track.audioData.waveformData;
+      if (waveform.length === 0) continue;
+      const bucketCount = waveform.length / 2;
+      const relStart = Math.max(0, inPoint - track.trackStart) / track.duration;
+      const relEnd = Math.min(track.duration, outPoint - track.trackStart) / track.duration;
+      const startBucket = Math.floor(relStart * bucketCount);
+      const endBucket = Math.ceil(relEnd * bucketCount);
+      allSlices.push(waveform.slice(startBucket * 2, endBucket * 2));
+    }
+
+    if (allSlices.length === 0) return [];
+    if (allSlices.length === 1) return allSlices[0];
+
+    // Conservative mix: min of mins, max of maxes per bucket
+    const len = Math.min(...allSlices.map(s => s.length));
+    const merged = new Array(len);
+    for (let i = 0; i < len; i += 2) {
+      let minVal = allSlices[0][i];
+      let maxVal = allSlices[0][i + 1];
+      for (let s = 1; s < allSlices.length; s++) {
+        minVal = Math.min(minVal, allSlices[s][i]);
+        maxVal = Math.max(maxVal, allSlices[s][i + 1]);
+      }
+      merged[i] = minVal;
+      merged[i + 1] = maxVal;
+    }
+    return merged;
+  }
+
+  /** Materialize a virtual clipboard into an AudioBuffer (extracts audio via Rust) */
+  async function materializeVirtualClipboard(
+    vs: { kind: string; segments: VirtualClipboardSegment[]; sampleRate: number; channels: number },
+    audioContext: AudioContext
+  ): Promise<AudioBuffer | null> {
+    const totalDuration = Math.max(...vs.segments.map(s => s.offsetInRegion + s.duration));
+    const totalSamples = Math.ceil(totalDuration * vs.sampleRate);
+    if (totalSamples <= 0) return null;
+
+    console.log(`[EDL] materializing ${vs.segments.length} segments (${totalDuration.toFixed(1)}s)`);
+
+    const mixed = audioContext.createBuffer(vs.channels, totalSamples, vs.sampleRate);
+
+    for (const seg of vs.segments) {
+      const buffer = await invokeExtractRegion(
+        seg.sourceFile, seg.sourceOffset, seg.sourceOffset + seg.duration, audioContext
+      );
+      if (!buffer) continue;
+
+      const gain = seg.gain ?? 1.0;
+      const offsetSamples = Math.floor(seg.offsetInRegion * vs.sampleRate);
+      for (let ch = 0; ch < mixed.numberOfChannels; ch++) {
+        const dest = mixed.getChannelData(ch);
+        const srcCh = Math.min(ch, buffer.numberOfChannels - 1);
+        const src = buffer.getChannelData(srcCh);
+        for (let i = 0; i < src.length && (offsetSamples + i) < totalSamples; i++) {
+          dest[offsetSamples + i] += src[i] * gain;
+        }
+      }
+    }
+
+    // Hard clamp to prevent clipping
+    for (let ch = 0; ch < mixed.numberOfChannels; ch++) {
+      const data = mixed.getChannelData(ch);
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] > 1.0) data[i] = 1.0;
+        else if (data[i] < -1.0) data[i] = -1.0;
+      }
+    }
+
+    return mixed;
+  }
+
+  /** Create a new track with EDL clips from virtual clipboard segments (for large paste) */
+  function createEDLTrackFromSegments(
+    segments: VirtualClipboardSegment[],
+    waveformData: number[],
+    sampleRate: number,
+    channels: number,
+    name: string,
+    pasteTime: number
+  ): Track {
+    useHistoryStore().pushState('Paste EDL clips');
+    const trackId = generateId();
+    const color = getNextColor();
+
+    const totalDuration = Math.max(...segments.map(s => s.offsetInRegion + s.duration));
+
+    const clips: TrackClip[] = segments.map((seg) => ({
+      id: generateId(),
+      buffer: null,
+      waveformData: [],
+      clipStart: pasteTime + seg.offsetInRegion,
+      duration: seg.duration,
+      sourceFile: seg.sourceFile,
+      sourceOffset: seg.sourceOffset,
+    }));
+
+    // Distribute waveform data across clips proportionally
+    const bucketCount = waveformData.length / 2;
+    for (let i = 0; i < clips.length; i++) {
+      const seg = segments[i];
+      const startFrac = seg.offsetInRegion / totalDuration;
+      const endFrac = (seg.offsetInRegion + seg.duration) / totalDuration;
+      const startBucket = Math.floor(startFrac * bucketCount);
+      const endBucket = Math.ceil(endFrac * bucketCount);
+      clips[i].waveformData = waveformData.slice(startBucket * 2, endBucket * 2);
+    }
+
+    const newTrack: Track = {
+      id: trackId,
+      name,
+      audioData: { buffer: null, waveformData, sampleRate, channels },
+      trackStart: pasteTime,
+      duration: totalDuration,
+      color,
+      muted: false,
+      solo: false,
+      volume: 1,
+      clips,
+    };
+
+    tracks.value = [...tracks.value, newTrack];
+    return newTrack;
+  }
+
   return {
     tracks,
     selectedTrackId,
@@ -2101,5 +2279,10 @@ export const useTracksStore = defineStore('tracks', () => {
     setHasPeakPyramid,
     pendingRecache,
     setPendingRecache,
+    collectVirtualClipboardSegments,
+    getContributingFormat,
+    sliceWaveformForRegion,
+    materializeVirtualClipboard,
+    createEDLTrackFromSegments,
   };
 });
