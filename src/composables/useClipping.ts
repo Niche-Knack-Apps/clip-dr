@@ -1,4 +1,4 @@
-import { computed } from 'vue';
+import { computed, nextTick } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
 import { useSelectionStore } from '@/stores/selection';
 import { useAudioStore } from '@/stores/audio';
@@ -152,10 +152,13 @@ export function useClipping() {
       }
 
       playbackStore.seek(inPoint);
+      selectionStore.clearInOutPoints(); // Clear immediately (visual feedback)
 
-      // Zoom ZoomedWaveform to the new clip and clear I/O markers
+      // EditorView's tracks.length watcher resets selection to [0, timelineDuration]
+      // asynchronously (via its own nextTick). Wait two cycles to run after it.
+      await nextTick(); // Yield: EditorView watcher starts and registers its nextTick
+      await nextTick(); // Yield: watcher continuation resets selection first, then we override
       selectionStore.setSelection(inPoint, outPoint);
-      selectionStore.clearInOutPoints();
 
       return newTrack;
     } finally {
