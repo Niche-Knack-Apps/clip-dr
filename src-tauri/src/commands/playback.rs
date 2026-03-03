@@ -1615,7 +1615,13 @@ pub async fn prepare_audio_cache(
                     "cachedPath": cached,
                 }));
             }
-            Err(e) => log::error!("[Playback] Audio cache failed for track {}: {}", tid, e),
+            Err(e) => {
+                log::error!("[Playback] Audio cache failed for track {}: {}", tid, e);
+                let _ = handle.emit("audio-cache-error", serde_json::json!({
+                    "trackId": tid,
+                    "error": e.to_string(),
+                }));
+            }
         }
     });
     Ok(())
