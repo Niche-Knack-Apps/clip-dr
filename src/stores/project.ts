@@ -308,6 +308,14 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
+  // ── Rename ──────────────────────────────────────────────────────────
+
+  function renameProject(name: string): void {
+    projectName.value = name.trim() || 'Untitled';
+    dirty.value = true;
+    updateWindowTitle();
+  }
+
   // ── Window title ────────────────────────────────────────────────────
 
   function updateWindowTitle(): void {
@@ -346,5 +354,6 @@ export const useProjectStore = defineStore('project', () => {
     openProject,
     loadProject,
     setupDirtyTracking,
+    renameProject,
   };
 });

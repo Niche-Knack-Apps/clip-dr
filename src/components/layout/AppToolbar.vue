@@ -83,6 +83,24 @@ const transportRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
 const searchFocused = ref(false);
 
+// Inline project rename
+const editingName = ref(false);
+const pendingName = ref('');
+const nameInputRef = ref<HTMLInputElement | null>(null);
+
+function startRename() {
+  pendingName.value = projectStore.projectName;
+  editingName.value = true;
+  nextTick(() => nameInputRef.value?.select());
+}
+function commitRename() {
+  projectStore.renameProject(pendingName.value);
+  editingName.value = false;
+}
+function cancelRename() {
+  editingName.value = false;
+}
+
 function handleRecordClick() {
   // Toggle the recording panel (device picker when idle, controls when recording)
   showRecordingPanel.value = !showRecordingPanel.value;
@@ -285,6 +303,7 @@ defineExpose({ focusSearch });
           size="sm"
           :disabled="!hasFile"
           :loading="projectStore.saving"
+          :class="projectStore.dirty ? 'text-cyan-400' : ''"
           title="Save Project (Ctrl+S)"
           @click="projectStore.saveProject()"
         >
@@ -294,9 +313,25 @@ defineExpose({ focusSearch });
           Save
         </Button>
 
-        <span v-if="projectStore.projectPath" class="text-xs text-gray-400 max-w-[120px] truncate">
-          {{ projectStore.projectName }}<span v-if="projectStore.dirty" class="text-yellow-400">*</span>
-        </span>
+        <template v-if="projectStore.projectPath">
+          <span
+            v-if="!editingName"
+            class="text-xs text-gray-400 max-w-[120px] truncate cursor-pointer hover:text-gray-200"
+            title="Click to rename"
+            @click="startRename"
+          >
+            {{ projectStore.projectName }}<span v-if="projectStore.dirty" class="text-yellow-400">*</span>
+          </span>
+          <input
+            v-else
+            ref="nameInputRef"
+            v-model="pendingName"
+            class="text-xs bg-gray-800 border border-cyan-600 rounded px-1 max-w-[120px]"
+            @blur="commitRename"
+            @keyup.enter="commitRename"
+            @keyup.escape="cancelRename"
+          />
+        </template>
       </div>
 
       <div class="w-px h-5 bg-gray-700" />
