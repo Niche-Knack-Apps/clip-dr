@@ -339,7 +339,6 @@ export const useProjectStore = defineStore('project', () => {
       playbackStore.stop();
       audioStore.unloadAll();
       silenceStore.clearWithoutHistory();
-      tracksStore.clearTracks();
       selectionStore.clearInOutPoints();
       historyStore.clear();
 
