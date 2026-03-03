@@ -2,6 +2,14 @@ export function generateId(): string {
   return crypto.randomUUID();
 }
 
+/**
+ * Canonical check for "this track has usable audio."
+ * Add new ImportStatus values here — do NOT add inline checks elsewhere.
+ */
+export function isTrackPlayable(status: string | undefined): boolean {
+  return !status || status === 'ready' || status === 'large-file' || status === 'caching';
+}
+
 export function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);

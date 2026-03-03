@@ -11,6 +11,7 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
+import { generateId } from '@/shared/utils';
 
 interface CutAudioData {
   path: string;
@@ -63,11 +64,6 @@ export const useSilenceStore = defineStore('silence', () => {
       0
     );
   });
-
-  // Generate unique ID
-  function generateId(): string {
-    return `silence-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  }
 
   // Initialize silence regions from VAD results
   function initFromVad(): void {

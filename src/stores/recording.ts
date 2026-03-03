@@ -5,7 +5,7 @@ import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
-import type { TrackPlacement, TimeMark } from '@/shared/types';
+import type { TrackPlacement, TimeMark, RecordingSource } from '@/shared/types';
 import { generateId } from '@/shared/utils';
 
 export interface AudioDevice {
@@ -112,8 +112,6 @@ export interface ScheduledRecording {
   noEndTime?: boolean; // true = manual stop, no auto-stop
   status: 'pending' | 'recording' | 'completed' | 'cancelled';
 }
-
-export type RecordingSource = 'microphone' | 'system';
 
 export interface SystemAudioInfo {
   available: boolean;

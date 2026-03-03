@@ -391,6 +391,51 @@ describe('EDL Editing Architecture', () => {
     });
   });
 
+  describe('Contract C1: edit-only cut succeeds even when Rust extraction returns null', () => {
+    it('edit-only cut succeeds even when Rust extraction returns null', async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const { useTracksStore } = await import('@/stores/tracks');
+
+      const tracksStore = useTracksStore();
+
+      // Set up EDL track (buffer=null, sourceFile set)
+      const buffer = createMockAudioBuffer(10);
+      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track C1', 0);
+      const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
+      tracksStore.tracks[trackIdx] = {
+        ...tracksStore.tracks[trackIdx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        clips: [{
+          id: 'c1-clip',
+          buffer: null,
+          waveformData: new Array(200).fill(0.5),
+          clipStart: 0,
+          duration: 10,
+          sourceFile: '/tmp/c1-source.wav',
+          sourceOffset: 0,
+        }],
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Make Rust extraction throw
+      vi.mocked(invoke).mockRejectedValue(new Error('Rust unavailable'));
+
+      const ctx = new AudioContext();
+      // edit-only cut must succeed (return clips with sourceOffset) even when Rust fails
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+
+      const updated = tracksStore.tracks.find(t => t.id === track.id);
+      // Track should have been split even though Rust extraction failed
+      expect(updated?.clips).toBeDefined();
+      expect(updated!.clips!.length).toBe(2);
+
+      const afterClip = updated!.clips!.find(c => c.clipStart >= 5);
+      expect(afterClip).toBeDefined();
+      expect(afterClip!.sourceFile).toBe('/tmp/c1-source.wav');
+      expect(afterClip!.sourceOffset).toBeCloseTo(5, 0);
+    });
+  });
+
   describe('edit-only cut never calls Rust extraction', () => {
     it('does not invoke Rust when mode is edit-only', async () => {
       const { invoke } = await import('@tauri-apps/api/core');

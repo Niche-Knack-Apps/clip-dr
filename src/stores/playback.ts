@@ -7,6 +7,7 @@ import { useSilenceStore } from './silence';
 import { useMeterStore } from './meter';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
+import { isTrackPlayable } from '@/shared/utils';
 
 export const usePlaybackStore = defineStore('playback', () => {
   const selectionStore = useSelectionStore();
@@ -50,7 +51,7 @@ export const usePlaybackStore = defineStore('playback', () => {
     const tracks = tracksStore.tracks;
 
     // Filter out tracks that are still importing (large files are OK — Rust engine handles them)
-    const playable = tracks.filter(t => !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file' || t.importStatus === 'caching');
+    const playable = tracks.filter(t => isTrackPlayable(t.importStatus));
 
     // Check if any track is soloed
     const soloedTracks = playable.filter(t => t.solo && !t.muted);
@@ -116,7 +117,7 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Get all tracks that can be played (have source path or clips with source files)
   function getPlayableTracks(): Track[] {
     return tracksStore.tracks.filter(t => {
-      if (t.importStatus && t.importStatus !== 'ready' && t.importStatus !== 'large-file' && t.importStatus !== 'caching') return false;
+      if (!isTrackPlayable(t.importStatus)) return false;
       // Playable if track has source OR any clip has sourceFile
       if (t.cachedAudioPath || t.sourcePath) return true;
       if (t.clips?.some(c => c.sourceFile)) return true;

@@ -8,7 +8,7 @@ import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
-import { generateId, binarySearch } from '@/shared/utils';
+import { generateId, binarySearch, isTrackPlayable } from '@/shared/utils';
 import { SEARCH_MIN_WORDS, SEARCH_STOPWORDS } from '@/shared/constants';
 import { useHistoryStore } from './history';
 
@@ -542,7 +542,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   function queueTranscription(trackId: string, priority: 'high' | 'normal' = 'normal'): void {
     // Don't transcribe tracks that are still importing
     const track = tracksStore.tracks.find(t => t.id === trackId);
-    if (track?.importStatus && track.importStatus !== 'ready' && track.importStatus !== 'large-file') {
+    if (!isTrackPlayable(track?.importStatus)) {
       console.log(`[Transcription] Track ${trackId} still importing, skipping queue`);
       return;
     }
@@ -631,7 +631,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     // Don't transcribe tracks that are still importing (no audio buffer yet)
     const track = tracksStore.tracks.find(t => t.id === trackId);
-    if (track?.importStatus && track.importStatus !== 'ready' && track.importStatus !== 'large-file') {
+    if (!isTrackPlayable(track?.importStatus)) {
       console.log(`[Transcription] Track ${trackId.slice(0, 8)} still importing, deferring transcription`);
       return;
     }

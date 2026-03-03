@@ -41,17 +41,16 @@ interface Snapshot {
 
 // ─── Deep-clone helpers ───────────────────────────────────────────
 function cloneClip(clip: TrackClip): TrackClip {
-  return {
-    id: clip.id,
-    buffer: clip.buffer,               // shared by reference
-    waveformData: clip.waveformData,   // shared by reference (immutable display data)
-    clipStart: clip.clipStart,
-    duration: clip.duration,
-    sourceFile: clip.sourceFile,        // EDL: preserve source reference for undo/redo
-    sourceOffset: clip.sourceOffset,    // EDL: preserve offset for undo/redo
-  };
+  // Spread preserves future fields automatically; explicit overrides document intentional sharing.
+  return { ...clip, buffer: clip.buffer, waveformData: clip.waveformData };
 }
 
+/**
+ * Deep-copies per-clip and per-track mutable arrays. Intentionally shares AudioBuffer
+ * references (memory efficiency). Spread copies all top-level scalars automatically.
+ * ⚠️ If adding a new mutable object/array field to Track, add it here explicitly.
+ * Fields explicitly handled: audioData, clips, timemarks, volumeEnvelope
+ */
 function cloneTrack(track: Track): Track {
   return {
     ...track,

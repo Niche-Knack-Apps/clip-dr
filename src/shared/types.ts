@@ -22,14 +22,6 @@ export interface Word {
   confidence: number;
 }
 
-/** @deprecated Use TrackTranscription instead */
-export interface Transcription {
-  audioId: string;
-  words: Word[];
-  fullText: string;
-  language: string;
-  processedAt: number;
-}
 
 export interface TrackTranscription {
   trackId: string;
@@ -173,16 +165,10 @@ export interface Track {
   hasPeakPyramid?: boolean;
   /** Cached WAV path for large files (set when background cache decode completes) */
   cachedAudioPath?: string;
+  /** Monotonically-incrementing epoch; bumped on every edit. Async ops abort on mismatch. */
+  editEpoch?: number;
 }
 
-/** @deprecated Clips are now part of tracks */
-export interface Clip {
-  id: string;
-  trackId: string;
-  sourceStart: number;
-  sourceEnd: number;
-  audioBuffer?: AudioBuffer;
-}
 
 export interface PlaybackState {
   isPlaying: boolean;
@@ -459,6 +445,8 @@ export interface ExportEDLTrack {
   track_start: number;   // timeline offset in seconds
   duration: number;
   volume: number;
+  /** Offset into the source file in seconds where this clip's audio begins */
+  file_offset?: number;
   volume_envelope?: Array<{ time: number; value: number }>;
 }
 

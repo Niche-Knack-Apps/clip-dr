@@ -11,6 +11,7 @@ import { useSettingsStore } from './settings';
 import { listen } from '@tauri-apps/api/event';
 import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip, VolumeAutomationPoint } from '@/shared/types';
 import { encodeWav } from '@/shared/audio-utils';
+import { isTrackPlayable } from '@/shared/utils';
 
 const FORMAT_LABELS: Record<string, string> = {
   mp3: 'MP3 Audio',
@@ -51,9 +52,7 @@ export const useExportStore = defineStore('export', () => {
 
   // Get active (non-muted) tracks, excluding tracks still importing
   const activeTracks = computed(() => {
-    const tracks = tracksStore.tracks.filter(t =>
-      !t.importStatus || t.importStatus === 'ready' || t.importStatus === 'large-file'
-    );
+    const tracks = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
     const hasSolo = tracks.some(t => t.solo);
 
     if (hasSolo) {

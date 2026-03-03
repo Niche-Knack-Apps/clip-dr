@@ -140,30 +140,16 @@ export const useVadStore = defineStore('vad', () => {
   }
 
   function createSpeechTracks(): void {
+    // Speech segments are now visualized via silence overlays, not separate tracks.
     if (!result.value || speechSegments.value.length === 0) {
       error.value = 'No speech segments detected';
       return;
     }
-
-    // Remove any existing speech tracks first
-    if (speechTracksCreated.value) {
-      tracksStore.deleteSpeechSegmentTracks();
-    }
-
-    // Create tracks for each speech segment
-    const segments = speechSegments.value.map((seg) => ({
-      start: seg.start,
-      end: seg.end,
-    }));
-
-    tracksStore.createSpeechSegmentTracks(segments);
     speechTracksCreated.value = true;
-
-    console.log(`Created ${segments.length} speech segment tracks`);
+    console.log(`[VAD] createSpeechTracks: ${speechSegments.value.length} segments (visualized via overlays)`);
   }
 
   function removeSpeechTracks(): void {
-    tracksStore.deleteSpeechSegmentTracks();
     speechTracksCreated.value = false;
   }
 
@@ -188,9 +174,6 @@ export const useVadStore = defineStore('vad', () => {
   }
 
   function clear(): void {
-    if (speechTracksCreated.value) {
-      tracksStore.deleteSpeechSegmentTracks();
-    }
     result.value = null;
     error.value = null;
     speechTracksCreated.value = false;

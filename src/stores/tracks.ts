@@ -280,12 +280,10 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Get tracks that are active (playing) at a given time
   function getActiveTracksAtTime(time: number): Track[] {
+    const hasSolo = tracks.value.some((t) => t.solo); // hoist: O(N) once, not per-track
     return tracks.value.filter((track) => {
       if (track.muted) return false;
-
-      const hasSolo = tracks.value.some((t) => t.solo);
       if (hasSolo && !track.solo) return false;
-
       const trackEnd = track.trackStart + track.duration;
       return time >= track.trackStart && time < trackEnd;
     });
@@ -308,25 +306,6 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
       track.trackStart = Math.max(0, newStart);
-    }
-  }
-
-  // Create tracks for speech segments (VAD results)
-  // Note: This creates visual markers/tracks for detected speech regions
-  function createSpeechSegmentTracks(segments: Array<{ start: number; end: number }>): void {
-    // In the new track-centric model, we don't create separate tracks for speech segments
-    // Instead, the silence overlays in the UI handle visualization
-    // This function is kept for backwards compatibility but logs a warning
-    console.log('[Tracks] createSpeechSegmentTracks called with', segments.length, 'segments');
-    console.log('[Tracks] Speech segments are now visualized via silence overlays, not separate tracks');
-  }
-
-  // Delete all tracks tagged as speech segments
-  function deleteSpeechSegmentTracks(): void {
-    const speechTracks = tracks.value.filter(t => t.tag === 'speech-segment');
-    if (speechTracks.length > 0) {
-      tracks.value = tracks.value.filter(t => t.tag !== 'speech-segment');
-      console.log('[Tracks] Deleted', speechTracks.length, 'speech segment tracks');
     }
   }
 
@@ -2250,8 +2229,6 @@ export const useTracksStore = defineStore('tracks', () => {
     getWaveformForTrack,
     setTrackStart,
     generateWaveformFromBuffer,
-    createSpeechSegmentTracks,
-    deleteSpeechSegmentTracks,
     appendAudioToTrack,
     moveTrackToTrack,
     cutRegionFromTrack,
