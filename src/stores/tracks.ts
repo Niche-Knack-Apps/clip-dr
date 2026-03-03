@@ -499,20 +499,28 @@ export const useTracksStore = defineStore('tracks', () => {
         if (cutEnd <= cutStart) return null;
 
         const sourceFile = track.cachedAudioPath || track.sourcePath!;
-        console.log(`[Tracks] Large-file EDL cut: splitting ${(cutEnd - cutStart).toFixed(1)}s (metadata only)`);
+        const { mode = 'edit-only' } = opts;
+        console.log(`[EDL] cutRegionFromTrack mode=${mode} track=${trackId}`);
 
-        // Extract the cut region for clipboard (reads just the small cut portion via Rust)
-        const cutBuffer = await extractRegionViaRust(track, cutStart, cutEnd, audioContext);
-        if (!cutBuffer) {
-          console.error('[Tracks] Large-file cut: extractRegionViaRust returned null');
-          return null;
+        let cutBuffer: AudioBuffer | null = null;
+        let cutWaveform: number[] = [];
+
+        if (mode === 'extract-for-clipboard') {
+          cutBuffer = await extractRegionViaRust(track, cutStart, cutEnd, audioContext);
+          if (cutBuffer) cutWaveform = generateWaveformFromBuffer(cutBuffer);
         }
-        const cutWaveform = generateWaveformFromBuffer(cutBuffer);
 
         // Build before/after clips as EDL references (pure math, no file copying)
         const newClips: TrackClip[] = [];
         const existingWaveform = track.audioData.waveformData;
         const bucketCount = existingWaveform.length / 2;
+
+        // Waveform from existing data when not extracting (or extraction failed)
+        if (cutWaveform.length === 0) {
+          const cutBucketStart = Math.max(0, Math.floor((cutStart / track.duration) * bucketCount));
+          const cutBucketEnd = Math.min(bucketCount, Math.ceil((cutEnd / track.duration) * bucketCount));
+          cutWaveform = existingWaveform.slice(cutBucketStart * 2, cutBucketEnd * 2);
+        }
 
         if (cutStart > 0.001) {
           const beforeBucketEnd = Math.floor((cutStart / track.duration) * bucketCount);
@@ -564,7 +572,8 @@ export const useTracksStore = defineStore('tracks', () => {
           tracks.value = [...tracks.value];
         }
 
-        console.log(`[Tracks] Large-file EDL cut: created ${newClips.length} clips, removed ${(cutEnd - cutStart).toFixed(1)}s (instant)`);
+        // CRITICAL: metadata split always proceeds — never return null on extraction failure
+        console.log(`[Tracks] Large-file EDL cut: created ${newClips.length} clips, removed ${(cutEnd - cutStart).toFixed(1)}s (instant, mode=${mode})`);
         return { buffer: cutBuffer, waveformData: cutWaveform };
       }
       return null; // Empty track, nothing to cut
