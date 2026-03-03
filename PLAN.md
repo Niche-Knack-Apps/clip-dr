@@ -1,541 +1,427 @@
-# Audio Doctor: Scrubs - Implementation Plan
-## Audio Cleaning & Clip-Making Application
+# Plan: Non-Destructive Editing (EDL Architecture)
 
-**App Name**: audio-doctor-scrubs
-**Goal**: Fast, performant audio cleaning and clip extraction with CPU-only ASR
-**Tech Stack**: Tauri 2.0 + Vue 3 + Pinia + Web Audio API + Canvas + FFmpeg
+## Context
 
----
+After implementing the editing workflow spec fixes, testing revealed fundamental architecture problems:
 
-## Overview
+1. **Small-file cut/delete don't show 2 sections** — `flattenAndRecacheClips` merges clips back into a single buffer immediately after every cut/delete, destroying the visual separation
+2. **Large-file cut takes ~10s** — `splice_wav_remove_region` physically copies the entire file (writes 2 new WAVs for before/after portions of a 4GB file)
+3. **Large-file second cut fails** — after first cut creates clips with `buffer: null`, dispatch routes to `cutRegionFromClips` which can't handle null-buffer clips
+4. **Large-file delete fails** — same dispatch issue + 1GB size guard rejects large selections
 
-A high-performance audio editing application for cleaning and creating clips from audio files. Features synchronized waveform views, automatic speech recognition for transcription, and a non-destructive clip/track workflow.
+**Root cause:** The editing system is destructive — it physically modifies audio data (buffers or files) on every edit. The fix is to switch to **non-destructive EDL (Edit Decision List) editing** where clips are metadata references into source files, and audio data is never copied during editing.
 
----
+## Architecture Overview
 
-## Core Features
-
-### 1. Three-Window Interface
-
+### Current (Destructive)
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  [Toolbar: Import | Play/Pause | Export | Settings]         │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  [====FULL WAVEFORM=====================================]   │
-│       [  Selection Window  ]  ← Draggable/Resizable        │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  [========ZOOMED WAVEFORM (selection content)==========]   │
-│  | word | word | word | word | word | word | word |        │
-│  ← Transcription aligned underneath                        │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  [Track 1: Full Audio] ████████████████████████████████    │
-│  [Track 2: Clip]            ████████                       │
-│  [Track 3: Clip]                        ████               │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+Cut → splice file on disk (10s) OR splice buffers in memory
+    → create clips → flattenAndRecacheClips → single buffer (clips destroyed)
+    → write single WAV for Rust → playback from single file
 ```
 
-### 2. Full Waveform View (Top Window)
-- Displays entire audio file waveform
-- Selection window overlay:
-  - Draggable left/right for positioning
-  - Resizable from both edges
-  - Visual highlight of selected region
-- Click-to-seek functionality
-- Shows playhead position
-
-### 3. Zoomed Waveform View (Middle Window)
-- High-detail view of selection window content
-- Transcription words aligned beneath waveform
-- In/Out point markers for clipping
-- Playhead with precise positioning
-- **Loop playback** by default (toggleable)
-- Synchronized scrolling with selection window
-
-### 4. Track View (Bottom Window)
-- Track 1: Full audio (always present)
-- Additional tracks: Created clips
-- Visual mute indicators
-- Track management (delete to restore)
-- Non-destructive editing workflow
-
-### 5. Search Functionality
-- Search bar in toolbar
-- Auto-navigates after 3+ words typed
-- Highlights matching words in transcription
-- Moves selection window to match location
-
-### 6. Clip Workflow
-1. Set in-point (keyboard: `i`)
-2. Set out-point (keyboard: `o`)
-3. Create clip (keyboard: `c`)
-4. Result:
-   - New track created with clipped audio
-   - Original track muted in that region
-   - Clip can be exported independently
-5. Delete track to restore original
-
-### 7. ASR (Automatic Speech Recognition)
-- CPU-only for speed (no GPU dependency)
-- Uses Whisper.cpp or Vosk for fast transcription
-- Rough word-level alignment
-- Runs asynchronously with progress indicator
-
----
-
-## Technical Architecture
-
-### Performance Requirements (Critical)
-
-Based on window-cleaner patterns:
-
-1. **Frame-Accurate Sync**
-   - requestAnimationFrame for UI updates
-   - Throttled seeks (50ms minimum)
-   - Separate sync for scrubbing vs playback
-
-2. **Waveform Rendering**
-   - Canvas-based rendering
-   - Bucket-based downsampling for overview
-   - Viewport culling (only render visible)
-   - Pre-computed waveform data
-
-3. **GPU Acceleration**
-   - CSS transforms for playhead movement
-   - will-change hints for animated elements
-   - Avoid layout thrashing
-
-4. **Buffer Management**
-   - PCM streaming via FFmpeg
-   - Chunked waveform extraction
-   - Memory-efficient audio handling
-
-### Directory Structure
-
+### New (Non-Destructive EDL)
 ```
-audio-doctor-scrubs/
-├── src/                          # Vue 3 frontend
-│   ├── assets/
-│   │   └── styles/
-│   │       ├── main.css
-│   │       └── waveform.css
-│   ├── components/
-│   │   ├── layout/
-│   │   │   ├── AppToolbar.vue
-│   │   │   └── AppLayout.vue
-│   │   ├── waveform/
-│   │   │   ├── FullWaveform.vue      # Top window
-│   │   │   ├── ZoomedWaveform.vue    # Middle window
-│   │   │   ├── SelectionWindow.vue   # Overlay control
-│   │   │   ├── Playhead.vue          # Animated playhead
-│   │   │   └── WaveformCanvas.vue    # Reusable canvas
-│   │   ├── transcription/
-│   │   │   ├── WordTimeline.vue
-│   │   │   └── TranscriptionWord.vue
-│   │   ├── tracks/
-│   │   │   ├── TrackList.vue
-│   │   │   ├── TrackLane.vue
-│   │   │   └── ClipRegion.vue
-│   │   ├── search/
-│   │   │   └── SearchBar.vue
-│   │   └── ui/
-│   │       ├── Button.vue
-│   │       ├── Slider.vue
-│   │       ├── Toggle.vue
-│   │       └── ProgressBar.vue
-│   ├── views/
-│   │   ├── EditorView.vue            # Main editor
-│   │   └── SettingsView.vue
-│   ├── stores/
-│   │   ├── audio.ts                  # Audio file state
-│   │   ├── playback.ts               # Playback control
-│   │   ├── selection.ts              # Selection window state
-│   │   ├── transcription.ts          # ASR results
-│   │   ├── tracks.ts                 # Tracks/clips
-│   │   └── settings.ts               # App settings
-│   ├── composables/
-│   │   ├── useAudio.ts               # Web Audio API
-│   │   ├── useWaveform.ts            # Waveform data
-│   │   ├── usePlayback.ts            # Playback control
-│   │   ├── useFrameSync.ts           # Frame-accurate sync
-│   │   ├── useSelection.ts           # Selection management
-│   │   ├── useClipping.ts            # Clip creation
-│   │   └── useSearch.ts              # Search functionality
-│   ├── services/
-│   │   ├── waveform-extractor.ts     # PCM → waveform data
-│   │   ├── audio-buffer.ts           # Audio buffer management
-│   │   └── keyboard-shortcuts.ts     # Hotkey handling
-│   ├── shared/
-│   │   ├── types.ts
-│   │   ├── constants.ts
-│   │   └── utils.ts
-│   ├── router.ts
-│   ├── App.vue
-│   └── main.ts
-├── src-tauri/                    # Rust backend
-│   ├── src/
-│   │   ├── main.rs
-│   │   ├── lib.rs
-│   │   ├── commands/
-│   │   │   ├── mod.rs
-│   │   │   ├── audio.rs          # Audio file operations
-│   │   │   ├── waveform.rs       # Waveform extraction
-│   │   │   ├── transcribe.rs     # ASR integration
-│   │   │   └── export.rs         # Audio export
-│   │   └── asr/
-│   │       ├── mod.rs
-│   │       ├── whisper.rs        # Whisper.cpp bindings
-│   │       └── alignment.rs      # Word alignment
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── tailwind.config.js
-└── PLAN.md
+Cut → split clip reference in two (instant, metadata only)
+    → clips persist with source file + offset
+    → playback reads directly from source file at each clip's offset
+    → no file copying, no buffer merging, no temp WAVs for large files
 ```
 
----
+### Key Principle
+**Clips are references, not containers.** A clip says "play source file X from offset A for duration B, starting at timeline position T." Cutting just splits one reference into two. No audio data moves.
 
-## Data Model
+## Phase 1: Core EDL + Instant Edits (implement now)
 
-### TypeScript Types
+### Step 1: Extend `TrackClip` with source reference
+
+**File:** `src/shared/types.ts` (line 62)
 
 ```typescript
-// src/shared/types.ts
-
-export interface AudioFile {
+export interface TrackClip {
   id: string;
-  path: string;
-  name: string;
-  duration: number;           // seconds
-  sampleRate: number;
-  channels: number;
-  waveformData: Float32Array; // Downsampled peaks
-  loadedAt: number;
-}
-
-export interface Selection {
-  start: number;              // seconds
-  end: number;                // seconds
-}
-
-export interface Word {
-  id: string;
-  text: string;
-  start: number;              // seconds
-  end: number;                // seconds
-  confidence: number;         // 0-1
-}
-
-export interface Transcription {
-  audioId: string;
-  words: Word[];
-  fullText: string;
-  language: string;
-  processedAt: number;
-}
-
-export interface Track {
-  id: string;
-  name: string;
-  audioId: string;
-  type: 'full' | 'clip';
-  start: number;              // Clip start in source
-  end: number;                // Clip end in source
-  trackStart: number;         // Position in timeline
-  muted: boolean;
-  solo: boolean;
-  volume: number;             // 0-1
-}
-
-export interface Clip {
-  id: string;
-  trackId: string;
-  sourceStart: number;
-  sourceEnd: number;
-  audioBuffer?: AudioBuffer;
-}
-
-export interface PlaybackState {
-  isPlaying: boolean;
-  currentTime: number;
-  loopEnabled: boolean;
-  loopStart: number;
-  loopEnd: number;
-}
-
-export interface InOutPoints {
-  inPoint: number | null;
-  outPoint: number | null;
-}
-
-export interface SearchResult {
-  wordIndex: number;
-  word: Word;
-  matchStart: number;         // Character position in query
-  matchEnd: number;
-}
-
-export interface Settings {
-  loopByDefault: boolean;
-  autoNavigateAfterWords: number;  // Default: 3
-  waveformColor: string;
-  playheadColor: string;
-  selectionColor: string;
-  showTranscription: boolean;
-  asrModel: 'whisper-tiny' | 'whisper-base' | 'vosk';
+  buffer: AudioBuffer | null;       // small-file clips (in-memory)
+  waveformData: number[];
+  clipStart: number;                 // timeline position (seconds)
+  duration: number;
+  // NEW: EDL source reference (large-file non-destructive editing)
+  sourceFile?: string;               // path to source audio file
+  sourceOffset?: number;             // offset in seconds within source file
 }
 ```
 
----
+- Small-file clips: `buffer` set, `sourceFile`/`sourceOffset` unset (or set to cachedPath/0)
+- Large-file clips: `buffer = null`, `sourceFile` = original file path, `sourceOffset` = position in file
+- After a cut, each resulting clip gets the correct `sourceOffset` calculated mathematically
 
-## Key Algorithms
+### Step 2: Add `file_offset` to Rust `PlaybackTrackConfig`
 
-### Waveform Extraction (Performance Critical)
+**File:** `src-tauri/src/commands/playback.rs` (line 26)
+
+```rust
+pub struct PlaybackTrackConfig {
+    pub track_id: String,
+    pub source_path: String,
+    pub track_start: f64,
+    pub duration: f64,
+    pub volume: f32,
+    pub muted: bool,
+    #[serde(default)]
+    pub file_offset: f64,  // NEW: seconds offset into source file
+    #[serde(default)]
+    pub volume_envelope: Option<Vec<AutomationPoint>>,
+}
+```
+
+**Mixing loop change** (line 1206):
+
+```rust
+// BEFORE:
+let sample_idx = (rel_pos * src_rate) as usize;
+
+// AFTER:
+let sample_idx = ((track_src.config.file_offset + rel_pos) * src_rate) as usize;
+```
+
+This is a **one-line change**. `file_offset` defaults to 0.0 (backward compatible). For EDL clips, it tells the engine where in the source file to start reading.
+
+### Step 3: Rewrite `cutRegionFromTrack` — large-file path becomes metadata-only
+
+**File:** `src/stores/tracks.ts` (lines 482-570)
+
+**Current:** Calls `splice_wav_remove_region` via Rust (copies entire file, 10+ seconds)
+
+**New:** Pure math, instant:
 
 ```typescript
-// Bucket-based downsampling for overview
-function extractWaveformBuckets(
-  pcmData: Float32Array,
-  bucketCount: number
-): { min: number; max: number }[] {
-  const samplesPerBucket = Math.ceil(pcmData.length / bucketCount);
-  const buckets: { min: number; max: number }[] = [];
+// Large-file path: metadata-only cut (no file I/O)
+if (!track.audioData.buffer && (track.cachedAudioPath || track.sourcePath)) {
+  const sourceFile = track.cachedAudioPath || track.sourcePath!;
+  // For tracks that already have clips, this is handled by cutRegionFromClips
+  // For single-source tracks, the implicit sourceOffset is 0
+  const sourceOffset = 0;
 
-  for (let i = 0; i < bucketCount; i++) {
-    const start = i * samplesPerBucket;
-    const end = Math.min(start + samplesPerBucket, pcmData.length);
+  const newClips: TrackClip[] = [];
 
-    let min = Infinity;
-    let max = -Infinity;
-
-    for (let j = start; j < end; j++) {
-      const sample = pcmData[j];
-      if (sample < min) min = sample;
-      if (sample > max) max = sample;
-    }
-
-    buckets.push({ min, max });
+  if (cutStart > 0.001) {
+    // Before clip: same source, same offset, shorter duration
+    newClips.push({
+      id: `${trackId}-before`,
+      buffer: null,
+      waveformData: existingWaveform.slice(0, beforeBucketEnd * 2),
+      clipStart: trackStart,
+      duration: cutStart,
+      sourceFile,
+      sourceOffset,
+    });
   }
 
-  return buckets;
+  if (cutEnd < track.duration - 0.001) {
+    // After clip: same source, offset advanced past cut region
+    newClips.push({
+      id: `${trackId}-after`,
+      buffer: null,
+      waveformData: existingWaveform.slice(afterBucketStart * 2),
+      clipStart: trackStart + cutEnd,  // gap preserved (caller closes for cut, leaves for delete)
+      duration: track.duration - cutEnd,
+      sourceFile,
+      sourceOffset: sourceOffset + cutEnd,  // skip past the cut region in the file
+    });
+  }
+
+  // Update track with clips (no Rust call, no file I/O)
+  // ... update track duration from clip span ...
 }
 ```
 
-### Frame-Accurate Sync (from window-cleaner)
+**Result:** Large-file cut goes from ~10 seconds to **instant** (<1ms).
+
+### Step 4: Rewrite `cutRegionFromClips` for EDL clips
+
+**File:** `src/stores/tracks.ts` (lines 711-867)
+
+Currently this function fails for large-file clips because:
+- Size guard rejects large selections (line 724)
+- `if (!buf) continue` silently skips null-buffer clips (line 747)
+
+**New logic for EDL clips** (clips with `sourceFile` + `sourceOffset`, `buffer: null`):
 
 ```typescript
-// useFrameSync pattern
-function useFrameSync() {
-  const currentTime = ref(0);
-  const isScrubbing = ref(false);
-  let rafId: number | null = null;
-  let lastSeekTime = 0;
-  const SEEK_THROTTLE = 50; // ms
+for (const clip of clips) {
+  const clipEnd = clip.clipStart + clip.duration;
 
-  function startSync(audioElement: HTMLAudioElement) {
-    const update = () => {
-      if (!isScrubbing.value) {
-        currentTime.value = audioElement.currentTime;
+  // No overlap → keep as-is
+  if (clip.clipStart >= outPoint || clipEnd <= inPoint) {
+    newClips.push(clip);
+    continue;
+  }
+
+  // Fully contained → remove (contributes to cut buffer)
+  if (clip.clipStart >= inPoint && clipEnd <= outPoint) {
+    // Extract for clipboard if needed
+    continue;
+  }
+
+  // Partial overlap — split by adjusting offsets (pure math)
+  const cutStartInClip = Math.max(0, inPoint - clip.clipStart);
+  const cutEndInClip = Math.min(clip.duration, outPoint - clip.clipStart);
+
+  if (cutStartInClip > 0.001) {
+    // Before portion
+    newClips.push({
+      ...clip,
+      id: generateId(),
+      duration: cutStartInClip,
+      waveformData: sliceWaveform(clip, 0, cutStartInClip),
+      // sourceFile and sourceOffset unchanged — reads same start in file
+    });
+  }
+
+  if (cutEndInClip < clip.duration - 0.001) {
+    // After portion
+    newClips.push({
+      ...clip,
+      id: generateId(),
+      clipStart: clip.clipStart + cutEndInClip,
+      duration: clip.duration - cutEndInClip,
+      sourceFile: clip.sourceFile,
+      sourceOffset: (clip.sourceOffset ?? 0) + cutEndInClip,
+      waveformData: sliceWaveform(clip, cutEndInClip, clip.duration),
+    });
+  }
+}
+```
+
+**Key:** No size guard needed — we're not creating buffers, just splitting references. No Rust calls. Works for any file size.
+
+### Step 5: Remove `flattenAndRecacheClips`, add per-clip WAV caching
+
+**File:** `src/stores/clipboard.ts`
+
+**Remove:** Both calls to `flattenAndRecacheClips` (lines ~294 and ~439)
+
+**Replace with:** `cacheClipsForPlayback()` — writes per-clip temp WAVs for **small-file clips only**:
+
+```typescript
+async function cacheClipsForPlayback(ctx: AudioContext): Promise<void> {
+  for (const track of tracksStore.tracks) {
+    if (!track.clips || track.clips.length === 0) continue;
+    for (const clip of track.clips) {
+      // Skip if already cached or if EDL clip (has sourceFile)
+      if (clip.sourceFile) continue;
+      if (!clip.buffer) continue;
+      // Write this clip's buffer to a temp WAV
+      const wavData = encodeWavFloat32(clip.buffer);
+      const fileName = `clip_${clip.id}_${Date.now()}.wav`;
+      await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
+      const tmpDir = await tempDir();
+      clip.sourceFile = `${tmpDir}${tmpDir.endsWith('/') ? '' : '/'}${fileName}`;
+      clip.sourceOffset = 0;
+    }
+  }
+}
+```
+
+**Large-file clips:** Already have `sourceFile` pointing to the original source. No caching needed.
+
+### Step 6: Update playback sync to expand clips into virtual tracks
+
+**File:** `src/stores/playback.ts` (lines 116-150)
+
+**`syncTracksToRust`** — expand each track's clips into separate Rust track entries:
+
+```typescript
+async function syncTracksToRust(): Promise<void> {
+  const hash = computeClipHash();  // updated hash function
+  if (hash === lastSyncedTrackHash) return;
+
+  const playable = getPlayableTracks();
+  const trackConfigs: PlaybackTrackConfig[] = [];
+
+  for (const t of playable) {
+    const clips = tracksStore.getTrackClips(t.id);
+    for (const clip of clips) {
+      const sourcePath = clip.sourceFile || t.cachedAudioPath || t.sourcePath;
+      if (!sourcePath) continue;
+
+      trackConfigs.push({
+        track_id: `${t.id}:${clip.id}`,
+        source_path: sourcePath,
+        track_start: clip.clipStart,
+        duration: clip.duration,
+        file_offset: clip.sourceOffset ?? 0,
+        volume: t.volume,
+        muted: false,
+        volume_envelope: t.volumeEnvelope?.map(p => ({ time: p.time, value: p.value })) ?? null,
+      });
+    }
+  }
+
+  await invoke('playback_set_tracks', { tracks: trackConfigs });
+  lastSyncedTrackHash = hash;
+  await syncMuteSoloToRust();
+}
+```
+
+**`computeClipHash`** — include clip details:
+
+```typescript
+function computeClipHash(): string {
+  return getPlayableTracks()
+    .map(t => {
+      const clips = tracksStore.getTrackClips(t.id);
+      return clips.map(c =>
+        `${t.id}:${c.id}:${c.sourceFile || ''}:${c.clipStart.toFixed(4)}:${c.duration.toFixed(4)}:${(c.sourceOffset ?? 0).toFixed(4)}`
+      ).join(';');
+    })
+    .sort()
+    .join('|');
+}
+```
+
+**`syncMuteSoloToRust`** — send mute for each virtual clip track:
+
+```typescript
+async function syncMuteSoloToRust(): Promise<void> {
+  const allTracks = tracksStore.tracks;
+  const hasSolo = allTracks.some(t => t.solo && !t.muted);
+
+  for (const track of getPlayableTracks()) {
+    let muted = track.muted;
+    if (hasSolo) muted = !track.solo || track.muted;
+
+    const clips = tracksStore.getTrackClips(track.id);
+    for (const clip of clips) {
+      await invoke('playback_set_track_muted', {
+        trackId: `${track.id}:${clip.id}`,
+        muted,
+      });
+    }
+  }
+}
+```
+
+**`getPlayableTracks`** — update to check clips for source paths, not just track-level:
+
+```typescript
+function getPlayableTracks(): Track[] {
+  return tracksStore.tracks.filter(t => {
+    if (t.importStatus && t.importStatus !== 'ready' && t.importStatus !== 'large-file' && t.importStatus !== 'caching') return false;
+    // Playable if track has source OR any clip has source
+    if (t.cachedAudioPath || t.sourcePath) return true;
+    if (t.clips?.some(c => c.sourceFile)) return true;
+    return false;
+  });
+}
+```
+
+### Step 7: Update `extractRegionViaRust` for clip-based tracks
+
+**File:** `src/stores/tracks.ts` (line ~1078)
+
+When extracting a region for the clipboard, we need to account for which clip's file and offset to read from:
+
+```typescript
+async function extractRegionViaRust(
+  track: Track,
+  relStart: number,   // track-relative start
+  relEnd: number,     // track-relative end
+  ctx: AudioContext
+): Promise<AudioBuffer | null> {
+  // If track has clips, find the clip that contains the region
+  if (track.clips && track.clips.length > 0) {
+    for (const clip of track.clips) {
+      const clipRelStart = clip.clipStart - track.trackStart;
+      const clipRelEnd = clipRelStart + clip.duration;
+      if (relStart >= clipRelStart && relStart < clipRelEnd) {
+        const sourceFile = clip.sourceFile || track.cachedAudioPath || track.sourcePath;
+        if (!sourceFile) return null;
+        // Convert to source-file-relative coordinates
+        const fileStart = (clip.sourceOffset ?? 0) + (relStart - clipRelStart);
+        const fileEnd = (clip.sourceOffset ?? 0) + Math.min(relEnd - clipRelStart, clip.duration);
+        return await invokeExtract(sourceFile, fileStart, fileEnd, ctx);
       }
-      rafId = requestAnimationFrame(update);
-    };
-    rafId = requestAnimationFrame(update);
-  }
-
-  function scrub(time: number) {
-    const now = performance.now();
-    if (now - lastSeekTime >= SEEK_THROTTLE) {
-      currentTime.value = time;
-      lastSeekTime = now;
     }
+    return null;
   }
 
-  return { currentTime, isScrubbing, startSync, scrub };
+  // Non-clip track: use existing path
+  const sourcePath = track.cachedAudioPath || track.sourcePath;
+  if (!sourcePath) return null;
+  return await invokeExtract(sourcePath, relStart, relEnd, ctx);
 }
 ```
 
-### Search with Auto-Navigate
+### Step 8: Set `sourceFile` during import and recording finalization
+
+**File:** `src/stores/tracks.ts`
+
+When a large file is imported and gets `cachedAudioPath` or `sourcePath` set, also initialize the implicit EDL reference. The synthetic clip from `getTrackClips` should include source info:
 
 ```typescript
-function searchTranscription(
-  words: Word[],
-  query: string,
-  minWords: number = 3
-): SearchResult[] {
-  const queryWords = query.toLowerCase().split(/\s+/);
+function getTrackClips(trackId: string): TrackClip[] {
+  const track = tracks.value.find((t) => t.id === trackId);
+  if (!track) return [];
 
-  if (queryWords.length < minWords) {
-    return [];
+  if (track.clips && track.clips.length > 0) {
+    return track.clips;
   }
 
-  const results: SearchResult[] = [];
-  const fullText = words.map(w => w.text.toLowerCase()).join(' ');
-  const searchQuery = queryWords.join(' ');
+  if (track.importStatus === 'importing' || track.importStatus === 'decoding') return [];
 
-  let searchIndex = 0;
-  while (true) {
-    const foundIndex = fullText.indexOf(searchQuery, searchIndex);
-    if (foundIndex === -1) break;
-
-    // Find corresponding word
-    let charCount = 0;
-    for (let i = 0; i < words.length; i++) {
-      if (charCount >= foundIndex) {
-        results.push({
-          wordIndex: i,
-          word: words[i],
-          matchStart: foundIndex,
-          matchEnd: foundIndex + searchQuery.length
-        });
-        break;
-      }
-      charCount += words[i].text.length + 1; // +1 for space
-    }
-
-    searchIndex = foundIndex + 1;
-  }
-
-  return results;
+  // Synthetic single clip — include source reference for EDL playback
+  return [{
+    id: `${trackId}-main`,
+    buffer: track.audioData.buffer,
+    waveformData: track.audioData.waveformData,
+    clipStart: track.trackStart,
+    duration: track.duration,
+    sourceFile: track.cachedAudioPath || track.sourcePath,
+    sourceOffset: 0,
+  }];
 }
 ```
 
----
+## Phase 2: Future Enhancements (not implemented now)
 
-## Implementation Phases
+These are noted for context but deferred:
 
-### Phase 1: Project Setup & Audio Loading
-- [ ] Project scaffolding (Tauri 2.0 + Vue 3)
-- [ ] Basic app layout with three windows
-- [ ] Audio file import (FFmpeg)
-- [ ] Waveform data extraction
-- [ ] Web Audio API setup
+- **Multi-resolution peak cache**: Sidecar `.peaks` files with multiple levels (256/2048/16384 samples per bucket) for efficient zoom/scroll on huge files
+- **Virtual clipboard**: Clip references instead of materialized audio — only materialize on paste-to-new-track or export
+- **Chunked export**: When exporting, resolve EDL clips to audio in chunks (never build >1GB buffers)
+- **Streaming renderer**: Replace virtual-track approach with a proper multi-source streaming renderer in Rust
+- **Undo optimization**: Since edits are metadata-only, history snapshots become much lighter (just clip lists, no audio buffer references)
 
-### Phase 2: Full Waveform View
-- [ ] Canvas-based waveform rendering
-- [ ] Selection window overlay
-- [ ] Drag to reposition selection
-- [ ] Resize from both edges
-- [ ] Click-to-seek
+## Files Modified
 
-### Phase 3: Zoomed Waveform View
-- [ ] Zoomed canvas rendering
-- [ ] Frame-accurate playhead
-- [ ] Synchronized scrolling
-- [ ] Loop playback
-- [ ] In/Out point markers
+| File | Change |
+|------|--------|
+| `src/shared/types.ts` | Add `sourceFile?: string` and `sourceOffset?: number` to `TrackClip` |
+| `src-tauri/src/commands/playback.rs` | Add `file_offset: f64` to `PlaybackTrackConfig`; one-line change in mixing loop (line 1206) |
+| `src/stores/tracks.ts` | Rewrite large-file `cutRegionFromTrack` path (metadata-only); rewrite `cutRegionFromClips` for EDL clips; update `getTrackClips` to include source refs; update `extractRegionViaRust` for clips |
+| `src/stores/clipboard.ts` | Remove `flattenAndRecacheClips`; add `cacheClipsForPlayback` (per-clip WAVs for small files); remove both flatten calls from cut/delete |
+| `src/stores/playback.ts` | Rewrite `syncTracksToRust` to expand clips into virtual tracks; update `computeTrackHash`; update `syncMuteSoloToRust` for virtual track IDs; update `getPlayableTracks` |
 
-### Phase 4: Transcription
-- [ ] Whisper.cpp integration (Rust)
-- [ ] Word-level alignment
-- [ ] Word timeline component
-- [ ] Transcription display under waveform
+## Verification
 
-### Phase 5: Search
-- [ ] Search bar component
-- [ ] Auto-navigate after 3 words
-- [ ] Highlight matching words
-- [ ] Selection window auto-positioning
+1. `npx vue-tsc --noEmit` — fix type errors
+2. `npm run lint` — fix lint issues
+3. `npx vitest run` — update tests for new clip structure
+4. **Manual tests:**
+   - Import small file (~2min WAV), cut with I/O points → verify 2 visible sections, gap closed, playback works
+   - Import small file, delete with I/O points → verify 2 visible sections, gap preserved, playback works
+   - Import large file (>500MB), cut with I/O points → verify instant (<100ms), 2 sections visible, playback works
+   - Import large file, delete → verify instant, gap preserved, playback works
+   - Chain multiple cuts on large file → verify all work instantly
+   - Undo/redo after cut/delete → verify clips restore correctly
+   - Clip (c) operation → verify still works (creates new track from extracted region)
 
-### Phase 6: Track System
-- [ ] Track list component
-- [ ] Clip creation (in/out → track)
-- [ ] Track muting
-- [ ] Track deletion (restore)
-- [ ] Multi-track playback
+## Design Decisions
 
-### Phase 7: Export & Settings
-- [ ] Audio export (full/clip)
-- [ ] Settings panel
-- [ ] Keyboard shortcuts
-- [ ] Performance optimization
+1. **Why virtual tracks instead of a multi-segment Rust renderer?** The Rust engine already handles multiple tracks perfectly. Expanding clips into virtual tracks reuses all existing playback infrastructure (mmap, volume envelope, mute/solo) with zero Rust architecture changes. A proper multi-segment renderer is better long-term but is a much larger Rust refactor.
 
----
+2. **Why keep two cut paths (small-file vs large-file)?** Small-file in-memory cutting is fast and precise. Large-file EDL cutting is instant. Both produce the same clip output format. Unifying to all-EDL is possible but adds unnecessary disk I/O for small files that are already in memory.
 
-## Keyboard Shortcuts
+3. **Why not virtual clipboard?** Materializing a small audio region for the clipboard is fast even for large files (Rust `extract_audio_region` reads a few seconds, not the whole file). Virtual clipboard adds complexity for minimal gain. Deferred to Phase 2.
 
-| Key | Action |
-|-----|--------|
-| `Space` | Play/Pause |
-| `I` | Set In Point |
-| `O` | Set Out Point |
-| `C` | Create Clip from In/Out |
-| `L` | Toggle Loop |
-| `Home` | Jump to Start |
-| `End` | Jump to End |
-| `[` | Jump to In Point |
-| `]` | Jump to Out Point |
-| `Delete` | Delete Selected Track |
-| `Cmd/Ctrl + S` | Save Project |
-| `Cmd/Ctrl + E` | Export |
-| `Cmd/Ctrl + F` | Focus Search |
-
----
-
-## Performance Optimizations
-
-1. **Waveform Rendering**
-   - Pre-compute waveform buckets on import
-   - Use OffscreenCanvas for background rendering
-   - Implement viewport culling (only draw visible)
-   - Cache rendered canvas regions
-
-2. **Playback Sync**
-   - requestAnimationFrame for UI updates
-   - Throttle seek operations (50ms)
-   - Use CSS transforms for playhead (GPU)
-   - Batch state updates
-
-3. **Memory Management**
-   - Stream large audio files
-   - Release unused AudioBuffers
-   - Limit undo history
-
-4. **ASR Processing**
-   - Run in separate thread (Rust)
-   - Stream results as available
-   - Cache transcription results
-
----
-
-## Verification Plan
-
-### Testing
-- Unit: Waveform extraction, search algorithm, time calculations
-- Integration: Audio import → transcription → clip workflow
-- Performance:
-  - 1-hour audio file load < 5s
-  - Smooth 60fps during scrubbing
-  - No audio dropouts during playback
-  - Memory usage < 500MB for 1-hour file
-
-### Manual Testing
-- Import various audio formats (MP3, WAV, FLAC, M4A)
-- Test selection window at various zoom levels
-- Verify clip creation and deletion workflow
-- Test search with different query lengths
-- Stress test with long audio files (2+ hours)
-
----
-
-## Dependencies
-
-### Frontend (package.json)
-- vue: ^3.4
-- pinia: ^2.1
-- @tauri-apps/api: ^2.0
-- tailwindcss: ^3.4
-
-### Backend (Cargo.toml)
-- tauri: 2.0
-- whisper-rs: CPU-only Whisper bindings
-- symphonia: Audio decoding
-- hound: WAV handling
-- rubato: Resampling
-- serde: Serialization
+4. **Original source file must stay accessible.** EDL clips reference the original file. If the user moves/deletes it, clips become unplayable. This is standard DAW behavior (Audacity, Reaper, etc. all work this way).

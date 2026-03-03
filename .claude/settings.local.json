@@ -86,7 +86,10 @@
       "Bash(node_modules/.bin/eslint:*)",
       "WebFetch(domain:usefulsensors.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(xxd:*)",
+      "Bash(python3:*)",
+      "Bash(npx vitest:*)"
     ]
   }
 }
