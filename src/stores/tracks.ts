@@ -8,6 +8,13 @@ import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
 import { invoke } from '@tauri-apps/api/core';
 
+export type CutMode = 'edit-only' | 'extract-for-clipboard';
+
+export interface CutOptions {
+  keepTrack?: boolean;
+  mode?: CutMode;  // default: 'edit-only' — safe default, callers opt-in to extraction
+}
+
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = ref<Track[]>([]);
   // 'ALL' means composite view (default), string means specific track, null means nothing selected
@@ -463,8 +470,8 @@ export const useTracksStore = defineStore('tracks', () => {
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext,
-    keepTrack = false
-  ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
+    opts: CutOptions = {}
+  ): Promise<{ buffer: AudioBuffer | null; waveformData: number[] } | null> {
     const track = tracks.value.find((t) => t.id === trackId);
     if (!track) {
       console.error('[Tracks] Track not found:', trackId);
@@ -473,9 +480,11 @@ export const useTracksStore = defineStore('tracks', () => {
 
     useHistoryStore().pushState('Cut region');
 
+    const { keepTrack = false } = opts;
+
     // ── Multi-clip track: process each clip individually ──
     if (track.clips && track.clips.length > 0) {
-      return await cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, keepTrack);
+      return await cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, opts);
     }
 
     // ── Single-buffer track (original path) ──
@@ -705,8 +714,9 @@ export const useTracksStore = defineStore('tracks', () => {
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext,
-    keepTrack = false
-  ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
+    opts: CutOptions = {}
+  ): Promise<{ buffer: AudioBuffer | null; waveformData: number[] } | null> {
+    const { keepTrack = false, mode = 'edit-only' } = opts;
     const clips = track.clips!;
     const newClips: TrackClip[] = [];
     const cutContributions: { buffer: AudioBuffer; offsetInRegion: number }[] = [];
@@ -1167,14 +1177,16 @@ export const useTracksStore = defineStore('tracks', () => {
   async function rippleDeleteRegion(
     inPoint: number,
     outPoint: number,
-    audioContext: AudioContext
-  ): Promise<{ buffers: AudioBuffer[]; waveforms: number[][] }> {
+    audioContext: AudioContext,
+    opts: CutOptions = {}
+  ): Promise<{ affectedCount: number; buffers: AudioBuffer[]; waveforms: number[][] }> {
     useHistoryStore().pushState('Ripple delete');
     const gapDuration = outPoint - inPoint;
     const cutResults: { buffers: AudioBuffer[]; waveforms: number[][] } = {
       buffers: [],
       waveforms: [],
     };
+    let affectedCount = 0;
 
     // Step 1: Cut the region from every track that overlaps [inPoint, outPoint]
     const trackIds = tracks.value.map(t => t.id);
@@ -1186,10 +1198,13 @@ export const useTracksStore = defineStore('tracks', () => {
       // Check overlap
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-      const result = await cutRegionFromTrack(trackId, inPoint, outPoint, audioContext, true);
+      const result = await cutRegionFromTrack(trackId, inPoint, outPoint, audioContext, { ...opts, keepTrack: true });
       if (result) {
-        cutResults.buffers.push(result.buffer);
-        cutResults.waveforms.push(result.waveformData);
+        affectedCount++;
+        if (result.buffer) {
+          cutResults.buffers.push(result.buffer);
+          cutResults.waveforms.push(result.waveformData);
+        }
       }
     }
 
@@ -1202,8 +1217,8 @@ export const useTracksStore = defineStore('tracks', () => {
     // Step 2: Close the gap - shift everything at/after outPoint left by gapDuration
     slideTracksLeft(outPoint, gapDuration);
 
-    console.log(`[Tracks] Ripple deleted ${gapDuration.toFixed(2)}s region, affected ${cutResults.buffers.length} tracks`);
-    return cutResults;
+    console.log(`[Tracks] Ripple deleted ${gapDuration.toFixed(2)}s region, affected ${affectedCount} tracks`);
+    return { affectedCount, ...cutResults };
   }
 
   // Extract audio from the [inPoint, outPoint] region across ALL tracks and mix into one buffer
