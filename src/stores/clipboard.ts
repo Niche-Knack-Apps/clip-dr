@@ -12,6 +12,15 @@ import { encodeWavFloat32 } from '@/shared/audio-utils';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
 
+export interface VirtualClipboardSegment {
+  sourceFile: string;
+  sourceOffset: number;
+  duration: number;
+  offsetInRegion: number;
+  gain?: number;    // linear, default 1.0 — reserved for future use
+  pan?: number;     // -1..+1, default 0 — reserved for future use
+}
+
 export interface AudioClipboard {
   samples: Float32Array[];
   sampleRate: number;
@@ -20,6 +29,13 @@ export interface AudioClipboard {
   sourceTrackId: string;
   waveformData: number[];
   copiedAt: number;
+  /** Virtual source for large-file regions — audio materialized on paste */
+  virtualSource?: {
+    kind: 'mixdown';
+    segments: VirtualClipboardSegment[];
+    sampleRate: number;
+    channels: number;
+  };
 }
 
 export const useClipboardStore = defineStore('clipboard', () => {
@@ -250,27 +266,65 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const ctx = audioStore.getAudioContext();
 
     if (hasIOPoints) {
-      // Extract mixed audio BEFORE deleting (for clipboard)
-      const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
+      // Determine if any overlapping track lacks an in-memory buffer
+      const hasLargeFile = tracksStore.tracks.some(t => {
+        const trackEnd = t.trackStart + t.duration;
+        if (t.trackStart >= outPoint || trackEnd <= inPoint) return false;
+        return !t.audioData.buffer;
+      });
 
-      // Ripple delete the I/O region from ALL tracks and close the gap
-      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx);
+      let extracted: { buffer: AudioBuffer; waveformData: number[] } | null = null;
+      let virtualSegments: VirtualClipboardSegment[] | null = null;
 
-      if (results.buffers.length > 0) {
-        // Store the mixed extraction in clipboard (or first cut buffer as fallback)
-        const buf = extracted?.buffer ?? results.buffers[0];
-        const waveform = extracted?.waveformData ?? results.waveforms[0] ?? [];
-        clipboardBuffer.value = buf;
-        clipboard.value = {
-          samples: [],
-          sampleRate: buf.sampleRate,
-          duration: buf.duration,
-          sourceRegion: { start: inPoint, end: outPoint },
-          sourceTrackId: 'all',
-          waveformData: waveform,
-          copiedAt: Date.now(),
-        };
-        console.log(`[Clipboard] Ripple cut ${(outPoint - inPoint).toFixed(2)}s from ${results.buffers.length} track(s)`);
+      if (hasLargeFile) {
+        // Large file: collect virtual clipboard segments (instant, metadata only)
+        virtualSegments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
+      } else {
+        // Small file: extract audio (fast, in-memory)
+        extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
+      }
+
+      console.log(`[EDL] cut hasLargeFile=${hasLargeFile} virtualSegments=${virtualSegments?.length}`);
+
+      // Ripple delete — ALWAYS edit-only (no extraction)
+      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, { mode: 'edit-only' });
+
+      if (results.affectedCount > 0) {
+        if (extracted) {
+          // Small file: use extracted buffer directly
+          clipboardBuffer.value = extracted.buffer;
+          clipboard.value = {
+            samples: [],
+            sampleRate: extracted.buffer.sampleRate,
+            duration: extracted.buffer.duration,
+            sourceRegion: { start: inPoint, end: outPoint },
+            sourceTrackId: 'all',
+            waveformData: extracted.waveformData,
+            copiedAt: Date.now(),
+          };
+        } else if (virtualSegments && virtualSegments.length > 0) {
+          // Large file: store virtual clipboard reference
+          const { sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint);
+          const clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
+          clipboardBuffer.value = null;
+          clipboard.value = {
+            samples: [],
+            sampleRate: sr,
+            duration: outPoint - inPoint,
+            sourceRegion: { start: inPoint, end: outPoint },
+            sourceTrackId: 'all',
+            waveformData: clipWaveform,
+            copiedAt: Date.now(),
+            virtualSource: {
+              kind: 'mixdown',
+              segments: virtualSegments,
+              sampleRate: sr,
+              channels: ch,
+            },
+          };
+        }
+
+        console.log(`[Clipboard] Ripple cut ${(outPoint - inPoint).toFixed(2)}s from ${results.affectedCount} track(s)`);
 
         // Shift transcription words to match the ripple delete
         for (const track of tracksStore.tracks) {
@@ -284,10 +338,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
       // Clear I/O points after cut
       selectionStore.clearInOutPoints();
-      if (results.buffers.length > 0) {
+      if (results.affectedCount > 0) {
         playbackStore.seek(Math.max(0, inPoint! - 1.0));
       }
-      return results.buffers.length > 0;
+      return results.affectedCount > 0;
     } else {
       // No I/O points - cut the target track entirely (keep empty track)
       const selectedTrack = getTargetTrack();
@@ -315,15 +369,48 @@ export const useClipboardStore = defineStore('clipboard', () => {
     } finally { historyStore.endBatch(); }
   }
 
+  const PASTE_MATERIALIZE_CEILING_SECS = 300; // 5 minutes max for in-memory paste
+
   // Paste clipboard content - insert at playhead in selected track, or create new track
-  function paste(): Track | null {
-    if (!clipboard.value || !clipboardBuffer.value) {
+  async function paste(): Promise<Track | null> {
+    if (!clipboard.value) {
       console.log('[Clipboard] Nothing to paste');
       return null;
     }
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Paste');
     try {
+
+    const vs = clipboard.value.virtualSource;
+
+    // Virtual clipboard: decide whether to materialize or paste as EDL
+    if (vs && !clipboardBuffer.value) {
+      if (clipboard.value.duration <= PASTE_MATERIALIZE_CEILING_SECS) {
+        // Small enough to materialize into an AudioBuffer
+        const matCtx = audioStore.getAudioContext();
+        const materialized = await tracksStore.materializeVirtualClipboard(vs, matCtx);
+        if (materialized) {
+          clipboardBuffer.value = materialized;
+        }
+      } else {
+        // Too large — paste as EDL clips on a new track (instant)
+        const pasteTime = playbackStore.currentTime;
+        const newTrack = tracksStore.createEDLTrackFromSegments(
+          vs.segments,
+          clipboard.value.waveformData,
+          vs.sampleRate,
+          vs.channels,
+          `Pasted ${tracksStore.tracks.length + 1}`,
+          pasteTime
+        );
+        return newTrack;
+      }
+    }
+
+    if (!clipboardBuffer.value) {
+      console.log('[Clipboard] Nothing to paste - no buffer available');
+      return null;
+    }
 
     const ctx = audioStore.getAudioContext();
     const sourceBuffer = clipboardBuffer.value;
@@ -408,7 +495,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         const trackEnd = track.trackStart + track.duration;
         if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx);
+        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx, { mode: 'edit-only' });
         if (result) cutCount++;
       }
 
