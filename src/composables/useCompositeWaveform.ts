@@ -136,12 +136,24 @@ export function useCompositeWaveform() {
     const layers: WaveformLayer[] = [];
 
     for (const track of active) {
-      // Single track with no clips: use waveformData directly (no allocation)
+      // Single track with no clips: build position-aware bucket array
+      // (avoids raw waveform stretching to full timeline width when trackStart > 0)
       if (!track.clips || track.clips.length === 0) {
+        const trackBuckets = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
+        const pseudoClip: TrackClip = {
+          id: `${track.id}-layer`,
+          buffer: null,
+          waveformData: track.audioData.waveformData,
+          clipStart: track.trackStart,
+          duration: track.duration,
+          sourceFile: track.sourcePath || track.cachedAudioPath || undefined,
+          sourceOffset: 0,
+        };
+        addClipToComposite(trackBuckets, pseudoClip, timelineDuration, bucketDuration);
         layers.push({
           trackId: track.id,
           color: track.color,
-          waveformData: track.audioData.waveformData,
+          waveformData: trackBuckets,
           trackStart: track.trackStart,
           duration: track.duration,
           sourcePath: track.sourcePath,
