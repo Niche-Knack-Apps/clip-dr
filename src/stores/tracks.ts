@@ -422,25 +422,31 @@ export const useTracksStore = defineStore('tracks', () => {
       return false;
     }
 
-    // For now, moving to another track means merging at the target's end
-    // The source track gets deleted and its audio appends to target
-    if (!sourceTrack.audioData.buffer) {
-      console.log('[Tracks] Source track is empty, nothing to move');
-      return false;
-    }
-    const success = appendAudioToTrack(
-      targetTrackId,
-      sourceTrack.audioData.buffer,
-      audioContext
-    );
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Move track');
+    try {
+      // For now, moving to another track means merging at the target's end
+      // The source track gets deleted and its audio appends to target
+      if (!sourceTrack.audioData.buffer) {
+        console.log('[Tracks] Source track is empty, nothing to move');
+        return false;
+      }
+      const success = appendAudioToTrack(
+        targetTrackId,
+        sourceTrack.audioData.buffer,
+        audioContext
+      );
 
-    if (success) {
-      // Delete the source track
-      deleteTrack(sourceTrackId);
-      console.log(`[Tracks] Moved audio from ${sourceTrack.name} to ${targetTrack.name}`);
-    }
+      if (success) {
+        // Delete the source track (deleteTrack calls pushState, which is no-op inside batch)
+        deleteTrack(sourceTrackId);
+        console.log(`[Tracks] Moved audio from ${sourceTrack.name} to ${targetTrack.name}`);
+      }
 
-    return success;
+      return success;
+    } finally {
+      historyStore.endBatch();
+    }
   }
 
   // Cut a region from a track, creating clips for the remaining audio
@@ -1094,11 +1100,13 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = [...tracks.value];
   }
 
-  // Slide tracks left to fill a gap. Handles both whole tracks after the gap
-  // and clips within tracks that span the gap.
+  /**
+   * Sub-op: caller must own history via beginBatch.
+   * Slides tracks left to fill a gap. Handles both whole tracks after the gap
+   * and clips within tracks that span the gap.
+   */
   function slideTracksLeft(gapStart: number, gapDuration: number): void {
     if (gapDuration <= 0) return;
-    useHistoryStore().pushState('Slide tracks');
     tracks.value = tracks.value.map(t => {
       const trackEnd = t.trackStart + t.duration;
 
@@ -1189,7 +1197,8 @@ export const useTracksStore = defineStore('tracks', () => {
     audioContext: AudioContext,
     opts: CutOptions = {}
   ): Promise<{ affectedCount: number; buffers: AudioBuffer[]; waveforms: number[][] }> {
-    useHistoryStore().pushState('Ripple delete');
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Ripple delete');
     const gapDuration = outPoint - inPoint;
     const cutResults: { buffers: AudioBuffer[]; waveforms: number[][] } = {
       buffers: [],
@@ -1227,6 +1236,7 @@ export const useTracksStore = defineStore('tracks', () => {
     slideTracksLeft(outPoint, gapDuration);
 
     console.log(`[Tracks] Ripple deleted ${gapDuration.toFixed(2)}s region, affected ${affectedCount} tracks`);
+    historyStore.endBatch();
     return { affectedCount, ...cutResults };
   }
 
@@ -1367,53 +1377,59 @@ export const useTracksStore = defineStore('tracks', () => {
   function deleteClipFromTrack(trackId: string, clipId: string): void {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return;
-    useHistoryStore().pushState('Delete clip');
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Delete clip');
+    try {
+      const track = tracks.value[trackIndex];
 
-    const track = tracks.value[trackIndex];
+      // For single-buffer tracks (clipId ends with '-main'), delete entire track
+      if (clipId === track.id + '-main') {
+        deleteTrack(trackId);
+        return;
+      }
 
-    // For single-buffer tracks (clipId ends with '-main'), delete entire track
-    if (clipId === track.id + '-main') {
-      deleteTrack(trackId);
-      return;
+      // Multi-clip track: remove the clip
+      if (!track.clips || track.clips.length === 0) return;
+
+      const newClips = track.clips.filter(c => c.id !== clipId);
+
+      if (newClips.length === 0) {
+        // No clips left, delete the track
+        deleteTrack(trackId);
+        return;
+      }
+
+      // Recalculate track bounds
+      const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
+      const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+
+      tracks.value[trackIndex] = {
+        ...track,
+        clips: newClips,
+        trackStart: firstClipStart,
+        duration: lastClipEnd - firstClipStart,
+      };
+      tracks.value = [...tracks.value];
+
+      // Clear clip selection if the deleted clip was selected
+      if (selectedClipId.value === clipId) {
+        selectedClipId.value = null;
+      }
+
+      console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
+    } finally {
+      historyStore.endBatch();
     }
-
-    // Multi-clip track: remove the clip
-    if (!track.clips || track.clips.length === 0) return;
-
-    const newClips = track.clips.filter(c => c.id !== clipId);
-
-    if (newClips.length === 0) {
-      // No clips left, delete the track
-      deleteTrack(trackId);
-      return;
-    }
-
-    // Recalculate track bounds
-    const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
-    const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
-
-    tracks.value[trackIndex] = {
-      ...track,
-      clips: newClips,
-      trackStart: firstClipStart,
-      duration: lastClipEnd - firstClipStart,
-    };
-    tracks.value = [...tracks.value];
-
-    // Clear clip selection if the deleted clip was selected
-    if (selectedClipId.value === clipId) {
-      selectedClipId.value = null;
-    }
-
-    console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
   }
 
-  // Remove a clip from a track but ALWAYS keep the track (even if it becomes empty).
-  // Used by cut operations where the clip is selected — the track should persist.
+  /**
+   * Sub-op: caller must own history via beginBatch.
+   * Remove a clip from a track but ALWAYS keep the track (even if it becomes empty).
+   * Used by cut operations where the clip is selected — the track should persist.
+   */
   function removeClipKeepTrack(trackId: string, clipId: string): void {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return;
-    useHistoryStore().pushState('Remove clip (keep track)');
 
     const track = tracks.value[trackIndex];
 
