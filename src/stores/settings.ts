@@ -276,6 +276,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setTimeFormat(format: 'hms' | 'ms'): void {
+    settings.value.timeFormat = format;
+    saveSettings();
+  }
+
   function setLastExportPath(path: string): void {
     settings.value.lastExportPath = path;
     saveSettings();
@@ -381,5 +386,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setShortcutHints,
     // Quick Session Mode
     setQuickSessionMode,
+    // Time format
+    setTimeFormat,
   };
 });

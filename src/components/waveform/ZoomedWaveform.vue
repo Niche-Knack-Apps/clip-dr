@@ -432,9 +432,9 @@ onUnmounted(() => {
         />
       </div>
       <div class="flex items-center gap-2 text-xs font-mono">
-        <span class="text-gray-500">{{ formatTime(selection.start) }}</span>
+        <span class="text-gray-500">{{ formatTime(selection.start, settingsStore.settings.timeFormat) }}</span>
         <span class="text-gray-600">-</span>
-        <span class="text-gray-500">{{ formatTime(selection.end) }}</span>
+        <span class="text-gray-500">{{ formatTime(selection.end, settingsStore.settings.timeFormat) }}</span>
       </div>
     </div>
 
@@ -509,7 +509,7 @@ onUnmounted(() => {
             dragMode === 'in' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           ]"
         >
-          {{ formatTime(inPoint) }}
+          {{ formatTime(inPoint, settingsStore.settings.timeFormat) }}
         </div>
         <div class="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-0.5 bg-green-500 group-hover:w-1 transition-all" />
         <div class="absolute left-1/2 -translate-x-1/2 -top-1 w-3 h-3 bg-green-500 rounded-full group-hover:scale-125 transition-transform" />
@@ -530,7 +530,7 @@ onUnmounted(() => {
             dragMode === 'out' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           ]"
         >
-          {{ formatTime(outPoint) }}
+          {{ formatTime(outPoint, settingsStore.settings.timeFormat) }}
         </div>
         <div class="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-0.5 bg-red-500 group-hover:w-1 transition-all" />
         <div class="absolute left-1/2 -translate-x-1/2 -top-1 w-3 h-3 bg-red-500 rounded-full group-hover:scale-125 transition-transform" />
@@ -561,9 +561,9 @@ onUnmounted(() => {
 
       <!-- Time markers -->
       <div class="absolute bottom-0 left-0 right-0 flex justify-between px-2 py-1 text-[10px] text-gray-500 font-mono">
-        <span>{{ formatTime(selection.start) }}</span>
-        <span>{{ formatTime((selection.start + selection.end) / 2) }}</span>
-        <span>{{ formatTime(selection.end) }}</span>
+        <span>{{ formatTime(selection.start, settingsStore.settings.timeFormat) }}</span>
+        <span>{{ formatTime((selection.start + selection.end) / 2, settingsStore.settings.timeFormat) }}</span>
+        <span>{{ formatTime(selection.end, settingsStore.settings.timeFormat) }}</span>
       </div>
     </div>
 

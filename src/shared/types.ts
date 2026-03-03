@@ -235,6 +235,8 @@ export interface Settings {
   shortcutHints: string[];
   // Quick Session Mode: auto-start new session when all tracks are deleted
   quickSessionMode: boolean;
+  // Time display format: 'hms' = H:MM:SS, 'ms' = MM:SS.cs (centiseconds)
+  timeFormat: 'hms' | 'ms';
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';

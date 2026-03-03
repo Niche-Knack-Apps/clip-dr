@@ -33,11 +33,18 @@ export function isTrackPlayable(status: string | undefined): boolean {
   return !status || status === 'ready' || status === 'large-file' || status === 'caching';
 }
 
-export function formatTime(seconds: number): string {
+export function formatTime(seconds: number, format: 'hms' | 'ms' = 'ms'): string {
+  if (format === 'hms') {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
+  // 'ms' format: MM:SS.cs (centiseconds)
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 100);
-  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+  const cs = Math.floor((seconds % 1) * 100);
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 }
 
 export function parseTime(timeStr: string): number {

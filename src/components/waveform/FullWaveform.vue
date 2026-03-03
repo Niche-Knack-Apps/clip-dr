@@ -290,7 +290,7 @@ onUnmounted(() => {
   <div class="bg-waveform-bg rounded-lg overflow-hidden">
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-700">
       <span class="text-xs text-gray-400">Full Waveform</span>
-      <span class="text-xs text-gray-500 font-mono">{{ formatTime(duration) }}</span>
+      <span class="text-xs text-gray-500 font-mono">{{ formatTime(duration, settingsStore.settings.timeFormat) }}</span>
     </div>
 
     <!-- Drag strip to pan zoom window -->
@@ -391,10 +391,10 @@ onUnmounted(() => {
       <!-- Time markers -->
       <div class="absolute bottom-0 left-0 right-0 flex justify-between px-2 py-1 text-[10px] text-gray-500 font-mono">
         <span>0:00</span>
-        <span>{{ formatTime(duration / 4) }}</span>
-        <span>{{ formatTime(duration / 2) }}</span>
-        <span>{{ formatTime((duration * 3) / 4) }}</span>
-        <span>{{ formatTime(duration) }}</span>
+        <span>{{ formatTime(duration / 4, settingsStore.settings.timeFormat) }}</span>
+        <span>{{ formatTime(duration / 2, settingsStore.settings.timeFormat) }}</span>
+        <span>{{ formatTime((duration * 3) / 4, settingsStore.settings.timeFormat) }}</span>
+        <span>{{ formatTime(duration, settingsStore.settings.timeFormat) }}</span>
       </div>
     </div>
 

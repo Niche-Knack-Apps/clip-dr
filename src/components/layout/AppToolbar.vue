@@ -255,6 +255,11 @@ function focusSearch() {
   searchBarRef.value?.focus();
 }
 
+function toggleTimeFormat() {
+  const current = settingsStore.settings.timeFormat;
+  settingsStore.setTimeFormat(current === 'hms' ? 'ms' : 'hms');
+}
+
 defineExpose({ focusSearch });
 </script>
 
@@ -430,9 +435,13 @@ defineExpose({ focusSearch });
         </div>
       </div>
 
-      <!-- Time display -->
-      <span class="text-xs font-mono text-gray-400 min-w-[70px]">
-        {{ recordingStore.isRecording ? formatTime(recordingStore.recordingDuration) : formatTime(currentTime) }} / {{ formatTime(duration) }}
+      <!-- Time display (click to toggle format) -->
+      <span
+        class="text-xs font-mono text-gray-400 min-w-[70px] cursor-pointer hover:text-gray-200"
+        title="Click to toggle time format"
+        @click="toggleTimeFormat"
+      >
+        {{ recordingStore.isRecording ? formatTime(recordingStore.recordingDuration, settingsStore.settings.timeFormat) : formatTime(currentTime, settingsStore.settings.timeFormat) }} / {{ formatTime(duration, settingsStore.settings.timeFormat) }}
         <span v-if="recordingStore.isScheduledRecording && !recordingStore.schedule?.noEndTime" class="text-red-400 ml-1">
           (-{{ formatScheduleRemaining(recordingStore.scheduleRemaining) }})
         </span>
@@ -531,7 +540,7 @@ defineExpose({ focusSearch });
           @click="setInPoint"
         >
           <span class="text-green-500 font-bold mr-1 text-xs">I</span>
-          <span v-if="inPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(inPoint) }}</span>
+          <span v-if="inPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(inPoint, settingsStore.settings.timeFormat) }}</span>
         </Button>
 
         <Button
@@ -541,7 +550,7 @@ defineExpose({ focusSearch });
           @click="setOutPoint"
         >
           <span class="text-red-500 font-bold mr-1 text-xs">O</span>
-          <span v-if="outPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(outPoint) }}</span>
+          <span v-if="outPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(outPoint, settingsStore.settings.timeFormat) }}</span>
         </Button>
       </div>
 

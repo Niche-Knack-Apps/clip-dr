@@ -62,6 +62,8 @@ export const DEFAULT_SETTINGS = {
   shortcutHints: ['help', 'jkl', 'cut', 'delete'],
   // Quick Session Mode: auto-start new session when all tracks are deleted
   quickSessionMode: false,
+  // Time display format
+  timeFormat: 'hms' as const,
 };
 
 export const KEYBOARD_SHORTCUTS = {
