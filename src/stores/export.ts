@@ -9,7 +9,7 @@ import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
 import { listen } from '@tauri-apps/api/event';
 import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip, VolumeAutomationPoint } from '@/shared/types';
-import { encodeWav } from '@/shared/audio-utils';
+import { encodeWavFloat32 } from '@/shared/audio-utils';
 import { isTrackPlayable } from '@/shared/utils';
 import { useUIStore } from './ui';
 
@@ -244,6 +244,7 @@ export const useExportStore = defineStore('export', () => {
 
       // Use EDL streaming export when possible (required for large files)
       if (canUseEdlExport(tracks)) {
+        console.log('[Export] Using EDL path:', true, 'tracks:', tracks.length);
         const edl = buildEdl(tracks, outputPath, format, bitrate, oggQuality);
 
         // Listen for progress events from Rust
@@ -263,6 +264,7 @@ export const useExportStore = defineStore('export', () => {
       }
 
       // Fallback: JS-side AudioBuffer mixing (for tracks without source paths)
+      console.log('[Export] Using EDL path:', false, 'tracks:', tracks.length);
       const audioContext = audioStore.getAudioContext();
       progress.value = 30;
 
@@ -272,7 +274,7 @@ export const useExportStore = defineStore('export', () => {
       }
       progress.value = 50;
 
-      const wavData = encodeWav(mixedBuffer);
+      const wavData = encodeWavFloat32(mixedBuffer);
       const tempPath = await writeTempFile(`mixed_temp_${Date.now()}.wav`, wavData);
       progress.value = 70;
 
@@ -397,7 +399,7 @@ export const useExportStore = defineStore('export', () => {
         throw new Error('No audio clips to export for this track');
       }
 
-      const wavData = encodeWav(trackBuffer);
+      const wavData = encodeWavFloat32(trackBuffer);
       const tempPath = await writeTempFile(`track_export_${Date.now()}.wav`, wavData);
 
       if (format === 'mp3') {
@@ -658,7 +660,7 @@ export const useExportStore = defineStore('export', () => {
       }
     }
 
-    // Normalize to prevent clipping
+    // Warn about clipping but do NOT normalize — export must match playback exactly
     let maxAbs = 0;
     for (let ch = 0; ch < numChannels; ch++) {
       const data = mixedBuffer.getChannelData(ch);
@@ -667,19 +669,13 @@ export const useExportStore = defineStore('export', () => {
       }
     }
     if (maxAbs > 1) {
-      const scale = 0.95 / maxAbs;
-      for (let ch = 0; ch < numChannels; ch++) {
-        const data = mixedBuffer.getChannelData(ch);
-        for (let i = 0; i < data.length; i++) {
-          data[i] *= scale;
-        }
-      }
+      console.warn(`[Export] Peak exceeds 1.0 (maxAbs=${maxAbs.toFixed(3)}), output may clip`);
     }
 
     return mixedBuffer;
   }
 
-  // encodeWav imported from @/shared/audio-utils
+  // encodeWavFloat32 imported from @/shared/audio-utils
 
   return {
     loading,
@@ -699,6 +695,6 @@ export const useExportStore = defineStore('export', () => {
     exportWithSilenceRemoval,
     clear,
     mixActiveTracks,
-    encodeWav,
+    encodeWavFloat32,
   };
 });

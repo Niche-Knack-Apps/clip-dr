@@ -1,6 +1,6 @@
 {
   "name": "clip-dr",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Audio cleaning and clip-making application with CPU-only ASR",
   "license": "Apache-2.0",
   "type": "module",
@@ -8,7 +8,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "preview": "vite preview",
-    "build:release": "cd src-tauri && cargo clean --release && cd .. && tauri build && ./scripts/copy-to-releases.sh",
+    "build:release": "cd src-tauri && cargo clean --release && cd .. && tauri build && ./scripts/copy-to-releases.sh; bash scripts/prepare-models.sh --cleanup",
     "test": "vitest run",
     "lint": "eslint src --ext .ts,.vue",
     "typecheck": "vue-tsc --noEmit"

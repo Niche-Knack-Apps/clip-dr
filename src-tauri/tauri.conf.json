@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clip Dr.",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "identifier": "com.niche-knack.clip-dr",
   "build": {
     "beforeDevCommand": "npx vite",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npx vite build",
+    "beforeBuildCommand": "bash scripts/prepare-models.sh && npx vite build",
     "frontendDist": "../dist"
   },
   "app": {
