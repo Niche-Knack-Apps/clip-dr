@@ -620,6 +620,19 @@ export const useRecordingStore = defineStore('recording', () => {
       const savedTimemarks = timemarks.value.length > 0 ? [...timemarks.value] : null;
       const recordingNumber = tracksStore.tracks.length + 1;
 
+      // Adjust track start for pre-record buffer (ring buffer drained at record start)
+      const preRecordOffset = result.pre_record_seconds || 0;
+      const baseStart = trackStart ?? tracksStore.timelineDuration;
+      const effectiveStart = Math.max(0, baseStart - preRecordOffset);
+      if (preRecordOffset > 0) {
+        console.log(`[Recording] Pre-record buffer: ${preRecordOffset.toFixed(2)}s, ` +
+          `base start: ${baseStart.toFixed(2)}s, effective start: ${effectiveStart.toFixed(2)}s`);
+      }
+      if (preRecordOffset > baseStart) {
+        console.warn(`[Recording] Pre-record (${preRecordOffset.toFixed(2)}s) exceeds available ` +
+          `timeline room (${baseStart.toFixed(2)}s), clamped to 0`);
+      }
+
       console.log(`[Recording] Importing ${segmentCount} segment(s) via progressive pipeline...`);
 
       for (let i = 0; i < allPaths.length; i++) {
@@ -627,8 +640,8 @@ export const useRecordingStore = defineStore('recording', () => {
         const trackCountBefore = tracksStore.tracks.length;
 
         // Use the progressive import pipeline (3-phase: metadata, waveform, browser decode)
-        // First segment uses computed trackStart; extras increment by segment duration
-        const segTrackStart = (i === 0) ? trackStart : undefined;
+        // First segment uses adjusted start (accounting for pre-record); extras append at timeline end
+        const segTrackStart = (i === 0) ? effectiveStart : undefined;
         await audioStore.importFile(segPath, segTrackStart);
 
         // Find the newly created track (last track added)
