@@ -105,6 +105,7 @@ function handleTimelineClick(event: MouseEvent) {
   if (!rect || duration.value <= 0) return;
   const time = ((event.clientX - rect.left) / rect.width) * duration.value;
   playbackStore.seek(Math.max(0, Math.min(duration.value, time)));
+  console.log('[TrackLane] seek via timeline click:', time.toFixed(3));
 }
 
 function handleTimemarkClick(time: number) {
@@ -210,6 +211,13 @@ function handleClipDragEnd(event: MouseEvent) {
   } else if (!wasDragging && clipId) {
     // Drag threshold not met - this was a click, select the clip
     emit('clipSelect', props.track.id, clipId);
+    // Also seek to clicked position (click landed on clip, didn't drag)
+    const rect = containerRef.value?.getBoundingClientRect();
+    if (rect && duration.value > 0) {
+      const time = ((event.clientX - rect.left) / rect.width) * duration.value;
+      playbackStore.seek(Math.max(0, Math.min(duration.value, time)));
+      console.log('[TrackLane] seek via clip click:', time.toFixed(3));
+    }
   }
 
   clipDragPending.value = false;
