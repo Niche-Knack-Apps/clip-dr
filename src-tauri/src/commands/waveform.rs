@@ -36,15 +36,28 @@ pub async fn extract_waveform(path: String, bucket_count: usize) -> Result<Vec<f
         .ok_or("No audio tracks found")?;
 
     let track_id = track.id;
-    let n_frames = track.codec_params.n_frames.unwrap_or(0) as usize;
     let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100) as usize;
+
+    // Estimate total frames; fall back to 5 minutes at detected sample rate if unavailable
+    let n_frames_estimate = match track.codec_params.n_frames {
+        Some(n) if n > 0 => n as usize,
+        _ => sample_rate * 300, // 5 minutes fallback
+    };
+
+    let bucket_count = bucket_count.max(1);
+    let samples_per_bucket = (n_frames_estimate / bucket_count).max(1);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    // Collect all samples first (mono mix)
-    let mut mono_samples: Vec<f32> = Vec::with_capacity(n_frames);
+    // Streaming peak accumulation — no large sample buffer needed
+    let mut waveform: Vec<f32> = Vec::with_capacity(bucket_count * 2);
+    let mut bucket_min: f32 = 0.0;
+    let mut bucket_max: f32 = 0.0;
+    let mut bucket_frame_count: usize = 0;
+    let mut global_frame_index: usize = 0;
 
     loop {
         let packet = match format.next_packet() {
@@ -64,49 +77,47 @@ pub async fn extract_waveform(path: String, bucket_count: usize) -> Result<Vec<f
         };
 
         let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-
-        let mut sample_buf = SampleBuffer::<f32>::new(duration, spec);
+        let num_frames = decoded.frames();
+        let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
-
         let samples = sample_buf.samples();
 
-        // Mix to mono
+        // Mix to mono and accumulate into buckets incrementally
         for chunk in samples.chunks(channels) {
             let mono = chunk.iter().sum::<f32>() / channels as f32;
-            mono_samples.push(mono);
+
+            if bucket_frame_count == 0 {
+                bucket_min = mono;
+                bucket_max = mono;
+            } else {
+                if mono < bucket_min {
+                    bucket_min = mono;
+                }
+                if mono > bucket_max {
+                    bucket_max = mono;
+                }
+            }
+            bucket_frame_count += 1;
+            global_frame_index += 1;
+
+            if bucket_frame_count >= samples_per_bucket {
+                waveform.push(bucket_min);
+                waveform.push(bucket_max);
+                bucket_frame_count = 0;
+            }
         }
     }
 
-    // Create waveform buckets (min/max pairs)
-    let samples_per_bucket = (mono_samples.len() / bucket_count).max(1);
-    let mut waveform: Vec<f32> = Vec::with_capacity(bucket_count * 2);
+    // Flush partial bucket at end
+    if bucket_frame_count > 0 {
+        waveform.push(bucket_min);
+        waveform.push(bucket_max);
+    }
 
-    for i in 0..bucket_count {
-        let start = i * samples_per_bucket;
-        let end = ((i + 1) * samples_per_bucket).min(mono_samples.len());
-
-        if start >= mono_samples.len() {
-            waveform.push(0.0);
-            waveform.push(0.0);
-            continue;
-        }
-
-        let mut min: f32 = 0.0;
-        let mut max: f32 = 0.0;
-
-        for j in start..end {
-            let sample = mono_samples[j];
-            if sample < min {
-                min = sample;
-            }
-            if sample > max {
-                max = sample;
-            }
-        }
-
-        waveform.push(min);
-        waveform.push(max);
+    // If file was shorter than expected and we got zero buckets, push silence
+    if waveform.is_empty() && global_frame_index == 0 {
+        waveform.push(0.0);
+        waveform.push(0.0);
     }
 
     Ok(waveform)

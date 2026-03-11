@@ -117,6 +117,7 @@ fn main() {
             import::import_audio_start,
             import::import_audio_cancel,
             import::get_peak_tile,
+            import::cancel_pyramid_builds,
             playback::playback_set_tracks,
             playback::playback_play,
             playback::playback_pause,

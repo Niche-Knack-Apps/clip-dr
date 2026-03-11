@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use symphonia::core::audio::SampleBuffer;
@@ -882,20 +882,80 @@ struct PyramidLevel {
     peaks: Vec<(f32, f32)>, // (min, max) pairs
 }
 
-/// In-memory cache for the most recently loaded pyramid (avoids re-reading
+/// In-memory LRU cache for recently loaded pyramids (avoids re-reading
 /// the file from disk on every get_peak_tile call during smooth zoom/pan).
+/// Capacity: 4 entries, evicted by lowest `last_accessed` counter.
+const PYRAMID_CACHE_CAPACITY: usize = 4;
+
 struct CachedPyramid {
     file_hash: u64,
     levels: Vec<PyramidLevel>,
     sample_rate: u32,
+    last_accessed: u64,
+}
+
+struct PyramidLruCache {
+    entries: Vec<CachedPyramid>,
+    counter: u64,
+}
+
+impl PyramidLruCache {
+    fn new() -> Self {
+        Self { entries: Vec::with_capacity(PYRAMID_CACHE_CAPACITY), counter: 0 }
+    }
+
+    fn next_counter(&mut self) -> u64 {
+        self.counter += 1;
+        self.counter
+    }
+
+    /// Look up by file_hash; on hit, bump last_accessed and return index.
+    fn get(&mut self, file_hash: u64) -> Option<usize> {
+        if let Some(pos) = self.entries.iter().position(|e| e.file_hash == file_hash) {
+            let ts = self.next_counter();
+            self.entries[pos].last_accessed = ts;
+            Some(pos)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a new entry, evicting the LRU entry if at capacity.
+    fn insert(&mut self, file_hash: u64, levels: Vec<PyramidLevel>, sample_rate: u32) {
+        let ts = self.next_counter();
+        let entry = CachedPyramid { file_hash, levels, sample_rate, last_accessed: ts };
+        if self.entries.len() < PYRAMID_CACHE_CAPACITY {
+            self.entries.push(entry);
+        } else {
+            // Evict the entry with the lowest last_accessed
+            let lru_idx = self.entries.iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.last_accessed)
+                .map(|(i, _)| i)
+                .unwrap(); // entries is non-empty
+            self.entries[lru_idx] = entry;
+        }
+    }
 }
 
 use std::sync::OnceLock;
 
-static PYRAMID_MEM_CACHE: OnceLock<Mutex<Option<CachedPyramid>>> = OnceLock::new();
+static PYRAMID_MEM_CACHE: OnceLock<Mutex<PyramidLruCache>> = OnceLock::new();
 
-fn get_pyramid_mem_cache() -> &'static Mutex<Option<CachedPyramid>> {
-    PYRAMID_MEM_CACHE.get_or_init(|| Mutex::new(None))
+fn get_pyramid_mem_cache() -> &'static Mutex<PyramidLruCache> {
+    PYRAMID_MEM_CACHE.get_or_init(|| Mutex::new(PyramidLruCache::new()))
+}
+
+// ── Pyramid build cancellation ────────────────────────────────────────
+// Generation counter: incremented on each cancel_pyramid_builds call.
+// Build ID counter: unique ID per build for registry keying.
+static PYRAMID_BUILD_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PYRAMID_BUILD_ID: AtomicU64 = AtomicU64::new(0);
+
+static ACTIVE_PYRAMID_BUILDS: OnceLock<Mutex<HashMap<u64, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn get_active_pyramid_builds() -> &'static Mutex<HashMap<u64, Arc<AtomicBool>>> {
+    ACTIVE_PYRAMID_BUILDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Get the pyramid cache file path.
@@ -965,7 +1025,8 @@ fn build_level0_wav_mmap(mmap: &Mmap, wav: &WavInfo) -> Vec<(f32, f32)> {
 }
 
 /// Build level-0 (finest) peaks via symphonia decode.
-fn build_level0_symphonia(path: &Path) -> Result<(Vec<(f32, f32)>, u32, usize), String> {
+/// If `cancel` is provided, checks it every 100 packets and aborts early.
+fn build_level0_symphonia(path: &Path, cancel: Option<&AtomicBool>) -> Result<(Vec<(f32, f32)>, u32, usize), String> {
     let file = File::open(path).map_err(|e| format!("Failed to open: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -993,8 +1054,19 @@ fn build_level0_symphonia(path: &Path) -> Result<(Vec<(f32, f32)>, u32, usize), 
     let mut current_peak = (0.0f32, 0.0f32);
     let mut current_count: usize = 0;
     let mut total_frames: usize = 0;
+    let mut packet_count = 0u64;
 
     loop {
+        // Check cancellation every 100 packets
+        if packet_count % 100 == 0 {
+            if let Some(c) = cancel {
+                if c.load(Ordering::Relaxed) {
+                    return Err("Build cancelled".to_string());
+                }
+            }
+        }
+        packet_count += 1;
+
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e))
@@ -1085,6 +1157,7 @@ fn try_build_level0_from_wav(wav_path: &Path) -> Option<(Vec<(f32, f32)>, u32, u
 }
 
 /// Build and save peak pyramid for a file.
+/// Registers a cancellation token so the build can be aborted via `cancel_pyramid_builds`.
 fn build_and_save_pyramid(path: &Path) {
     let t0 = Instant::now();
     let file_hash = match peak_cache_key(path) {
@@ -1100,6 +1173,38 @@ fn build_and_save_pyramid(path: &Path) {
         }
     }
 
+    // Register cancellation token with a unique build ID
+    let generation_at_start = PYRAMID_BUILD_GENERATION.load(Ordering::Acquire);
+    let build_id = PYRAMID_BUILD_ID.fetch_add(1, Ordering::Relaxed);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut builds = get_active_pyramid_builds().lock().unwrap();
+        builds.insert(build_id, cancel_flag.clone());
+    }
+
+    // Ensure cleanup on all exit paths via drop guard
+    struct BuildCleanup(u64);
+    impl Drop for BuildCleanup {
+        fn drop(&mut self) {
+            let mut builds = get_active_pyramid_builds().lock().unwrap();
+            builds.remove(&self.0);
+        }
+    }
+    let _cleanup = BuildCleanup(build_id);
+
+    // If generation changed between our load and registration, a cancel
+    // was issued — abort immediately
+    if PYRAMID_BUILD_GENERATION.load(Ordering::Acquire) != generation_at_start {
+        log::info!("[Pyramid] Build cancelled (generation changed) for {:?}", path.file_name().unwrap_or_default());
+        return;
+    }
+
+    // Check if the cancel flag was set (by a concurrent cancel_pyramid_builds call)
+    if cancel_flag.load(Ordering::Relaxed) {
+        log::info!("[Pyramid] Build cancelled before start for {:?}", path.file_name().unwrap_or_default());
+        return;
+    }
+
     log::info!("[Pyramid] Building for {:?}...", path.file_name().unwrap_or_default());
 
     // Build level 0 — try WAV mmap first (original or decode-cache)
@@ -1112,7 +1217,7 @@ fn build_and_save_pyramid(path: &Path) {
             if let Some(result) = try_build_level0_from_wav(path) {
                 result
             } else {
-                match build_level0_symphonia(path) {
+                match build_level0_symphonia(path, Some(&cancel_flag)) {
                     Ok(r) => r,
                     Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
                 }
@@ -1125,14 +1230,14 @@ fn build_and_save_pyramid(path: &Path) {
                     result
                 } else {
                     log::warn!("[Pyramid] Decode-cache WAV unreadable, falling back to symphonia");
-                    match build_level0_symphonia(path) {
+                    match build_level0_symphonia(path, Some(&cancel_flag)) {
                         Ok(r) => r,
                         Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
                     }
                 }
             } else {
                 log::info!("[Pyramid] No decode-cache WAV found, using symphonia decode");
-                match build_level0_symphonia(path) {
+                match build_level0_symphonia(path, Some(&cancel_flag)) {
                     Ok(r) => r,
                     Err(e) => { log::warn!("[Pyramid] Failed: {}", e); return; }
                 }
@@ -1330,32 +1435,48 @@ pub fn get_peak_tile(
     let file_hash = peak_cache_key(path_ref)
         .ok_or_else(|| "Cannot compute cache key for file".to_string())?;
 
-    // Check in-memory cache first (avoids disk I/O during smooth zoom/pan)
+    // Check in-memory LRU cache first (avoids disk I/O during smooth zoom/pan)
     {
-        let cache = get_pyramid_mem_cache().lock().unwrap();
-        if let Some(ref cached) = *cache {
-            if cached.file_hash == file_hash {
-                return Ok(get_peaks_for_range(&cached.levels, cached.sample_rate, start_time, end_time, bucket_count));
-            }
+        let mut cache = get_pyramid_mem_cache().lock().unwrap();
+        if let Some(idx) = cache.get(file_hash) {
+            let cached = &cache.entries[idx];
+            return Ok(get_peaks_for_range(&cached.levels, cached.sample_rate, start_time, end_time, bucket_count));
         }
     }
 
-    // Load from disk and populate in-memory cache
+    // Load from disk and populate in-memory LRU cache
     if let Some((levels, sample_rate, _total_frames)) = load_peak_pyramid(path_ref) {
         let result = get_peaks_for_range(&levels, sample_rate, start_time, end_time, bucket_count);
 
-        // Store in memory cache for subsequent calls
+        // Store in LRU cache for subsequent calls
         let mut cache = get_pyramid_mem_cache().lock().unwrap();
-        *cache = Some(CachedPyramid {
-            file_hash,
-            levels,
-            sample_rate,
-        });
+        cache.insert(file_hash, levels, sample_rate);
 
         return Ok(result);
     }
 
     Err("No peak pyramid available for this file".to_string())
+}
+
+/// Cancel all active pyramid builds and increment the generation counter
+/// to invalidate any builds that haven't registered yet.
+#[tauri::command]
+pub fn cancel_pyramid_builds() {
+    // Increment generation so any builds that start after this point
+    // but were initiated before will pick up a stale generation key
+    PYRAMID_BUILD_GENERATION.fetch_add(1, Ordering::Release);
+
+    // Signal all currently active builds to stop
+    let mut builds = get_active_pyramid_builds().lock().unwrap();
+    let count = builds.len();
+    for (_gen, cancel_flag) in builds.iter() {
+        cancel_flag.store(true, Ordering::Relaxed);
+    }
+    builds.clear();
+
+    if count > 0 {
+        log::info!("[Pyramid] Cancelled {} active build(s)", count);
+    }
 }
 
 #[tauri::command]
