@@ -150,6 +150,16 @@ export function useCompositeWaveform() {
           sourceOffset: 0,
         };
         addClipToComposite(trackBuckets, pseudoClip, timelineDuration, bucketDuration);
+        // Build clips array for hi-res rendering (buffer or peak tiles)
+        const singleClips: WaveformLayerClip[] | undefined =
+          track.audioData.buffer
+            ? [{
+                clipStart: track.trackStart,
+                duration: track.duration,
+                sourceOffset: 0,
+                buffer: track.audioData.buffer,
+              }]
+            : undefined;
         layers.push({
           trackId: track.id,
           color: track.color,
@@ -158,6 +168,7 @@ export function useCompositeWaveform() {
           duration: track.duration,
           sourcePath: track.sourcePath,
           hasPeakPyramid: track.hasPeakPyramid,
+          clips: singleClips,
         });
         continue;
       }
@@ -189,6 +200,7 @@ export function useCompositeWaveform() {
             clipStart: c.clipStart,
             duration: c.duration,
             sourceFile: c.sourceFile,
+            pyramidSourceFile: track.sourcePath,
             sourceOffset: c.sourceOffset ?? 0,
           });
           hasAnyHiRes = true;

@@ -200,6 +200,7 @@ export function useWaveform() {
       tileVersion.value++;
     } catch (e) {
       console.warn('[Waveform] Peak tile fetch failed:', e);
+      tileVersion.value++;
     } finally {
       inFlightKeys.delete(cacheKey);
     }
@@ -340,14 +341,15 @@ export function useWaveform() {
 
         const { qStart, qEnd } = quantizeRange(srcStart, srcEnd);
         const tileBuckets = Math.max(bucketCount, 256);
-        const cacheKey = `${clip.sourceFile}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${tileBuckets}`;
+        const peakPath = clip.pyramidSourceFile || clip.sourceFile;
+        const cacheKey = `${peakPath}:${qStart.toFixed(4)}:${qEnd.toFixed(4)}:${tileBuckets}`;
 
         const cached = getCachedTile(cacheKey);
         if (!cached || cached.length < tileBuckets * 2) {
           anyMissing = true;
           if (!inFlightKeys.has(cacheKey)) {
             inFlightKeys.add(cacheKey);
-            fetchPeakTile(clip.sourceFile, qStart, qEnd, tileBuckets, cacheKey);
+            fetchPeakTile(peakPath, qStart, qEnd, tileBuckets, cacheKey);
           }
           continue;
         }
