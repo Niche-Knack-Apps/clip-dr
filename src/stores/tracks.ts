@@ -29,6 +29,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Selected clip within a track (for segment operations)
   const selectedClipId = ref<string | null>(null);
+  const selectedClipTrackId = ref<string | null>(null);
 
   // Pending drag position for single-clip tracks — decoupled from track.trackStart
   // to prevent timelineDuration from changing during drag (which causes clip resizing)
@@ -86,24 +87,25 @@ export const useTracksStore = defineStore('tracks', () => {
   // Computed: Check if any track has audio loaded
   const hasAudio = computed(() => tracks.value.length > 0);
 
-  // Computed: Get selected clip info (searches all tracks)
+  // Computed: Get selected clip info (O(1) via cached trackId — PERF-12)
   const selectedClip = computed(() => {
-    if (!selectedClipId.value) return null;
-    for (const track of tracks.value) {
-      const clips = getTrackClips(track.id);
-      const clip = clips.find(c => c.id === selectedClipId.value);
-      if (clip) return { trackId: track.id, clip };
-    }
+    if (!selectedClipId.value || !selectedClipTrackId.value) return null;
+    const clips = getTrackClips(selectedClipTrackId.value);
+    const clip = clips.find(c => c.id === selectedClipId.value);
+    if (clip) return { trackId: selectedClipTrackId.value, clip };
+    // Fallback: trackId stale (clip moved/deleted) — clear selection
     return null;
   });
 
   function selectClip(trackId: string, clipId: string): void {
     selectedClipId.value = clipId;
+    selectedClipTrackId.value = trackId;
     console.log('[Tracks] Selected clip:', clipId, 'in track:', trackId);
   }
 
   function clearClipSelection(): void {
     selectedClipId.value = null;
+    selectedClipTrackId.value = null;
   }
 
   // Generate waveform data from AudioBuffer (min/max pairs format)
@@ -221,6 +223,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function selectTrack(trackId: string | 'ALL'): void {
     selectedTrackId.value = trackId;
     selectedClipId.value = null;
+    selectedClipTrackId.value = null;
     viewMode.value = trackId === 'ALL' ? 'all' : 'selected';
     console.log('[Tracks] Selected:', trackId);
   }
@@ -1441,6 +1444,7 @@ export const useTracksStore = defineStore('tracks', () => {
       // Clear clip selection if the deleted clip was selected
       if (selectedClipId.value === clipId) {
         selectedClipId.value = null;
+        selectedClipTrackId.value = null;
       }
 
       console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
@@ -1500,6 +1504,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     if (selectedClipId.value === clipId) {
       selectedClipId.value = null;
+      selectedClipTrackId.value = null;
     }
 
     console.log(`[Tracks] Removed clip ${clipId} from track ${trackId}, track preserved, ${newClips.length} clips remain`);
