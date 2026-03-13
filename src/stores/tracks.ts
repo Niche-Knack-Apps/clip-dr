@@ -1818,7 +1818,8 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value[idx];
 
     console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, statusKept=${(['ready', 'large-file', 'caching'] as ImportStatus[]).includes(track.importStatus!)}`);
-    tracks.value[idx] = {
+    const updated = [...tracks.value];
+    updated[idx] = {
       ...track,
       audioData: { ...track.audioData, waveformData: finalWaveform },
       duration: actualDuration,
@@ -1829,7 +1830,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importProgress: 1,
       importSessionId: undefined, // waveform session done
     };
-    triggerRef(tracks);
+    tracks.value = updated;
     // Propagate settled waveform into restored EDL clips (if any)
     finalizeClipWaveforms(trackId);
   }
@@ -1892,7 +1893,8 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value[idx];
 
     console.log(`[Tracks] setImportBuffer: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${buffer.duration.toFixed(2)}, oldStatus=${track.importStatus}, newStatus=ready`);
-    tracks.value[idx] = {
+    const updated = [...tracks.value];
+    updated[idx] = {
       ...track,
       audioData: {
         ...track.audioData,
@@ -1905,7 +1907,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importProgress: undefined,
       importDecodeProgress: undefined,
     };
-    triggerRef(tracks);
+    tracks.value = updated;
   }
 
   // Mark a track as too large for browser decode (waveform still works)
@@ -1914,38 +1916,41 @@ export const useTracksStore = defineStore('tracks', () => {
     if (idx === -1) return;
     const track = tracks.value[idx];
 
-    tracks.value[idx] = {
+    const updated = [...tracks.value];
+    updated[idx] = {
       ...track,
       importStatus: 'large-file' as ImportStatus,
       importProgress: undefined,
       importDecodeProgress: undefined,
     };
-    triggerRef(tracks);
+    tracks.value = updated;
   }
 
   // Transition from 'large-file' to 'caching' — shows progress bar
   function setImportCaching(trackId: string): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
-    tracks.value[idx] = {
+    const updated = [...tracks.value];
+    updated[idx] = {
       ...tracks.value[idx],
       importStatus: 'caching' as ImportStatus,
       importDecodeProgress: 0,
     };
-    triggerRef(tracks);
+    tracks.value = updated;
   }
 
   // Set cached audio path and mark import as ready
   function setCachedAudioPath(trackId: string, cachedPath: string): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
-    tracks.value[idx] = {
+    const updated = [...tracks.value];
+    updated[idx] = {
       ...tracks.value[idx],
       cachedAudioPath: cachedPath,
       importStatus: 'ready' as ImportStatus,
       importDecodeProgress: undefined,
     };
-    triggerRef(tracks);
+    tracks.value = updated;
   }
 
   function setHasPeakPyramid(trackId: string): void {
