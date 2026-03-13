@@ -117,17 +117,23 @@ export function encodeWavFloat32(buffer: AudioBuffer): Uint8Array {
   writeWavString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
 
-  // Interleave channels and write float32 samples
-  let offset = 44;
+  // PERF-09: Use typed array for float32 data — avoids per-sample DataView overhead.
+  // For mono, direct copy; for multi-channel, interleave via typed array.
   const channels: Float32Array[] = [];
   for (let ch = 0; ch < numChannels; ch++) {
     channels.push(buffer.getChannelData(ch));
   }
 
-  for (let i = 0; i < buffer.length; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      view.setFloat32(offset, channels[ch][i], true);
-      offset += 4;
+  if (numChannels === 1) {
+    // Fast path: single channel — copy directly (no interleaving needed)
+    new Float32Array(arrayBuffer, headerSize).set(channels[0]);
+  } else {
+    // Multi-channel: interleave into a typed array (still faster than DataView)
+    const floatView = new Float32Array(arrayBuffer, headerSize);
+    for (let i = 0; i < buffer.length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        floatView[i * numChannels + ch] = channels[ch][i];
+      }
     }
   }
 
