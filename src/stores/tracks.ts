@@ -43,9 +43,12 @@ export const useTracksStore = defineStore('tracks', () => {
   const pendingRecache = ref<Promise<void> | null>(null);
 
   function setPendingRecache(promise: Promise<void>): void {
-    pendingRecache.value = promise;
-    promise.finally(() => {
-      if (pendingRecache.value === promise) {
+    // CON-M1: chain onto any in-flight recache so playback waits for all pending work
+    const prev = pendingRecache.value;
+    const chained = prev ? prev.then(() => promise) : promise;
+    pendingRecache.value = chained;
+    chained.finally(() => {
+      if (pendingRecache.value === chained) {
         pendingRecache.value = null;
       }
     });

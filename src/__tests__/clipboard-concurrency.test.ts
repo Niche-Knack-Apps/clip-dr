@@ -187,4 +187,31 @@ describe('Clipboard Concurrency Guards', () => {
       expect(afterTrack.editEpoch ?? 0).toBeGreaterThan(epochBefore);
     }
   });
+
+  it('CON-M1 regression: setPendingRecache chains sequential promises', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const order: number[] = [];
+    const p1 = new Promise<void>(resolve => {
+      setTimeout(() => { order.push(1); resolve(); }, 20);
+    });
+    const p2 = new Promise<void>(resolve => {
+      setTimeout(() => { order.push(2); resolve(); }, 10);
+    });
+
+    // Chain two recache promises — second must wait for first
+    tracksStore.setPendingRecache(p1);
+    tracksStore.setPendingRecache(p2);
+
+    // Wait for the chained promise to resolve
+    await tracksStore.pendingRecache;
+
+    // p2 resolves faster (10ms) but should be chained after p1 (20ms)
+    // so both should be complete by the time pendingRecache resolves
+    expect(order).toContain(1);
+    expect(order).toContain(2);
+    // The chained promise should be cleared
+    expect(tracksStore.pendingRecache).toBeNull();
+  });
 });
