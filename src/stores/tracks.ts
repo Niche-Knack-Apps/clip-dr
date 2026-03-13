@@ -1939,7 +1939,7 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = updated;
   }
 
-  // Set cached audio path and mark import as ready
+  // Set cached audio path (does NOT change importStatus — caller decides when import is "done")
   function setCachedAudioPath(trackId: string, cachedPath: string): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
@@ -1947,6 +1947,17 @@ export const useTracksStore = defineStore('tracks', () => {
     updated[idx] = {
       ...tracks.value[idx],
       cachedAudioPath: cachedPath,
+    };
+    tracks.value = updated;
+  }
+
+  // Mark import as fully complete (call after both cache and waveform are settled)
+  function setImportReady(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const updated = [...tracks.value];
+    updated[idx] = {
+      ...tracks.value[idx],
       importStatus: 'ready' as ImportStatus,
       importDecodeProgress: undefined,
     };
@@ -2446,6 +2457,7 @@ export const useTracksStore = defineStore('tracks', () => {
     setImportLargeFile,
     setImportCaching,
     setCachedAudioPath,
+    setImportReady,
     setHasPeakPyramid,
     pendingRecache,
     setPendingRecache,

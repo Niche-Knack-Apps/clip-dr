@@ -139,7 +139,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     expect(tracksStore.tracks[0].importStatus).toBe('ready');
   });
 
-  it('setCachedAudioPath creates a new tracks array reference', async () => {
+  it('setCachedAudioPath creates new array ref but does NOT change importStatus', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();
     const ctx = new MockAudioContext();
@@ -155,8 +155,28 @@ describe('Import status reactivity: new array identity on transitions', () => {
     tracksStore.setCachedAudioPath(trackId, '/tmp/cached.wav');
 
     expect(tracksStore.tracks).not.toBe(refBefore);
-    expect(tracksStore.tracks[0].importStatus).toBe('ready');
+    // importStatus stays 'caching' — only setImportReady transitions to 'ready'
+    expect(tracksStore.tracks[0].importStatus).toBe('caching');
     expect(tracksStore.tracks[0].cachedAudioPath).toBe('/tmp/cached.wav');
+  });
+
+  it('setImportReady transitions status to ready', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    const buf = ctx.createBuffer(1, 44100 * 5, 44100);
+    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    const trackId = tracksStore.tracks[0].id;
+
+    tracksStore.setImportCaching(trackId);
+    const refBefore = tracksStore.tracks;
+
+    tracksStore.setImportReady(trackId);
+
+    expect(tracksStore.tracks).not.toBe(refBefore);
+    expect(tracksStore.tracks[0].importStatus).toBe('ready');
+    expect(tracksStore.tracks[0].importDecodeProgress).toBeUndefined();
   });
 
   it('finalizeImportWaveform creates a new tracks array reference', async () => {
@@ -195,6 +215,12 @@ describe('Import status reactivity: new array identity on transitions', () => {
     refs.push(tracksStore.tracks);
 
     tracksStore.setCachedAudioPath(trackId, '/tmp/cached.wav');
+    refs.push(tracksStore.tracks);
+
+    // Status stays 'caching' until explicit setImportReady
+    expect(tracksStore.tracks[0].importStatus).toBe('caching');
+
+    tracksStore.setImportReady(trackId);
     refs.push(tracksStore.tracks);
 
     // Every transition must produce a unique array reference
