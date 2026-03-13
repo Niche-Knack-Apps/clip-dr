@@ -186,8 +186,10 @@ export const useTracksStore = defineStore('tracks', () => {
     if (index === -1) return;
     useHistoryStore().pushState('Delete track');
 
-    // Remove associated transcription
-    useTranscriptionStore().removeTranscription(trackId);
+    // Remove associated transcription and cancel pending jobs
+    const transcriptionStore = useTranscriptionStore();
+    transcriptionStore.removeTranscription(trackId);
+    transcriptionStore.cancelJobsForTrack(trackId);
 
     tracks.value = tracks.value.filter((t) => t.id !== trackId);
     console.log('[Tracks] Deleted track:', trackId);

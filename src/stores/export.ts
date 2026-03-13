@@ -74,6 +74,10 @@ export const useExportStore = defineStore('export', () => {
    * Opens native save dialog with a single filter matching the profile format.
    */
   async function exportWithProfile(profile: ExportProfile): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     if (!canExport.value) {
       error.value = 'Nothing to export';
       return null;
@@ -324,6 +328,10 @@ export const useExportStore = defineStore('export', () => {
    * Export a single track using a specific profile.
    */
   async function exportTrackWithProfile(track: Track, profile: ExportProfile): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     console.log(`[Export] Starting single track export: "${track.name}", profile: ${profile.name}`);
     if (!tracksStore.hasAudio) {
       error.value = 'No audio loaded';
@@ -499,6 +507,10 @@ export const useExportStore = defineStore('export', () => {
   }
 
   async function exportWithSilenceRemoval(format: ExportFormat = 'wav'): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     const silenceStore = useSilenceStore();
 
     if (!tracksStore.hasAudio) {

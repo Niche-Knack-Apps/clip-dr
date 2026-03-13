@@ -571,6 +571,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     processNextJob();
   }
 
+  /** CON-H3: Cancel pending jobs for a deleted/removed track.
+   *  Running jobs can't be cancelled mid-flight (Rust whisper), but the result
+   *  will be discarded via the stale-track check in processNextJob. */
+  function cancelJobsForTrack(trackId: string): void {
+    const before = jobQueue.value.length;
+    jobQueue.value = jobQueue.value.filter(j => {
+      if (j.trackId === trackId && j.status === 'queued') return false;
+      return true;
+    });
+    const removed = before - jobQueue.value.length;
+    if (removed > 0) {
+      console.log(`[Transcription] Cancelled ${removed} queued job(s) for deleted track ${trackId}`);
+    }
+  }
+
   async function processNextJob(): Promise<void> {
     // Pick highest priority, oldest job
     const pending = jobQueue.value
@@ -600,9 +615,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     try {
       await runTranscriptionForTrack(job.trackId);
-      applyAutoTimemarks(job.trackId);
-      job.status = 'complete';
-      job.progress = 100;
+      // CON-H3: discard results if track was deleted during transcription
+      if (!tracksStore.tracks.some(t => t.id === job.trackId)) {
+        console.log(`[Transcription] Track ${job.trackId} deleted during transcription — discarding results`);
+        job.status = 'error';
+        job.error = 'Track deleted';
+      } else {
+        applyAutoTimemarks(job.trackId);
+        job.status = 'complete';
+        job.progress = 100;
+      }
     } catch (e) {
       job.status = 'error';
       job.error = e instanceof Error ? e.message : String(e);
@@ -924,6 +946,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     queueTranscription,
     loadOrQueueTranscription,
     removeTranscription,
+    cancelJobsForTrack,
     registerPendingTriggerPhrases,
     // Word editing
     setWordOffset,

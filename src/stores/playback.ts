@@ -31,6 +31,7 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   // Position polling
   let positionPollId: number | null = null;
+  let seekInFlight = false; // CON-M2: suppress poll overwrites during hot-seek
 
   // Track sync: hash of last synced track list to avoid redundant file reloads
   let lastSyncedTrackHash = '';
@@ -223,7 +224,10 @@ export const usePlaybackStore = defineStore('playback', () => {
           }
         }
 
-        currentTime.value = pos;
+        // CON-M2: don't overwrite currentTime if a seek is in flight
+        if (!seekInFlight) {
+          currentTime.value = pos;
+        }
       } catch (e) {
         console.warn('[Playback] Position poll error:', e);
       }
@@ -334,7 +338,13 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     if (isPlaying.value) {
       // Hot-seek: send position directly to Rust without pause/play cycle
-      await invoke('playback_seek', { position: seekTime });
+      // CON-M2: suppress poll overwrites until Rust acknowledges the seek
+      seekInFlight = true;
+      try {
+        await invoke('playback_seek', { position: seekTime });
+      } finally {
+        seekInFlight = false;
+      }
     }
   }
 
