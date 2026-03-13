@@ -531,22 +531,6 @@ export const usePlaybackStore = defineStore('playback', () => {
     }
   }
 
-  // Debug function
-  function testAudioOutput(): void {
-    const freshCtx = new AudioContext();
-    freshCtx.resume().then(() => {
-      const osc = freshCtx.createOscillator();
-      const testGain = freshCtx.createGain();
-      testGain.gain.value = 0.3;
-      osc.frequency.value = 440;
-      osc.connect(testGain);
-      testGain.connect(freshCtx.destination);
-      osc.start();
-      osc.stop(freshCtx.currentTime + 1);
-      console.log('[Playback] Test tone played');
-    });
-  }
-
   // Watch for track volume changes during playback — sync to Rust engine live
   // Uses hash-based approach (matching mute/solo watcher) to avoid deep comparison overhead
   let lastVolumeKey = 0;
@@ -684,7 +668,6 @@ export const usePlaybackStore = defineStore('playback', () => {
     getActiveTracks,
     getActiveRegion,
     getLoopRegion,
-    testAudioOutput,
     startHoldPlay,
     stopHoldPlay,
     startHoldReverse,
