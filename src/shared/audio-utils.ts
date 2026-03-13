@@ -53,19 +53,17 @@ export function encodeWav(buffer: AudioBuffer): Uint8Array {
   writeWavString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
 
-  // Interleave channels and write samples
-  let offset = 44;
+  // PERF-09: Use Int16Array for bulk sample writes instead of per-sample DataView
   const channels: Float32Array[] = [];
   for (let ch = 0; ch < numChannels; ch++) {
     channels.push(buffer.getChannelData(ch));
   }
 
+  const int16View = new Int16Array(arrayBuffer, headerSize);
   for (let i = 0; i < buffer.length; i++) {
     for (let ch = 0; ch < numChannels; ch++) {
       const sample = Math.max(-1, Math.min(1, channels[ch][i]));
-      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-      view.setInt16(offset, intSample, true);
-      offset += 2;
+      int16View[i * numChannels + ch] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
     }
   }
 
