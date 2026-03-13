@@ -393,7 +393,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         let writer_handle = spawn_wav_writer_thread(
             ring.clone(), audio_writer, channels, target_mono,
             output_path.clone(), spec, use_rf64,
-        );
+        )?;
 
         // Make ring buffer available to reader thread
         if let Ok(mut guard) = mgr.system_ring.lock() {

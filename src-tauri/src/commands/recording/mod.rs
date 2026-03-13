@@ -671,7 +671,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     let writer_handle = spawn_wav_writer_thread(
         ring.clone(), audio_writer, channels, target_mono,
         output_path.clone(), spec, use_rf64,
-    );
+    )?;
 
     // Drain pre-record buffer into ring buffer (prepends captured monitoring audio)
     let mut pre_record_secs = 0.0f64;
@@ -943,7 +943,7 @@ pub async fn start_multi_recording(
         let writer_handle = spawn_wav_writer_thread(
             ring.clone(), audio_writer, channels, target_mono,
             output_path.clone(), spec, use_rf64,
-        );
+        )?;
 
         // Start capture
         input.start().map_err(|e| format!("Failed to start multi-session '{}': {}", session_id, e))?;
@@ -1213,7 +1213,7 @@ pub async fn start_session(
     let writer_handle = spawn_wav_writer_thread(
         ring.clone(), audio_writer, channels, target_mono,
         output_path.clone(), spec, use_rf64,
-    );
+    )?;
 
     // Start capture
     input.start().map_err(|e| format!("Failed to start session '{}': {}", session_id, e))?;
