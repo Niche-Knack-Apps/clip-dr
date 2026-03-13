@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { SilenceRegion, Track } from '@/shared/types';
-import { encodeWav } from '@/shared/audio-utils';
+import { encodeWavFloat32 } from '@/shared/audio-utils';
 import { useVadStore } from './vad';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -304,7 +304,7 @@ export const useSilenceStore = defineStore('silence', () => {
       }
 
       // Encode to WAV and write to temp file
-      const wavData = encodeWav(mixedBuffer);
+      const wavData = encodeWavFloat32(mixedBuffer);
       const sourcePath = await writeTempFile(`cut_source_${Date.now()}.wav`, wavData);
 
       console.log('[CutSilence] Using current buffer state, temp file:', sourcePath);

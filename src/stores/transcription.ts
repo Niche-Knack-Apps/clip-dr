@@ -3,7 +3,7 @@ import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark, TranscriptionMetrics } from '@/shared/types';
-import { encodeWav } from '@/shared/audio-utils';
+import { encodeWavFloat32 } from '@/shared/audio-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
@@ -861,7 +861,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       progress.value = { stage: 'loading', progress: 20, message: 'Encoding audio...' };
     }
 
-    const wavData = encodeWav(mixedBuffer);
+    const wavData = encodeWavFloat32(mixedBuffer);
 
     const tempPath = await writeTempFile(`transcribe_buffer_${Date.now()}.wav`, wavData);
 

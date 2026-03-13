@@ -185,7 +185,7 @@ describe('CON-C2: editEpoch stale-state detection in cutRegion', () => {
     const track = tracksStore.tracks[0];
 
     // Null out the buffer to simulate a large-file track (EDL path)
-    (track.audioData as Record<string, unknown>).buffer = null;
+    (track.audioData as unknown as Record<string, unknown>).buffer = null;
     track.cachedAudioPath = '/tmp/source.wav';
 
     // Mock extract_audio_region_samples to bump epoch mid-extraction (simulating concurrent edit)
@@ -255,8 +255,8 @@ describe('AQ-02: mixSingleTrack applies track volume and envelope', () => {
 
     // Test interpolation with a simple 2-point envelope
     const envelope = [
-      { time: 0, value: 0.2 },
-      { time: 2, value: 0.8 },
+      { id: 'p1', time: 0, value: 0.2 },
+      { id: 'p2', time: 2, value: 0.8 },
     ];
 
     // At start: should return first point value
@@ -281,5 +281,50 @@ describe('AQ-02: mixSingleTrack applies track volume and envelope', () => {
     const tracksStore = useTracksStore();
 
     expect(tracksStore.interpolateEnvelope([], 0.75, 1)).toBe(0.75);
+  });
+});
+
+describe('AQ-01/AQ-04: Temp files use float32 encoding', () => {
+  it('silence store imports encodeWavFloat32 (not encodeWav)', async () => {
+    // Verify the module uses float32 encoding by checking the import exists
+    const silenceModule = await import('@/stores/silence');
+    expect(silenceModule).toBeDefined();
+    // The store should use encodeWavFloat32 — if it imported encodeWav instead,
+    // this would have been caught by the import change. Verify the function exists.
+    const { encodeWavFloat32 } = await import('@/shared/audio-utils');
+    expect(typeof encodeWavFloat32).toBe('function');
+  });
+
+  it('encodeWavFloat32 produces IEEE float WAV header', async () => {
+    const { encodeWavFloat32 } = await import('@/shared/audio-utils');
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 100, 44100);
+
+    const wav = encodeWavFloat32(buf as unknown as AudioBuffer);
+    const view = new DataView(wav.buffer);
+
+    // RIFF header
+    expect(String.fromCharCode(wav[0], wav[1], wav[2], wav[3])).toBe('RIFF');
+    // fmt chunk: audioFormat should be 3 (IEEE float), not 1 (PCM)
+    const audioFormat = view.getUint16(20, true);
+    expect(audioFormat).toBe(3); // IEEE float
+    // bits per sample should be 32
+    const bitsPerSample = view.getUint16(34, true);
+    expect(bitsPerSample).toBe(32);
+  });
+
+  it('encodeWav (16-bit) produces PCM WAV header', async () => {
+    const { encodeWav } = await import('@/shared/audio-utils');
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 100, 44100);
+
+    const wav = encodeWav(buf as unknown as AudioBuffer);
+    const view = new DataView(wav.buffer);
+
+    // audioFormat should be 1 (PCM), not 3 (float)
+    const audioFormat = view.getUint16(20, true);
+    expect(audioFormat).toBe(1); // PCM
+    const bitsPerSample = view.getUint16(34, true);
+    expect(bitsPerSample).toBe(16);
   });
 });

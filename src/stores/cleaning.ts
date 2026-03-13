@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
-import { encodeWav } from '@/shared/audio-utils';
+import { encodeWavFloat32 } from '@/shared/audio-utils';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -99,7 +99,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
         }
 
         // Encode to WAV and write to temp file
-        const wavData = encodeWav(mixedBuffer);
+        const wavData = encodeWavFloat32(mixedBuffer);
         sourcePath = await writeTempFile(`clean_source_${Date.now()}.wav`, wavData);
         cleanDuration = mixedBuffer.duration;
 
