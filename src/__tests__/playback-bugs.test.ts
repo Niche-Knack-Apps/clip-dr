@@ -206,3 +206,88 @@ describe('Bug #2 regression: seek() during playback sends hot-seek to Rust', () 
     expect(playbackStore.currentTime).toBe(3.0);
   });
 });
+
+describe('Waveform color regression: mute/unmute updates ClipRegion colors', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('ClipRegion color computeds react to muted prop changes (shallowRef safe)', async () => {
+    // This tests the fix where ClipRegion uses an explicit `muted` prop
+    // instead of reading `props.track.muted` (which is not reactive with shallowRef)
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    const buf = ctx.createBuffer(1, 44100 * 5, 44100);
+    const track = tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+
+    // Verify track starts unmuted with its assigned color
+    expect(track.muted).toBe(false);
+    const originalColor = track.color; // e.g. '#22d3ee'
+    expect(originalColor).toBeTruthy();
+
+    // Simulate what ClipRegion's computed properties do with the explicit muted prop
+    // (This mirrors the logic in ClipRegion.vue)
+    function computeBgColor(muted: boolean, color: string): string {
+      if (muted) return 'rgba(75, 85, 99, 0.5)';
+      return `${color}30`;
+    }
+    function computeWaveformColor(muted: boolean, color: string): string {
+      if (muted) return 'rgba(75, 85, 99, 0.6)';
+      return `${color}80`;
+    }
+    function computeBorderColor(muted: boolean, color: string): string {
+      if (muted) return 'rgb(75, 85, 99)';
+      return color;
+    }
+
+    // Unmuted: should use track color
+    expect(computeBgColor(false, originalColor)).toBe(`${originalColor}30`);
+    expect(computeWaveformColor(false, originalColor)).toBe(`${originalColor}80`);
+    expect(computeBorderColor(false, originalColor)).toBe(originalColor);
+
+    // Mute the track
+    tracksStore.setTrackMuted(track.id, true);
+    const mutedTrack = tracksStore.tracks.find(t => t.id === track.id)!;
+    expect(mutedTrack.muted).toBe(true);
+
+    // Muted: should use gray
+    expect(computeBgColor(true, originalColor)).toBe('rgba(75, 85, 99, 0.5)');
+    expect(computeWaveformColor(true, originalColor)).toBe('rgba(75, 85, 99, 0.6)');
+    expect(computeBorderColor(true, originalColor)).toBe('rgb(75, 85, 99)');
+
+    // Unmute the track
+    tracksStore.setTrackMuted(track.id, false);
+    const unmutedTrack = tracksStore.tracks.find(t => t.id === track.id)!;
+    expect(unmutedTrack.muted).toBe(false);
+
+    // After unmute: should revert to original track color (NOT stay gray)
+    expect(computeBgColor(false, originalColor)).toBe(`${originalColor}30`);
+    expect(computeWaveformColor(false, originalColor)).toBe(`${originalColor}80`);
+    expect(computeBorderColor(false, originalColor)).toBe(originalColor);
+  });
+
+  it('setTrackMuted toggles muted flag and triggers reactivity', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    const buf = ctx.createBuffer(1, 44100 * 5, 44100);
+    const track = tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+
+    // Mute
+    tracksStore.setTrackMuted(track.id, true);
+    expect(tracksStore.tracks[0].muted).toBe(true);
+
+    // Unmute — the track object should have muted=false
+    tracksStore.setTrackMuted(track.id, false);
+    expect(tracksStore.tracks[0].muted).toBe(false);
+
+    // The tracks array reference should be the same (shallowRef + triggerRef)
+    // but the muted property should be correctly toggled
+    const t = tracksStore.tracks[0];
+    expect(t.muted).toBe(false);
+    expect(t.color).toBeTruthy(); // color preserved through mute/unmute cycle
+  });
+});

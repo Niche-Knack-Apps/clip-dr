@@ -11,12 +11,15 @@ interface Props {
   isDragging?: boolean;
   draggingClipId?: string | null;
   isSelected?: boolean;
+  /** Explicit muted flag — ensures reactivity with shallowRef tracks */
+  muted?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isDragging: false,
   draggingClipId: null,
   isSelected: false,
+  muted: false,
 });
 
 const emit = defineEmits<{
@@ -46,12 +49,12 @@ const width = computed(() => {
 
 // Use track's color with opacity
 const bgColor = computed(() => {
-  if (props.track.muted) return 'rgba(75, 85, 99, 0.5)'; // gray-600/50
+  if (props.muted) return 'rgba(75, 85, 99, 0.5)'; // gray-600/50
   return `${props.track.color}30`; // 30 = ~19% opacity
 });
 
 const borderColor = computed(() => {
-  if (props.track.muted) return 'rgb(75, 85, 99)'; // gray-600
+  if (props.muted) return 'rgb(75, 85, 99)'; // gray-600
   if (props.isSelected) return 'rgba(255, 255, 255, 0.6)';
   return props.track.color;
 });
@@ -82,7 +85,7 @@ const peakTileCacheKey = ref('');
 
 // Waveform color: darker version of track color (~50% opacity)
 const waveformColor = computed(() => {
-  if (props.track.muted) return 'rgba(75, 85, 99, 0.6)';
+  if (props.muted) return 'rgba(75, 85, 99, 0.6)';
   return `${props.track.color}80`; // 80 = 50% opacity
 });
 

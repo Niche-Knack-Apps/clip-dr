@@ -542,6 +542,7 @@ onUnmounted(() => {
         :key="clip.id"
         :track="track"
         :clip="clip"
+        :muted="track.muted"
         :container-width="containerWidth"
         :duration="duration"
         :is-dragging="isClipDragging"
