@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed, triggerRef, watch } from 'vue';
+import { ref, shallowRef, computed, triggerRef, watch } from 'vue';
 import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent, VolumeAutomationPoint } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId, binarySearch } from '@/shared/utils';
@@ -22,7 +22,7 @@ export interface CutOptions {
 }
 
 export const useTracksStore = defineStore('tracks', () => {
-  const tracks = ref<Track[]>([]);
+  const tracks = shallowRef<Track[]>([]);
   // 'ALL' means composite view (default), string means specific track, null means nothing selected
   const selectedTrackId = ref<string | 'ALL' | null>('ALL');
   const viewMode = ref<ViewMode>('all');
@@ -218,7 +218,7 @@ export const useTracksStore = defineStore('tracks', () => {
       clips: undefined,
       duration: 0,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
     console.log('[Tracks] Cleared audio from track:', trackId);
   }
 
@@ -236,6 +236,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (track) {
       useHistoryStore().pushState('Toggle mute');
       track.muted = muted;
+      triggerRef(tracks);
     }
   }
 
@@ -266,6 +267,7 @@ export const useTracksStore = defineStore('tracks', () => {
         }
       }
       track.volume = clamped;
+      triggerRef(tracks);
     }
   }
 
@@ -274,6 +276,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (track) {
       useHistoryStore().pushState('Rename track');
       track.name = name;
+      triggerRef(tracks);
     }
   }
 
@@ -325,6 +328,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = tracks.value.find((t) => t.id === trackId);
     if (track) {
       track.trackStart = Math.max(0, newStart);
+      triggerRef(tracks);
     }
   }
 
@@ -358,7 +362,7 @@ export const useTracksStore = defineStore('tracks', () => {
           },
           duration: buffer.duration,
         };
-        tracks.value = [...tracks.value];
+        triggerRef(tracks);
       }
       console.log(`[Tracks] Set audio on empty track ${track.name}, duration: ${buffer.duration.toFixed(2)}s`);
       return true;
@@ -413,7 +417,7 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: newBuffer.duration,
       };
       // Trigger reactivity by reassigning the array
-      tracks.value = [...tracks.value];
+      triggerRef(tracks);
     }
 
     console.log(`[Tracks] Appended ${buffer.duration.toFixed(2)}s to track ${track.name}, new duration: ${newBuffer.duration.toFixed(2)}s`);
@@ -574,7 +578,7 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: newDuration,
             hasPeakPyramid: false,
           };
-          tracks.value = [...tracks.value];
+          triggerRef(tracks);
         }
 
         // CRITICAL: metadata split always proceeds — never return null on extraction failure
@@ -644,7 +648,7 @@ export const useTracksStore = defineStore('tracks', () => {
             clips: undefined,
             duration: 0,
           };
-          tracks.value = [...tracks.value];
+          triggerRef(tracks);
         }
         console.log('[Tracks] Entire track cut, kept empty');
       } else {
@@ -718,7 +722,7 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: lastClipEnd - firstClipStart,
         hasPeakPyramid: false,
       };
-      tracks.value = [...tracks.value];
+      triggerRef(tracks);
     }
 
     console.log(`[Tracks] Cut ${(cutEnd - cutStart).toFixed(2)}s from track, created ${newClips.length} clips`);
@@ -931,7 +935,7 @@ export const useTracksStore = defineStore('tracks', () => {
           clips: undefined,
           duration: 0,
         };
-        tracks.value = [...tracks.value];
+        triggerRef(tracks);
         console.log('[Tracks] All clips cut from track, kept empty');
       } else {
         deleteTrack(trackId);
@@ -950,7 +954,7 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: lastClipEnd - firstClipStart,
       hasPeakPyramid: false,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
 
     console.log(`[Tracks] Cut region from ${clips.length} clips, ${newClips.length} clips remain`);
     return { buffer: mixedCut, waveformData: cutWaveform };
@@ -1379,7 +1383,7 @@ export const useTracksStore = defineStore('tracks', () => {
       if (activeDrag.value?.trackId === trackId) {
         track.trackStart = activeDrag.value.position;
         activeDrag.value = null;
-        tracks.value = [...tracks.value];
+        triggerRef(tracks);
       }
       // Reset the timeline duration floor now that drag is complete.
       // During drag, minTimelineDuration prevents flickering, but after
@@ -1399,7 +1403,7 @@ export const useTracksStore = defineStore('tracks', () => {
     };
 
     // Trigger reactivity
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
 
     // Reset the timeline duration floor now that drag is complete.
     minTimelineDuration.value = 0;
@@ -1442,7 +1446,7 @@ export const useTracksStore = defineStore('tracks', () => {
         trackStart: firstClipStart,
         duration: lastClipEnd - firstClipStart,
       };
-      tracks.value = [...tracks.value];
+      triggerRef(tracks);
 
       // Clear clip selection if the deleted clip was selected
       if (selectedClipId.value === clipId) {
@@ -1475,7 +1479,7 @@ export const useTracksStore = defineStore('tracks', () => {
         clips: undefined,
         duration: 0,
       };
-      tracks.value = [...tracks.value];
+      triggerRef(tracks);
       console.log(`[Tracks] Removed main audio from track ${trackId}, track preserved`);
       return;
     }
@@ -1503,7 +1507,7 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: lastClipEnd - firstClipStart,
       };
     }
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
 
     if (selectedClipId.value === clipId) {
       selectedClipId.value = null;
@@ -1709,7 +1713,7 @@ export const useTracksStore = defineStore('tracks', () => {
       trackStart: firstClipStart,
       duration: lastClipEnd - firstClipStart,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
 
     console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip at playhead ${playheadTime.toFixed(2)}s in track ${track.name}`);
     return true;
@@ -1813,7 +1817,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importProgress: 1,
       importSessionId: undefined, // waveform session done
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
     // Propagate settled waveform into restored EDL clips (if any)
     finalizeClipWaveforms(trackId);
   }
@@ -1826,7 +1830,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
     tracks.value[idx] = { ...tracks.value[idx], clips };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
     // Fill waveforms immediately if parent waveform already available
     finalizeClipWaveforms(trackId);
   }
@@ -1857,7 +1861,7 @@ export const useTracksStore = defineStore('tracks', () => {
         return { ...clip, waveformData: parentWaveform.slice(startBucket * 2, endBucket * 2) };
       }),
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
   }
 
   // Update decode/fetch progress (hot path ~60Hz — mutate in-place, no array copy)
@@ -1889,7 +1893,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importProgress: undefined,
       importDecodeProgress: undefined,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
   }
 
   // Mark a track as too large for browser decode (waveform still works)
@@ -1904,7 +1908,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importProgress: undefined,
       importDecodeProgress: undefined,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
   }
 
   // Transition from 'large-file' to 'caching' — shows progress bar
@@ -1916,7 +1920,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importStatus: 'caching' as ImportStatus,
       importDecodeProgress: 0,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
   }
 
   // Set cached audio path and mark import as ready
@@ -1929,7 +1933,7 @@ export const useTracksStore = defineStore('tracks', () => {
       importStatus: 'ready' as ImportStatus,
       importDecodeProgress: undefined,
     };
-    tracks.value = [...tracks.value];
+    triggerRef(tracks);
   }
 
   function setHasPeakPyramid(trackId: string): void {
@@ -1955,6 +1959,7 @@ export const useTracksStore = defineStore('tracks', () => {
       source,
       color: source === 'manual' ? '#00d4ff' : '#fbbf24',
     });
+    triggerRef(tracks);
   }
 
   /** Update a timemark's time (for drag) — no history push (caller handles it at drag start) */
@@ -1965,6 +1970,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const mark = track.timemarks.find(m => m.id === timemarkId);
     if (mark) {
       mark.time = Math.max(0, newTime);
+      triggerRef(tracks);
     }
   }
 
@@ -1976,6 +1982,7 @@ export const useTracksStore = defineStore('tracks', () => {
     historyStore.pushState('Remove marker');
 
     track.timemarks = track.timemarks.filter(m => m.id !== timemarkId);
+    triggerRef(tracks);
   }
 
   /**
@@ -2004,6 +2011,7 @@ export const useTracksStore = defineStore('tracks', () => {
         }
         return m;
       });
+    triggerRef(tracks);
   }
 
   /**
@@ -2018,6 +2026,7 @@ export const useTracksStore = defineStore('tracks', () => {
       const absTime = track.trackStart + m.time;
       return absTime < deleteStart || absTime >= deleteEnd;
     });
+    triggerRef(tracks);
   }
 
   /**
@@ -2034,6 +2043,7 @@ export const useTracksStore = defineStore('tracks', () => {
       }
       return m;
     });
+    triggerRef(tracks);
   }
 
   // ── Volume Automation Envelope ──
@@ -2069,6 +2079,7 @@ export const useTracksStore = defineStore('tracks', () => {
       value: Math.max(0, Math.min(MAX_VOLUME_LINEAR, value)),
     });
     track.volumeEnvelope.sort((a, b) => a.time - b.time);
+    triggerRef(tracks);
   }
 
   /** Update a keyframe's position/value (no history — drag convention). */
@@ -2081,6 +2092,7 @@ export const useTracksStore = defineStore('tracks', () => {
       point.time = Math.max(0, time);
       point.value = Math.max(0, Math.min(MAX_VOLUME_LINEAR, value));
       track.volumeEnvelope.sort((a, b) => a.time - b.time);
+      triggerRef(tracks);
     }
   }
 
@@ -2090,6 +2102,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (!track?.volumeEnvelope) return;
     useHistoryStore().pushState('Remove volume point');
     track.volumeEnvelope = track.volumeEnvelope.filter(p => p.id !== pointId);
+    triggerRef(tracks);
   }
 
   /** Get interpolated volume at a specific time, falling back to track.volume. */
@@ -2120,6 +2133,7 @@ export const useTracksStore = defineStore('tracks', () => {
         }
         return p;
       });
+    triggerRef(tracks);
   }
 
   /** Adjust envelope after a delete (no ripple): remove points in [deleteStart, deleteEnd). */
@@ -2131,6 +2145,7 @@ export const useTracksStore = defineStore('tracks', () => {
       const absTime = track.trackStart + p.time;
       return absTime < deleteStart || absTime >= deleteEnd;
     });
+    triggerRef(tracks);
   }
 
   /** Adjust envelope after an insert: shift points at/after insertPoint right by insertDuration. */
@@ -2145,6 +2160,7 @@ export const useTracksStore = defineStore('tracks', () => {
       }
       return p;
     });
+    triggerRef(tracks);
   }
 
   // ── EDL helper functions ──
