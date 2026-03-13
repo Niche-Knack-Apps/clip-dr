@@ -246,7 +246,7 @@ fn system_audio_monitor_reader(stdout: ChildStdout, ctx: SysAudioReaderCtx) {
                         let used = wp.wrapping_sub(rp);
                         if used + samples.len() <= ring.capacity {
                             for (i, &s) in samples.iter().enumerate() {
-                                let idx = (wp + i) % ring.capacity;
+                                let idx = (wp + i) & ring.mask;
                                 unsafe { *ring.data_ptr.add(idx) = s; }
                             }
                             ring.write_pos.store(wp + samples.len(), Ordering::Release);

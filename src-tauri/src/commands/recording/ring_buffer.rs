@@ -9,6 +9,8 @@ pub struct RecordingRingBuffer {
     data: Box<[f32]>,
     pub data_ptr: *mut f32,
     pub capacity: usize,
+    /// Bitmask for fast modulo: capacity - 1 (always valid because capacity is power-of-two)
+    pub mask: usize,
     /// Total samples written by producer (monotonically increasing)
     pub write_pos: AtomicUsize,
     /// Total samples read by consumer (monotonically increasing)
@@ -30,12 +32,15 @@ unsafe impl Sync for RecordingRingBuffer {}
 
 impl RecordingRingBuffer {
     pub fn new(capacity: usize) -> Self {
+        // REC-H1: round to power-of-two for fast bitwise modulo
+        let capacity = capacity.max(1).next_power_of_two();
         let mut data = vec![0.0f32; capacity].into_boxed_slice();
         let data_ptr = data.as_mut_ptr();
         Self {
             data,
             data_ptr,
             capacity,
+            mask: capacity - 1,
             write_pos: AtomicUsize::new(0),
             read_pos: AtomicUsize::new(0),
             active: AtomicBool::new(true),
@@ -62,6 +67,7 @@ pub struct PreRecordBuffer {
     data: Box<[f32]>,
     data_ptr: *mut f32,
     capacity: usize,
+    mask: usize,
     /// Total samples written (monotonically increasing, wraps modulo capacity)
     write_pos: AtomicUsize,
     /// Number of valid samples (min(write_pos, capacity))
@@ -77,12 +83,14 @@ unsafe impl Sync for PreRecordBuffer {}
 
 impl PreRecordBuffer {
     pub fn new(capacity: usize, sample_rate: u32, channels: u16) -> Self {
+        let capacity = capacity.max(1).next_power_of_two();
         let mut data = vec![0.0f32; capacity].into_boxed_slice();
         let data_ptr = data.as_mut_ptr();
         Self {
             data,
             data_ptr,
             capacity,
+            mask: capacity - 1,
             write_pos: AtomicUsize::new(0),
             valid_samples: AtomicUsize::new(0),
             sample_rate,
@@ -94,7 +102,7 @@ impl PreRecordBuffer {
     pub fn write(&self, samples: &[f32]) {
         let wp = self.write_pos.load(Ordering::Relaxed);
         for (i, &s) in samples.iter().enumerate() {
-            let idx = (wp + i) % self.capacity;
+            let idx = (wp + i) & self.mask;
             unsafe { *self.data_ptr.add(idx) = s; }
         }
         self.write_pos.store(wp + samples.len(), Ordering::Release);
@@ -114,7 +122,7 @@ impl PreRecordBuffer {
         let mut out = Vec::with_capacity(valid);
         let start = if wp >= valid { wp - valid } else { 0 };
         for i in 0..valid {
-            let idx = (start + i) % self.capacity;
+            let idx = (start + i) & self.mask;
             out.push(unsafe { *self.data_ptr.add(idx) });
         }
 

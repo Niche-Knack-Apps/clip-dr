@@ -1677,7 +1677,7 @@ mod tests {
 
         // Write 4 samples
         for i in 0..4 {
-            let idx = i % ring.capacity;
+            let idx = i & ring.mask;
             unsafe { *ring.data_ptr.add(idx) = (i as f32) * 0.1; }
         }
         ring.write_pos.store(4, Ordering::Release);
@@ -1688,7 +1688,7 @@ mod tests {
         assert_eq!(wp - rp, 4);
 
         for i in 0..4 {
-            let idx = (rp + i) % ring.capacity;
+            let idx = (rp + i) & ring.mask;
             let val = unsafe { *ring.data_ptr.add(idx) };
             assert!((val - (i as f32) * 0.1).abs() < 1e-6, "sample {} mismatch: {}", i, val);
         }
@@ -1702,7 +1702,7 @@ mod tests {
 
         // Write 6 samples
         for i in 0..6 {
-            let idx = i % ring.capacity;
+            let idx = i & ring.mask;
             unsafe { *ring.data_ptr.add(idx) = i as f32; }
         }
         ring.write_pos.store(6, Ordering::Release);
@@ -1713,7 +1713,7 @@ mod tests {
         // Write 6 more (wraps: positions 6,7,0,1,2,3)
         for i in 6..12 {
             let wp = ring.write_pos.load(Ordering::Relaxed);
-            let idx = (wp + (i - 6)) % ring.capacity;
+            let idx = (wp + (i - 6)) & ring.mask;
             unsafe { *ring.data_ptr.add(idx) = i as f32; }
         }
         ring.write_pos.store(12, Ordering::Release);
@@ -1725,7 +1725,7 @@ mod tests {
         assert_eq!(available, 8);
 
         for i in 0..available {
-            let idx = (rp + i) % ring.capacity;
+            let idx = (rp + i) & ring.mask;
             let val = unsafe { *ring.data_ptr.add(idx) };
             assert!((val - (rp + i) as f32).abs() < 1e-6,
                 "wrap sample {} (pos {}) mismatch: got {}, expected {}", i, rp + i, val, rp + i);
@@ -1799,8 +1799,8 @@ mod tests {
             let mut ch0_clipped = 0usize;
             let mut ch1_clipped = 0usize;
             for i in 0..check_pairs {
-                let idx0 = (rp + i * 2) % ring.capacity;
-                let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                let idx0 = (rp + i * 2) & ring.mask;
+                let idx1 = (rp + i * 2 + 1) & ring.mask;
                 let s0 = unsafe { *ring.data_ptr.add(idx0) };
                 let s1 = unsafe { *ring.data_ptr.add(idx1) };
                 if s0.abs() >= 0.999 { ch0_clipped += 1; }
@@ -1839,8 +1839,8 @@ mod tests {
         let mut ch0_clipped = 0usize;
         let mut ch1_clipped = 0usize;
         for i in 0..check_pairs {
-            let idx0 = (rp + i * 2) % ring.capacity;
-            let idx1 = (rp + i * 2 + 1) % ring.capacity;
+            let idx0 = (rp + i * 2) & ring.mask;
+            let idx1 = (rp + i * 2 + 1) & ring.mask;
             let s0 = unsafe { *ring.data_ptr.add(idx0) };
             let s1 = unsafe { *ring.data_ptr.add(idx1) };
             if s0.abs() >= 0.999 { ch0_clipped += 1; }
@@ -1869,8 +1869,8 @@ mod tests {
         let mut ch0_clipped = 0usize;
         let mut ch1_clipped = 0usize;
         for i in 0..check_pairs {
-            let s0 = unsafe { *ring.data_ptr.add((rp + i * 2) % ring.capacity) };
-            let s1 = unsafe { *ring.data_ptr.add((rp + i * 2 + 1) % ring.capacity) };
+            let s0 = unsafe { *ring.data_ptr.add((rp + i * 2) & ring.mask) };
+            let s1 = unsafe { *ring.data_ptr.add((rp + i * 2 + 1) & ring.mask) };
             if s0.abs() >= 0.999 { ch0_clipped += 1; }
             if s1.abs() >= 0.999 { ch1_clipped += 1; }
         }

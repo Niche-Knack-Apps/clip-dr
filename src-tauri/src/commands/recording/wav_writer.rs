@@ -67,8 +67,8 @@ pub fn spawn_wav_writer_thread(
                     let mut ch0_clipped = 0usize;
                     let mut ch1_clipped = 0usize;
                     for i in 0..check_pairs {
-                        let idx0 = (rp + i * 2) % ring.capacity;
-                        let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                        let idx0 = (rp + i * 2) & ring.mask;
+                        let idx1 = (rp + i * 2 + 1) & ring.mask;
                         let s0 = unsafe { *ring.data_ptr.add(idx0) };
                         let s1 = unsafe { *ring.data_ptr.add(idx1) };
                         if s0.abs() >= 0.999 { ch0_clipped += 1; }
@@ -130,8 +130,8 @@ pub fn spawn_wav_writer_thread(
                     // Write with bad-channel fixup (replace bad channel with good one)
                     let pairs = available / 2;
                     for i in 0..pairs {
-                        let idx0 = (rp + i * 2) % ring.capacity;
-                        let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                        let idx0 = (rp + i * 2) & ring.mask;
+                        let idx1 = (rp + i * 2 + 1) & ring.mask;
                         let s0 = unsafe { *ring.data_ptr.add(idx0) };
                         let s1 = unsafe { *ring.data_ptr.add(idx1) };
                         if bad_ch == 1 {
@@ -190,7 +190,7 @@ pub fn spawn_wav_writer_thread(
                 } else {
                     // Normal path: write all samples directly
                     for i in 0..available {
-                        let idx = (rp + i) % ring.capacity;
+                        let idx = (rp + i) & ring.mask;
                         let sample = unsafe { *ring.data_ptr.add(idx) };
                         match writer.write_sample(sample) {
                             Ok(_) => { consecutive_errors = 0; }
@@ -224,7 +224,7 @@ pub fn spawn_wav_writer_thread(
             let rp = ring.read_pos.load(std::sync::atomic::Ordering::Relaxed);
             let remaining = wp.wrapping_sub(rp);
             for i in 0..remaining {
-                let idx = (rp + i) % ring.capacity;
+                let idx = (rp + i) & ring.mask;
                 let sample = unsafe { *ring.data_ptr.add(idx) };
                 match writer.write_sample(sample) {
                     Ok(_) => { consecutive_errors = 0; }
@@ -518,7 +518,7 @@ mod tests {
         let sample_count = 100usize;
         for i in 0..sample_count {
             unsafe {
-                *ring.data_ptr.add(i % ring.capacity) = (i as f32) / 1000.0;
+                *ring.data_ptr.add(i & ring.mask) = (i as f32) / 1000.0;
             }
         }
         ring.write_pos.store(sample_count, Ordering::Release);
@@ -548,5 +548,38 @@ mod tests {
         let base = PathBuf::from("/tmp/rec.wav");
         let p2 = segment_path(&base, 2);
         assert_eq!(p2, PathBuf::from("/tmp/rec_002.wav"));
+    }
+
+    /// REC-H1 regression: ring buffer capacity is always power-of-two.
+    #[test]
+    fn ring_buffer_capacity_is_power_of_two() {
+        // Non-power-of-two input should be rounded up
+        let ring = RecordingRingBuffer::new(5000);
+        assert!(ring.capacity.is_power_of_two(), "capacity must be power of two");
+        assert!(ring.capacity >= 5000, "capacity must be >= requested");
+        assert_eq!(ring.capacity, 8192); // next power of two above 5000
+        assert_eq!(ring.mask, 8191);
+
+        // Already power-of-two input should stay the same
+        let ring2 = RecordingRingBuffer::new(4096);
+        assert_eq!(ring2.capacity, 4096);
+        assert_eq!(ring2.mask, 4095);
+    }
+
+    /// REC-H1 regression: bitwise mask indexing works correctly for wrap-around.
+    #[test]
+    fn ring_buffer_mask_wraps_correctly() {
+        let ring = Arc::new(RecordingRingBuffer::new(16)); // will stay 16 (already power-of-two)
+        assert_eq!(ring.capacity, 16);
+
+        // Write at position 15 (last slot) and 16 (should wrap to 0)
+        unsafe {
+            *ring.data_ptr.add(15 & ring.mask) = 1.0;
+            *ring.data_ptr.add(16 & ring.mask) = 2.0; // wraps to index 0
+        }
+        unsafe {
+            assert_eq!(*ring.data_ptr.add(15), 1.0);
+            assert_eq!(*ring.data_ptr.add(0), 2.0);
+        }
     }
 }
