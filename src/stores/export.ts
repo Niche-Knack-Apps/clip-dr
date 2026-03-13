@@ -468,6 +468,8 @@ export const useExportStore = defineStore('export', () => {
    * Mix a single track's clips into an AudioBuffer.
    */
   function mixSingleTrack(trackId: string, audioContext: AudioContext): AudioBuffer | null {
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (!track) return null;
     const clips = tracksStore.getTrackClips(trackId);
     if (clips.length === 0) return null;
 
@@ -490,6 +492,10 @@ export const useExportStore = defineStore('export', () => {
     const numChannels = Math.max(...bufferedClips.map(c => c.buffer.numberOfChannels));
     const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
 
+    // AQ-02: apply track volume + volume envelope (matches mixActiveTracks behaviour)
+    const trackVolume = track.volume;
+    const hasEnvelope = track.volumeEnvelope && track.volumeEnvelope.length > 0;
+
     for (const clip of bufferedClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
       for (let ch = 0; ch < numChannels; ch++) {
@@ -498,7 +504,13 @@ export const useExportStore = defineStore('export', () => {
         const inputData = clip.buffer.getChannelData(inputCh);
         for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
           if (startSample + i >= 0) {
-            outputData[startSample + i] += inputData[i];
+            let vol = trackVolume;
+            if (hasEnvelope) {
+              const timelineTime = timelineStart + (startSample + i) / sampleRate;
+              const trackRelTime = timelineTime - track.trackStart;
+              vol = tracksStore.interpolateEnvelope(track.volumeEnvelope!, trackVolume, trackRelTime);
+            }
+            outputData[startSample + i] += inputData[i] * vol;
           }
         }
       }

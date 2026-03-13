@@ -519,7 +519,14 @@ export const useTracksStore = defineStore('tracks', () => {
         let cutWaveform: number[] = [];
 
         if (mode === 'extract-for-clipboard') {
+          const epochAtEntry = track.editEpoch ?? 0;
           cutBuffer = await extractRegionViaRust(track, cutStart, cutEnd, audioContext);
+          // CON-C2: abort if another operation mutated this track during extraction
+          const freshTrack = tracks.value.find(t => t.id === trackId);
+          if (!freshTrack || (freshTrack.editEpoch ?? 0) !== epochAtEntry) {
+            console.warn('[Tracks] cutRegion (single-buffer): track modified during extraction, aborting');
+            return null;
+          }
           if (cutBuffer) cutWaveform = generateWaveformFromBuffer(cutBuffer);
         }
 

@@ -455,6 +455,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
         : undefined;
       const pasteSourceFile = sourceTrack?.cachedAudioPath || sourceTrack?.sourcePath;
 
+      // EDL-H1: pass the source region start as sourceOffset so the pasted
+      // clip knows where in the original file its audio came from
+      const pasteSourceOffset = clipboard.value.sourceRegion.start;
+
       const success = tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
@@ -462,7 +466,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         playheadTime,
         ctx,
         pasteSourceFile,
-        0
+        pasteSourceOffset
       );
 
       if (success) {
