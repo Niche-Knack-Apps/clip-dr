@@ -427,7 +427,7 @@ defineExpose({ focusSearch });
 
         <!-- Recording Panel Popover -->
         <div
-          v-if="showRecordingPanel"
+          v-show="showRecordingPanel"
           class="absolute top-full left-0 mt-2 z-50"
           :style="recordingPanelStyle"
         >

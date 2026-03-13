@@ -268,6 +268,9 @@ export const usePlaybackStore = defineStore('playback', () => {
 
       // Sync state to Rust engine (only reloads files if track list changed)
       await syncTracksToRust();
+      // Always sync mute/solo — syncTracksToRust() skips when track hash
+      // is unchanged, but mute/solo state is NOT part of that hash.
+      await syncMuteSoloToRust();
       await syncLoopToRust();
       await invoke('playback_set_speed', { speed: playbackSpeed.value });
       await invoke('playback_set_volume', { volume: volume.value });
@@ -320,11 +323,6 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   async function seek(time: number): Promise<void> {
-    const wasPlaying = isPlaying.value;
-    if (wasPlaying) {
-      pause();
-    }
-
     let seekTime = Math.max(0, Math.min(time, getEffectiveDuration()));
 
     // If skip-silence is enabled and seeking into silence, snap forward
@@ -334,8 +332,9 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     currentTime.value = seekTime;
 
-    if (wasPlaying) {
-      await play();
+    if (isPlaying.value) {
+      // Hot-seek: send position directly to Rust without pause/play cycle
+      await invoke('playback_seek', { position: seekTime });
     }
   }
 
