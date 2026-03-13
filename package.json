@@ -11,7 +11,8 @@
     "build:release": "cd src-tauri && cargo clean --release && cd .. && tauri build && ./scripts/copy-to-releases.sh; bash scripts/prepare-models.sh --cleanup",
     "test": "vitest run",
     "lint": "eslint src --ext .ts,.vue",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "clean": "rm -rf src-tauri/target dist"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
