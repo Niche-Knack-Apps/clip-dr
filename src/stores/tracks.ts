@@ -23,6 +23,21 @@ export interface CutOptions {
 
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = shallowRef<Track[]>([]);
+
+  // PERF-06: O(1) track lookup by ID — rebuilt when tracks array reference changes
+  const trackMap = computed(() => {
+    const map = new Map<string, Track>();
+    for (const t of tracks.value) {
+      map.set(t.id, t);
+    }
+    return map;
+  });
+
+  /** O(1) track lookup by ID (uses computed Map, avoids linear scan). */
+  function getTrackById(id: string): Track | undefined {
+    return trackMap.value.get(id);
+  }
+
   // 'ALL' means composite view (default), string means specific track, null means nothing selected
   const selectedTrackId = ref<string | 'ALL' | null>('ALL');
   const viewMode = ref<ViewMode>('all');
@@ -76,7 +91,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (selectedTrackId.value === 'ALL' || selectedTrackId.value === null) {
       return null;
     }
-    return tracks.value.find((t) => t.id === selectedTrackId.value) ?? null;
+    return getTrackById(selectedTrackId.value) ?? null;
   });
 
   // Computed: Timeline duration is the max end time of all tracks
@@ -260,7 +275,7 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function setTrackVolume(trackId: string, volume: number, skipHistory = false): void {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (track) {
       if (!skipHistory) useHistoryStore().pushState('Set volume');
       const clamped = Math.max(0, Math.min(MAX_VOLUME_LINEAR, volume));
@@ -277,7 +292,7 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function renameTrack(trackId: string, name: string): void {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (track) {
       useHistoryStore().pushState('Rename track');
       track.name = name;
@@ -318,19 +333,19 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Get the audio buffer for a specific track
   function getBufferForTrack(trackId: string): AudioBuffer | null {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     return track?.audioData.buffer ?? null;
   }
 
   // Get waveform data for a specific track
   function getWaveformForTrack(trackId: string): number[] | null {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     return track?.audioData.waveformData ?? null;
   }
 
   // Move a track to a new position on the timeline
   function setTrackStart(trackId: string, newStart: number): void {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (track) {
       track.trackStart = Math.max(0, newStart);
       triggerRef(tracks);
@@ -343,7 +358,7 @@ export const useTracksStore = defineStore('tracks', () => {
     buffer: AudioBuffer,
     audioContext: AudioContext
   ): boolean {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) {
       console.error('[Tracks] Track not found:', trackId);
       return false;
@@ -486,7 +501,7 @@ export const useTracksStore = defineStore('tracks', () => {
     audioContext: AudioContext,
     opts: CutOptions = {}
   ): Promise<{ buffer: AudioBuffer | null; waveformData: number[] } | null> {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) {
       console.error('[Tracks] Track not found:', trackId);
       return null;
@@ -522,7 +537,7 @@ export const useTracksStore = defineStore('tracks', () => {
           const epochAtEntry = track.editEpoch ?? 0;
           cutBuffer = await extractRegionViaRust(track, cutStart, cutEnd, audioContext);
           // CON-C2: abort if another operation mutated this track during extraction
-          const freshTrack = tracks.value.find(t => t.id === trackId);
+          const freshTrack = getTrackById(trackId);
           if (!freshTrack || (freshTrack.editEpoch ?? 0) !== epochAtEntry) {
             console.warn('[Tracks] cutRegion (single-buffer): track modified during extraction, aborting');
             return null;
@@ -786,7 +801,7 @@ export const useTracksStore = defineStore('tracks', () => {
           const extractTrack = { ...track, cachedAudioPath: clip.sourceFile, sourcePath: clip.sourceFile };
           const cutBuf = await extractRegionViaRust(extractTrack, clipSourceOffset + cutStartInClip, clipSourceOffset + cutEndInClip, audioContext);
           // CON-C2: abort if another operation mutated this track while we were extracting
-          const freshTrack = tracks.value.find(t => t.id === trackId);
+          const freshTrack = getTrackById(trackId);
           if (!freshTrack || (freshTrack.editEpoch ?? 0) !== epochAtEntry) {
             console.warn('[Tracks] cutRegionFromClips: track modified during extraction, aborting');
             return null;
@@ -974,7 +989,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Get all clips for a track (returns single-element array if no clips defined)
   function getTrackClips(trackId: string): TrackClip[] {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) return [];
 
     if (track.clips && track.clips.length > 0) {
@@ -1023,7 +1038,7 @@ export const useTracksStore = defineStore('tracks', () => {
     clipDuration: number,
     snapEnabled: boolean
   ): number {
-    const track = tracks.value.find((t) => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) return Math.max(0, desiredStart);
 
     // Get all other clips in the same track
@@ -1264,7 +1279,7 @@ export const useTracksStore = defineStore('tracks', () => {
     // Step 1: Cut the region from every track that overlaps [inPoint, outPoint]
     const trackIds = tracks.value.map(t => t.id);
     for (const trackId of trackIds) {
-      const track = tracks.value.find(t => t.id === trackId);
+      const track = getTrackById(trackId);
       if (!track) continue;
 
       const trackEnd = track.trackStart + track.duration;
@@ -1536,7 +1551,7 @@ export const useTracksStore = defineStore('tracks', () => {
     splitTime: number,
     audioContext: AudioContext
   ): { before: TrackClip; after: TrackClip } | null {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) return null;
 
     const clips = getTrackClips(trackId);
@@ -1855,7 +1870,7 @@ export const useTracksStore = defineStore('tracks', () => {
    * Waveforms are eventually-consistent UI data — empty arrays are valid.
    */
   function finalizeClipWaveforms(trackId: string): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.clips || track.clips.length === 0) return;
     const parentWaveform = track.audioData.waveformData;
     if (parentWaveform.length === 0) return;
@@ -1973,7 +1988,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Add a timemark to any track (not just during recording) */
   function addTimemark(trackId: string, time: number, label: string, source: 'manual' | 'auto' = 'manual'): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) return;
 
     const historyStore = useHistoryStore();
@@ -1992,7 +2007,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Update a timemark's time (for drag) — no history push (caller handles it at drag start) */
   function updateTimemarkTime(trackId: string, timemarkId: string, newTime: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track || !track.timemarks) return;
 
     const mark = track.timemarks.find(m => m.id === timemarkId);
@@ -2003,7 +2018,7 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function removeTrackTimemark(trackId: string, timemarkId: string): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.timemarks) return;
 
     const historyStore = useHistoryStore();
@@ -2019,7 +2034,7 @@ export const useTracksStore = defineStore('tracks', () => {
    * Skips tracks that don't overlap the cut region (prevents double-shift with slideTracksLeft).
    */
   function adjustTimemarksForCut(trackId: string, cutStart: number, cutEnd: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.timemarks || track.timemarks.length === 0) return;
 
     const trackEnd = track.trackStart + track.duration;
@@ -2047,7 +2062,7 @@ export const useTracksStore = defineStore('tracks', () => {
    * Gap stays open, so no shifting.
    */
   function adjustTimemarksForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.timemarks || track.timemarks.length === 0) return;
 
     track.timemarks = track.timemarks.filter(m => {
@@ -2061,7 +2076,7 @@ export const useTracksStore = defineStore('tracks', () => {
    * Adjust timemarks after an insert: shift marks at/after insertPoint right by insertDuration.
    */
   function adjustTimemarksForInsert(trackId: string, insertPoint: number, insertDuration: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.timemarks || track.timemarks.length === 0) return;
 
     track.timemarks = track.timemarks.map(m => {
@@ -2096,7 +2111,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Add a keyframe to a track's volume envelope. */
   function addVolumePoint(trackId: string, time: number, value: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) return;
     useHistoryStore().pushState('Add volume point');
 
@@ -2112,7 +2127,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Update a keyframe's position/value (no history — drag convention). */
   function updateVolumePoint(trackId: string, pointId: string, time: number, value: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.volumeEnvelope) return;
 
     const point = track.volumeEnvelope.find(p => p.id === pointId);
@@ -2126,23 +2141,56 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Remove a keyframe from a track's volume envelope. */
   function removeVolumePoint(trackId: string, pointId: string): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.volumeEnvelope) return;
     useHistoryStore().pushState('Remove volume point');
     track.volumeEnvelope = track.volumeEnvelope.filter(p => p.id !== pointId);
     triggerRef(tracks);
   }
 
+  /**
+   * PERF-15: Create a stateful envelope walker for sequential (monotonic-time) access.
+   * Returns a function that, given a time, returns the interpolated value.
+   * Amortised O(1) per call when called with non-decreasing times (export loops).
+   */
+  function createEnvelopeWalker(envelope: VolumeAutomationPoint[], fallback: number): (time: number) => number {
+    if (!envelope || envelope.length === 0) return () => fallback;
+    if (envelope.length === 1) return () => envelope[0].value;
+
+    let cursor = 0; // index of the upper-bound point of the current segment
+
+    return (time: number): number => {
+      if (time <= envelope[0].time) return envelope[0].value;
+      if (time >= envelope[envelope.length - 1].time) return envelope[envelope.length - 1].value;
+
+      // Advance cursor forward if needed (sequential access pattern)
+      while (cursor < envelope.length && envelope[cursor].time < time) {
+        cursor++;
+      }
+      // Back up if we overshot (shouldn't happen with monotonic input, but safe)
+      while (cursor > 0 && envelope[cursor - 1].time >= time) {
+        cursor--;
+      }
+      // Ensure cursor >= 1 for segment interpolation
+      if (cursor === 0) cursor = 1;
+
+      const a = envelope[cursor - 1];
+      const b = envelope[cursor];
+      const t = (time - a.time) / (b.time - a.time);
+      return a.value + (b.value - a.value) * t;
+    };
+  }
+
   /** Get interpolated volume at a specific time, falling back to track.volume. */
   function getVolumeAtTime(trackId: string, time: number): number {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track) return 1;
     return interpolateEnvelope(track.volumeEnvelope ?? [], track.volume, time);
   }
 
   /** Adjust envelope after a cut (ripple): remove points in [cutStart, cutEnd), shift after left. */
   function adjustVolumeEnvelopeForCut(trackId: string, cutStart: number, cutEnd: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
 
     const trackEnd = track.trackStart + track.duration;
@@ -2166,7 +2214,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Adjust envelope after a delete (no ripple): remove points in [deleteStart, deleteEnd). */
   function adjustVolumeEnvelopeForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
 
     track.volumeEnvelope = track.volumeEnvelope.filter(p => {
@@ -2178,7 +2226,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Adjust envelope after an insert: shift points at/after insertPoint right by insertDuration. */
   function adjustVolumeEnvelopeForInsert(trackId: string, insertPoint: number, insertDuration: number): void {
-    const track = tracks.value.find(t => t.id === trackId);
+    const track = getTrackById(trackId);
     if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
 
     track.volumeEnvelope = track.volumeEnvelope.map(p => {
@@ -2390,6 +2438,8 @@ export const useTracksStore = defineStore('tracks', () => {
 
   return {
     tracks,
+    trackMap,
+    getTrackById,
     selectedTrackId,
     selectedClipId,
     viewMode,
@@ -2440,6 +2490,7 @@ export const useTracksStore = defineStore('tracks', () => {
     adjustTimemarksForDelete,
     adjustTimemarksForInsert,
     interpolateEnvelope,
+    createEnvelopeWalker,
     addVolumePoint,
     updateVolumePoint,
     removeVolumePoint,

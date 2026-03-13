@@ -495,6 +495,10 @@ export const useExportStore = defineStore('export', () => {
     // AQ-02: apply track volume + volume envelope (matches mixActiveTracks behaviour)
     const trackVolume = track.volume;
     const hasEnvelope = track.volumeEnvelope && track.volumeEnvelope.length > 0;
+    // PERF-15: linear-walk envelope interpolation for sequential export access
+    const envelopeWalker = hasEnvelope
+      ? tracksStore.createEnvelopeWalker(track.volumeEnvelope!, trackVolume)
+      : null;
 
     for (const clip of bufferedClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
@@ -505,10 +509,10 @@ export const useExportStore = defineStore('export', () => {
         for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
           if (startSample + i >= 0) {
             let vol = trackVolume;
-            if (hasEnvelope) {
+            if (envelopeWalker) {
               const timelineTime = timelineStart + (startSample + i) / sampleRate;
               const trackRelTime = timelineTime - track.trackStart;
-              vol = tracksStore.interpolateEnvelope(track.volumeEnvelope!, trackVolume, trackRelTime);
+              vol = envelopeWalker(trackRelTime);
             }
             outputData[startSample + i] += inputData[i] * vol;
           }
@@ -644,8 +648,11 @@ export const useExportStore = defineStore('export', () => {
 
     for (const clip of allClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
-      // Determine if we need per-sample envelope evaluation
+      // PERF-15: linear-walk envelope interpolation for sequential export access
       const hasEnvelope = clip.volumeEnvelope && clip.volumeEnvelope.length > 0;
+      const envelopeWalker = hasEnvelope
+        ? tracksStore.createEnvelopeWalker(clip.volumeEnvelope!, clip.volume)
+        : null;
 
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = mixedBuffer.getChannelData(ch);
@@ -654,11 +661,10 @@ export const useExportStore = defineStore('export', () => {
         for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
           if (startSample + i >= 0) {
             let vol = clip.volume;
-            if (hasEnvelope) {
-              // Compute track-relative time for this sample
+            if (envelopeWalker) {
               const timelineTime = timelineStart + (startSample + i) / sampleRate;
               const trackRelTime = timelineTime - clip.trackStart;
-              vol = tracksStore.interpolateEnvelope(clip.volumeEnvelope!, clip.volume, trackRelTime);
+              vol = envelopeWalker(trackRelTime);
             }
             outputData[startSample + i] += inputData[i] * vol;
           }

@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "clip-dr"
-version = "0.19.18"
+version = "0.19.19"
 dependencies = [
  "biquad",
  "chrono",

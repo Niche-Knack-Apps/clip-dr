@@ -328,3 +328,128 @@ describe('AQ-01/AQ-04: Temp files use float32 encoding', () => {
     expect(bitsPerSample).toBe(16);
   });
 });
+
+describe('PERF-06: O(1) track lookup via trackMap', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('getTrackById returns correct track', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    tracksStore.createTrackFromBuffer(buf, null, 'Track A', 0);
+    tracksStore.createTrackFromBuffer(buf, null, 'Track B', 0);
+
+    const trackA = tracksStore.tracks[0];
+    const trackB = tracksStore.tracks[1];
+
+    expect(tracksStore.getTrackById(trackA.id)?.name).toBe('Track A');
+    expect(tracksStore.getTrackById(trackB.id)?.name).toBe('Track B');
+  });
+
+  it('getTrackById returns undefined for missing id', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    expect(tracksStore.getTrackById('nonexistent')).toBeUndefined();
+  });
+
+  it('trackMap updates when tracks change', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    tracksStore.createTrackFromBuffer(buf, null, 'First', 0);
+    const firstId = tracksStore.tracks[0].id;
+
+    expect(tracksStore.getTrackById(firstId)).toBeDefined();
+
+    // Add another track — map should include both
+    tracksStore.createTrackFromBuffer(buf, null, 'Second', 0);
+    const secondId = tracksStore.tracks[1].id;
+
+    expect(tracksStore.getTrackById(firstId)).toBeDefined();
+    expect(tracksStore.getTrackById(secondId)).toBeDefined();
+  });
+});
+
+describe('PERF-15: createEnvelopeWalker for sequential access', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('produces identical results to interpolateEnvelope for sequential times', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const envelope = [
+      { id: 'p1', time: 0, value: 0.0 },
+      { id: 'p2', time: 1, value: 0.5 },
+      { id: 'p3', time: 2, value: 1.0 },
+      { id: 'p4', time: 4, value: 0.3 },
+    ];
+    const fallback = 0.75;
+
+    const walker = tracksStore.createEnvelopeWalker(envelope, fallback);
+
+    // Test at many sequential points
+    const times = [-0.5, 0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+    for (const t of times) {
+      const expected = tracksStore.interpolateEnvelope(envelope, fallback, t);
+      const actual = walker(t);
+      expect(actual).toBeCloseTo(expected, 10);
+    }
+  });
+
+  it('returns fallback for empty envelope', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const walker = tracksStore.createEnvelopeWalker([], 0.42);
+    expect(walker(0)).toBe(0.42);
+    expect(walker(100)).toBe(0.42);
+  });
+
+  it('returns single value for single-point envelope', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const envelope = [{ id: 'p1', time: 1, value: 0.6 }];
+    const walker = tracksStore.createEnvelopeWalker(envelope, 0.5);
+
+    expect(walker(0)).toBe(0.6);
+    expect(walker(1)).toBe(0.6);
+    expect(walker(99)).toBe(0.6);
+  });
+
+  it('handles many sequential samples efficiently (smoke test)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    // Create a 100-point envelope
+    const envelope = Array.from({ length: 100 }, (_, i) => ({
+      id: `p${i}`,
+      time: i * 0.1,
+      value: Math.sin(i * 0.1),
+    }));
+
+    const walker = tracksStore.createEnvelopeWalker(envelope, 0);
+
+    // Simulate 44100 samples over the envelope range (10 seconds)
+    const sampleRate = 44100;
+    const duration = 10;
+    const numSamples = sampleRate * duration;
+
+    let sum = 0;
+    for (let i = 0; i < numSamples; i++) {
+      sum += walker(i / sampleRate);
+    }
+
+    // Just verify it ran without error and produced a finite result
+    expect(Number.isFinite(sum)).toBe(true);
+  });
+});
