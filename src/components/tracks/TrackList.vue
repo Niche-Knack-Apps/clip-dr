@@ -483,8 +483,6 @@ function handleClipSelect(trackId: string, clipId: string) {
         >
           <TrackLane
             :track="track"
-            :muted="track.muted"
-            :solo="track.solo"
             :is-selected="track.id === selectedTrackId"
             @select="selectTrack"
             @toggle-mute="toggleMute"

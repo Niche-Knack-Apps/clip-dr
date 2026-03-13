@@ -232,11 +232,14 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function setTrackMuted(trackId: string, muted: boolean): void {
-    const track = tracks.value.find((t) => t.id === trackId);
-    if (track) {
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx !== -1) {
       useHistoryStore().pushState('Toggle mute');
-      track.muted = muted;
-      triggerRef(tracks);
+      // Create new array + new track object so shallowRef detects the change
+      // (in-place mutation + triggerRef doesn't propagate through computed wrappers)
+      const updated = [...tracks.value];
+      updated[idx] = { ...updated[idx], muted };
+      tracks.value = updated;
     }
   }
 
