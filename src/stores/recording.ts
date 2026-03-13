@@ -518,12 +518,17 @@ export const useRecordingStore = defineStore('recording', () => {
         }
       }, 100);
 
-      // Start duration counter
-      durationInterval = window.setInterval(() => {
-        recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
-        // Sync session duration
-        if (sessions.value.length > 0) {
-          sessions.value[0].duration = recordingDuration.value;
+      // TIME-02: Duration from actual sample count (not wall clock)
+      durationInterval = window.setInterval(async () => {
+        try {
+          recordingDuration.value = await invoke<number>('get_recording_duration_secs');
+          // Sync session duration
+          if (sessions.value.length > 0) {
+            sessions.value[0].duration = recordingDuration.value;
+          }
+        } catch {
+          // Fallback to wall clock if IPC fails
+          recordingDuration.value = (Date.now() - recordingStartTime) / 1000;
         }
       }, 100);
 

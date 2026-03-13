@@ -383,8 +383,9 @@ pub async fn extract_audio_region_samples(
     };
 
     let ch = channels as usize;
-    let start_frame = (start_time * sample_rate as f64) as usize;
-    let end_frame = (end_time * sample_rate as f64) as usize;
+    // TIME-06: floor start boundary, ceil end boundary to avoid losing edge samples
+    let start_frame = (start_time * sample_rate as f64).floor() as usize;
+    let end_frame = (end_time * sample_rate as f64).ceil() as usize;
 
     let samples = pcm.samples();
     let total_frames = samples.len() / ch;

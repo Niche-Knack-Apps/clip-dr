@@ -275,7 +275,8 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
     // Sort by timeline position for deterministic mixing
     sources.sort_by(|a, b| a.track_start.partial_cmp(&b.track_start).unwrap_or(std::cmp::Ordering::Equal));
 
-    let total_frames = ((edl.end_time - edl.start_time) * edl.sample_rate as f64) as usize;
+    // TIME-07: ceil total frames to avoid truncating the last partial sample
+    let total_frames = ((edl.end_time - edl.start_time) * edl.sample_rate as f64).ceil() as usize;
 
     let result = match edl.format.as_str() {
         "wav"  => export_edl_wav(edl, &sources, total_frames, app),
@@ -326,7 +327,8 @@ fn mix_chunk(
             };
 
             // Apply file_offset: rel_t is position within the clip; add offset to reach into source file
-            let src_frame = ((rel_t + src.file_offset) * src_rate) as usize;
+            // TIME-07: explicit floor for sample lookup (was implicit truncation via `as usize`)
+            let src_frame = ((rel_t + src.file_offset) * src_rate).floor() as usize;
             let interleaved_idx = src_frame * src_ch;
             if interleaved_idx >= samples.len() { continue; }
 

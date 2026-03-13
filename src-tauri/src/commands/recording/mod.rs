@@ -1449,6 +1449,26 @@ pub fn get_recording_level(mgr: State<'_, RecordingManager>) -> f32 {
     mgr.current_level.load(Ordering::SeqCst) as f32 / 1000.0
 }
 
+/// TIME-02: Return recording duration derived from actual sample count (not wall clock).
+/// Returns seconds as f64, or 0.0 if not recording.
+#[tauri::command]
+pub fn get_recording_duration_secs(mgr: State<'_, RecordingManager>) -> f64 {
+    let sessions = match mgr.sessions.lock() {
+        Ok(s) => s,
+        Err(_) => return 0.0,
+    };
+    // Check default session first, then any session
+    if let Some(session) = sessions.get("default") {
+        if let Some(ref ring) = session.ring_buffer {
+            let total_samples = ring.write_pos.load(Ordering::Relaxed);
+            let channels = session.channels.max(1) as f64;
+            let rate = session.sample_rate.max(1) as f64;
+            return total_samples as f64 / channels / rate + session.pre_record_seconds;
+        }
+    }
+    0.0
+}
+
 #[tauri::command]
 pub fn is_recording(mgr: State<'_, RecordingManager>) -> bool {
     mgr.is_any_recording()
