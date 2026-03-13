@@ -448,24 +448,6 @@ export const useExportStore = defineStore('export', () => {
   }
 
   /**
-   * Legacy: export active tracks (uses favorite profile).
-   */
-  async function exportActiveTracks(): Promise<string | null> {
-    const profile = settingsStore.getFavoriteProfile();
-    if (!profile) return null;
-    return exportWithProfile(profile);
-  }
-
-  /**
-   * Legacy: export mixed tracks (uses favorite profile).
-   */
-  async function exportMixedTracks(): Promise<string | null> {
-    const profile = settingsStore.getFavoriteProfile();
-    if (!profile) return null;
-    return exportWithProfile(profile);
-  }
-
-  /**
    * Legacy: export single track (uses favorite profile).
    */
   async function exportTrack(track: Track): Promise<string | null> {
@@ -686,8 +668,6 @@ export const useExportStore = defineStore('export', () => {
     canQuickReExport,
     lastExportResult,
     currentExportPath,
-    exportActiveTracks,
-    exportMixedTracks,
     exportTrack,
     exportWithProfile,
     exportTrackWithProfile,
