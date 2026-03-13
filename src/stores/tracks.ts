@@ -3,6 +3,7 @@ import { ref, computed, triggerRef, watch } from 'vue';
 import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent, VolumeAutomationPoint } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId, binarySearch } from '@/shared/utils';
+import { mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
@@ -981,6 +982,12 @@ export const useTracksStore = defineStore('tracks', () => {
       sourceFile: track.cachedAudioPath || track.sourcePath,
       sourceOffset: 0,
     }];
+  }
+
+  // Mix all clips for a track into a single AudioBuffer (shared utility — DUP-01)
+  function mixClipsForTrack(trackId: string, audioContext: AudioContext): AudioBuffer | null {
+    const clips = getTrackClips(trackId);
+    return mixTrackClipsToBuffer(clips, audioContext);
   }
 
   // Snap threshold in seconds (clips snap when within this distance)
@@ -2360,6 +2367,7 @@ export const useTracksStore = defineStore('tracks', () => {
     moveTrackToTrack,
     cutRegionFromTrack,
     getTrackClips,
+    mixClipsForTrack,
     setClipStart,
     slideTracksLeft,
     rippleDeleteRegion,

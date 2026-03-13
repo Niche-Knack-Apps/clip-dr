@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { encodeWav } from '@/shared/audio-utils';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -58,11 +58,6 @@ export const useCleaningStore = defineStore('cleaning', () => {
     selectedPreset.value = 'podcast';
   }
 
-  // Mix track clips into a single buffer
-  function mixClipsForTrack(trackId: string): AudioBuffer | null {
-    const clips = tracksStore.getTrackClips(trackId);
-    return mixTrackClipsToBuffer(clips, audioStore.getAudioContext());
-  }
 
   async function cleanSelectedTrack(): Promise<Track | null> {
     if (!tracksStore.hasAudio || !tracksStore.selectedTrack) {
@@ -96,7 +91,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
         console.log('[Clean] Using source path directly (large file):', sourcePath);
       } else {
         // Get current buffer state (clips mixed together)
-        const mixedBuffer = mixClipsForTrack(sourceTrack.id);
+        const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext());
         if (!mixedBuffer) {
           error.value = 'Cannot clean: no audio clips available';
           loading.value = false;

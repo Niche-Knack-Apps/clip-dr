@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { SilenceRegion, Track } from '@/shared/types';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { encodeWav } from '@/shared/audio-utils';
 import { useVadStore } from './vad';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -269,11 +269,6 @@ export const useSilenceStore = defineStore('silence', () => {
     silenceRegions.value = merged;
   }
 
-  // Mix track clips into a single buffer
-  function mixClipsForTrack(trackId: string): AudioBuffer | null {
-    const clips = tracksStore.getTrackClips(trackId);
-    return mixTrackClipsToBuffer(clips, audioStore.getAudioContext());
-  }
 
   // Cut silence and create a new track (non-destructive)
   async function cutSilenceToNewTrack(): Promise<Track | null> {
@@ -301,7 +296,7 @@ export const useSilenceStore = defineStore('silence', () => {
       console.log('[CutSilence] Starting cut for track:', sourceTrack.name);
 
       // Get current buffer state (clips mixed together)
-      const mixedBuffer = mixClipsForTrack(sourceTrack.id);
+      const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext());
       if (!mixedBuffer) {
         cutError.value = 'Cannot cut silence: no audio clips available';
         cutting.value = false;

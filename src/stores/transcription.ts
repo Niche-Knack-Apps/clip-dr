@@ -3,7 +3,7 @@ import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark, TranscriptionMetrics } from '@/shared/types';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { encodeWav } from '@/shared/audio-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useSettingsStore } from './settings';
@@ -826,18 +826,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     await saveTranscription(trackId);
   }
 
-  // Mix track clips into a single buffer for transcription
-  function mixClipsForTrack(trackId: string): AudioBuffer | null {
-    const clips = tracksStore.getTrackClips(trackId);
-    return mixTrackClipsToBuffer(clips, audioStore.getAudioContext());
-  }
 
   async function runTranscriptionFromBuffer(trackId: string): Promise<void> {
     if (trackId === tracksStore.selectedTrackId) {
       progress.value = { stage: 'loading', progress: 10, message: 'Preparing audio...' };
     }
 
-    const mixedBuffer = mixClipsForTrack(trackId);
+    const mixedBuffer = tracksStore.mixClipsForTrack(trackId, audioStore.getAudioContext());
     if (!mixedBuffer) throw new Error('No audio clips to transcribe');
 
     if (trackId === tracksStore.selectedTrackId) {

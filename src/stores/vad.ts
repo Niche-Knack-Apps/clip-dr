@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
 import type { VadResult, VadOptions } from '@/shared/types';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { encodeWav } from '@/shared/audio-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 
@@ -87,11 +87,6 @@ export const useVadStore = defineStore('vad', () => {
     return (result.value.totalSilenceDuration / total) * 100;
   });
 
-  // Mix track clips into a single buffer
-  function mixClipsForTrack(trackId: string): AudioBuffer | null {
-    const clips = tracksStore.getTrackClips(trackId);
-    return mixTrackClipsToBuffer(clips, audioStore.getAudioContext());
-  }
 
   async function detectSilence(): Promise<void> {
     const selectedTrack = tracksStore.selectedTrack;
@@ -108,7 +103,7 @@ export const useVadStore = defineStore('vad', () => {
 
     try {
       // Get current buffer state (clips mixed together)
-      const mixedBuffer = mixClipsForTrack(trackId);
+      const mixedBuffer = tracksStore.mixClipsForTrack(trackId, audioStore.getAudioContext());
       if (!mixedBuffer) {
         error.value = 'No audio clips to analyze';
         return;
