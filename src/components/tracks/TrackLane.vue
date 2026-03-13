@@ -16,10 +16,15 @@ import { linearToDb, dbToLinear, formatDb } from '@/shared/utils';
 interface Props {
   track: Track;
   isSelected?: boolean;
+  /** Explicit muted/solo flags — ensures reactivity with shallowRef tracks */
+  muted?: boolean;
+  solo?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isSelected: false,
+  muted: false,
+  solo: false,
 });
 
 const emit = defineEmits<{
@@ -431,7 +436,7 @@ onUnmounted(() => {
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
               isImporting
                 ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
-                : track.muted
+                : muted
                   ? 'bg-red-600 text-white'
                   : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
@@ -448,7 +453,7 @@ onUnmounted(() => {
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
               isImporting
                 ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
-                : track.solo
+                : solo
                   ? 'bg-yellow-500 text-gray-900'
                   : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
@@ -492,7 +497,7 @@ onUnmounted(() => {
         @mousedown.stop
         @dragstart.prevent
       >
-        <TrackMeter v-if="!track.muted" :track-id="track.id" class="shrink-0" />
+        <TrackMeter v-if="!muted" :track-id="track.id" class="shrink-0" />
         <InfiniteKnob
           :model-value="volumeDb"
           :min="MIN_VOLUME_DB"
@@ -542,7 +547,7 @@ onUnmounted(() => {
         :key="clip.id"
         :track="track"
         :clip="clip"
-        :muted="track.muted"
+        :muted="muted"
         :container-width="containerWidth"
         :duration="duration"
         :is-dragging="isClipDragging"

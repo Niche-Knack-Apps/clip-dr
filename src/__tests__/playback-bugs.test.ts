@@ -290,4 +290,43 @@ describe('Waveform color regression: mute/unmute updates ClipRegion colors', () 
     expect(t.muted).toBe(false);
     expect(t.color).toBeTruthy(); // color preserved through mute/unmute cycle
   });
+
+  it('mute/unmute cycle works on ALL tracks, not just the first (multi-track regression)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    // Create 3 tracks (simulates: original + 2 clips)
+    const buf = ctx.createBuffer(1, 44100 * 5, 44100);
+    const t1 = tracksStore.createTrackFromBuffer(buf, null, 'Original', 0);
+    const t2 = tracksStore.createTrackFromBuffer(buf, null, 'Clip 1', 0);
+    const t3 = tracksStore.createTrackFromBuffer(buf, null, 'Clip 2', 0);
+
+    // Each track should have a unique color
+    expect(t1.color).toBeTruthy();
+    expect(t2.color).toBeTruthy();
+    expect(t3.color).toBeTruthy();
+
+    // Mute all tracks
+    tracksStore.setTrackMuted(t1.id, true);
+    tracksStore.setTrackMuted(t2.id, true);
+    tracksStore.setTrackMuted(t3.id, true);
+
+    for (const track of tracksStore.tracks) {
+      expect(track.muted).toBe(true);
+    }
+
+    // Unmute all tracks — every track should reflect muted=false
+    tracksStore.setTrackMuted(t1.id, false);
+    tracksStore.setTrackMuted(t2.id, false);
+    tracksStore.setTrackMuted(t3.id, false);
+
+    for (const track of tracksStore.tracks) {
+      expect(track.muted).toBe(false);
+      // Color should still be present (not lost during mute cycle)
+      expect(track.color).toBeTruthy();
+      expect(track.color).not.toBe('rgba(75, 85, 99, 0.5)');
+      expect(track.color).not.toBe('rgb(75, 85, 99)');
+    }
+  });
 });
