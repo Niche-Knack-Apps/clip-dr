@@ -38,8 +38,9 @@ const exportStore = useExportStore();
 const projectStore = useProjectStore();
 const uiStore = useUIStore();
 
-// Set up dirty tracking for project state
+// Set up dirty tracking and close guard for project state
 projectStore.setupDirtyTracking();
+projectStore.setupCloseGuard();
 
 const focusSearch = inject<() => void>('focusSearch');
 

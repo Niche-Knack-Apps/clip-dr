@@ -3,7 +3,8 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { loadAudioFromFile } from '@/shared/audio-utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -58,11 +59,6 @@ export const useCleaningStore = defineStore('cleaning', () => {
     selectedPreset.value = 'podcast';
   }
 
-  // Mix track clips into a single buffer
-  function mixClipsForTrack(trackId: string): AudioBuffer | null {
-    const clips = tracksStore.getTrackClips(trackId);
-    return mixTrackClipsToBuffer(clips, audioStore.getAudioContext());
-  }
 
   async function cleanSelectedTrack(): Promise<Track | null> {
     if (!tracksStore.hasAudio || !tracksStore.selectedTrack) {
@@ -96,7 +92,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
         console.log('[Clean] Using source path directly (large file):', sourcePath);
       } else {
         // Get current buffer state (clips mixed together)
-        const mixedBuffer = mixClipsForTrack(sourceTrack.id);
+        const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext());
         if (!mixedBuffer) {
           error.value = 'Cannot clean: no audio clips available';
           loading.value = false;
@@ -104,7 +100,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
         }
 
         // Encode to WAV and write to temp file
-        const wavData = encodeWav(mixedBuffer);
+        const wavData = await encodeWavFloat32InWorker(mixedBuffer);
         sourcePath = await writeTempFile(`clean_source_${Date.now()}.wav`, wavData);
         cleanDuration = mixedBuffer.duration;
 
@@ -160,7 +156,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
       console.log('[Clean] Creating new track...');
       // Create a new track for the cleaned audio
       const cleanedName = `Cleaned ${sourceTrack.name}`;
-      const cleanedTrack = tracksStore.createTrackFromBuffer(
+      const cleanedTrack = await tracksStore.createTrackFromBuffer(
         cleanedAudioEntry.buffer,
         cleanedAudioEntry.waveformData,
         cleanedName,
@@ -195,47 +191,10 @@ export const useCleaningStore = defineStore('cleaning', () => {
     }
   }
 
+  // DUP-02: use shared loadAudioFromFile utility
   async function loadCleanedAudio(path: string): Promise<CleanedAudioEntry> {
     const ctx = audioStore.getAudioContext();
-
-    // Load audio metadata
-    const metadata = await invoke<{ duration: number; sampleRate: number; channels: number }>(
-      'get_audio_metadata',
-      { path }
-    );
-
-    // Load waveform data
-    const waveformData = await invoke<number[]>('extract_waveform', {
-      path,
-      bucketCount: WAVEFORM_BUCKET_COUNT,
-    });
-
-    // Load audio buffer
-    const audioData = await invoke<number[]>('load_audio_buffer', { path });
-
-    const float32Data = new Float32Array(audioData);
-    const samplesPerChannel = Math.floor(float32Data.length / metadata.channels);
-
-    const buffer = ctx.createBuffer(
-      metadata.channels,
-      samplesPerChannel,
-      metadata.sampleRate
-    );
-
-    for (let channel = 0; channel < metadata.channels; channel++) {
-      const channelData = buffer.getChannelData(channel);
-      for (let i = 0; i < channelData.length; i++) {
-        channelData[i] = float32Data[i * metadata.channels + channel];
-      }
-    }
-
-    return {
-      path,
-      buffer,
-      waveformData,
-      duration: metadata.duration,
-      sampleRate: metadata.sampleRate,
-    };
+    return loadAudioFromFile(path, ctx);
   }
 
   // Get the audio buffer for a track (returns cleaned buffer if available)

@@ -6,7 +6,7 @@ import { usePlaybackStore } from '@/stores/playback';
 import { useHistoryStore } from '@/stores/history';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
-import { encodeWavFloat32 } from '@/shared/audio-utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { generateId } from '@/shared/utils';
 import type { Track, TrackClip } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
@@ -169,7 +169,7 @@ export function useClipping() {
   // Write a clip's AudioBuffer to a temp WAV and set cachedAudioPath for Rust playback
   async function cacheClipForPlayback(trackId: string, buffer: AudioBuffer): Promise<void> {
     try {
-      const wavData = encodeWavFloat32(buffer);
+      const wavData = await encodeWavFloat32InWorker(buffer);
       const fileName = `clip_${trackId}_${Date.now()}.wav`;
       await writeFile(fileName, wavData, { baseDir: BaseDirectory.Temp });
       const tmpDir = await tempDir();

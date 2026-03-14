@@ -3,7 +3,8 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { SilenceRegion, Track } from '@/shared/types';
-import { encodeWav, mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { loadAudioFromFile } from '@/shared/audio-utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { useVadStore } from './vad';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -269,11 +270,6 @@ export const useSilenceStore = defineStore('silence', () => {
     silenceRegions.value = merged;
   }
 
-  // Mix track clips into a single buffer
-  function mixClipsForTrack(trackId: string): AudioBuffer | null {
-    const clips = tracksStore.getTrackClips(trackId);
-    return mixTrackClipsToBuffer(clips, audioStore.getAudioContext());
-  }
 
   // Cut silence and create a new track (non-destructive)
   async function cutSilenceToNewTrack(): Promise<Track | null> {
@@ -301,7 +297,7 @@ export const useSilenceStore = defineStore('silence', () => {
       console.log('[CutSilence] Starting cut for track:', sourceTrack.name);
 
       // Get current buffer state (clips mixed together)
-      const mixedBuffer = mixClipsForTrack(sourceTrack.id);
+      const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext());
       if (!mixedBuffer) {
         cutError.value = 'Cannot cut silence: no audio clips available';
         cutting.value = false;
@@ -309,7 +305,7 @@ export const useSilenceStore = defineStore('silence', () => {
       }
 
       // Encode to WAV and write to temp file
-      const wavData = encodeWav(mixedBuffer);
+      const wavData = await encodeWavFloat32InWorker(mixedBuffer);
       const sourcePath = await writeTempFile(`cut_source_${Date.now()}.wav`, wavData);
 
       console.log('[CutSilence] Using current buffer state, temp file:', sourcePath);
@@ -374,7 +370,7 @@ export const useSilenceStore = defineStore('silence', () => {
       // Create a new track from the cut audio
       console.log('[CutSilence] Creating new track...');
       const cutName = `No Silence - ${sourceTrack.name}`;
-      const cutTrack = tracksStore.createTrackFromBuffer(
+      const cutTrack = await tracksStore.createTrackFromBuffer(
         cutAudioEntry.buffer,
         cutAudioEntry.waveformData,
         cutName,
@@ -412,47 +408,10 @@ export const useSilenceStore = defineStore('silence', () => {
     }
   }
 
+  // DUP-02: use shared loadAudioFromFile utility
   async function loadCutAudio(path: string): Promise<CutAudioData> {
     const ctx = audioStore.getAudioContext();
-
-    // Load audio metadata
-    const metadata = await invoke<{ duration: number; sampleRate: number; channels: number }>(
-      'get_audio_metadata',
-      { path }
-    );
-
-    // Load waveform data
-    const waveformData = await invoke<number[]>('extract_waveform', {
-      path,
-      bucketCount: WAVEFORM_BUCKET_COUNT,
-    });
-
-    // Load audio buffer
-    const audioData = await invoke<number[]>('load_audio_buffer', { path });
-
-    const float32Data = new Float32Array(audioData);
-    const samplesPerChannel = Math.floor(float32Data.length / metadata.channels);
-
-    const buffer = ctx.createBuffer(
-      metadata.channels,
-      samplesPerChannel,
-      metadata.sampleRate
-    );
-
-    for (let channel = 0; channel < metadata.channels; channel++) {
-      const channelData = buffer.getChannelData(channel);
-      for (let i = 0; i < channelData.length; i++) {
-        channelData[i] = float32Data[i * metadata.channels + channel];
-      }
-    }
-
-    return {
-      path,
-      buffer,
-      waveformData,
-      duration: metadata.duration,
-      sampleRate: metadata.sampleRate,
-    };
+    return loadAudioFromFile(path, ctx);
   }
 
   // Get the audio buffer for a track (returns cut buffer if available)

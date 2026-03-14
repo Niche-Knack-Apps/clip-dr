@@ -7,7 +7,7 @@ import { useSilenceStore } from './silence';
 import { useMeterStore } from './meter';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
-import { isTrackPlayable } from '@/shared/utils';
+import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
 
 export const usePlaybackStore = defineStore('playback', () => {
   const selectionStore = useSelectionStore();
@@ -31,6 +31,7 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   // Position polling
   let positionPollId: number | null = null;
+  let seekInFlight = false; // CON-M2: suppress poll overwrites during hot-seek
 
   // Track sync: hash of last synced track list to avoid redundant file reloads
   let lastSyncedTrackHash = '';
@@ -53,14 +54,8 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Filter out tracks that are still importing (large files are OK — Rust engine handles them)
     const playable = tracks.filter(t => isTrackPlayable(t.importStatus));
 
-    // Check if any track is soloed
-    const soloedTracks = playable.filter(t => t.solo && !t.muted);
-    if (soloedTracks.length > 0) {
-      return soloedTracks;
-    }
-
-    // No solo - get all unmuted tracks
-    return playable.filter(t => !t.muted);
+    // DUP-07: use canonical solo/mute filter
+    return filterActiveTracks(playable);
   }
 
   // Get the active playback region (union of all active tracks)
@@ -223,7 +218,10 @@ export const usePlaybackStore = defineStore('playback', () => {
           }
         }
 
-        currentTime.value = pos;
+        // CON-M2: don't overwrite currentTime if a seek is in flight
+        if (!seekInFlight) {
+          currentTime.value = pos;
+        }
       } catch (e) {
         console.warn('[Playback] Position poll error:', e);
       }
@@ -268,6 +266,9 @@ export const usePlaybackStore = defineStore('playback', () => {
 
       // Sync state to Rust engine (only reloads files if track list changed)
       await syncTracksToRust();
+      // Always sync mute/solo — syncTracksToRust() skips when track hash
+      // is unchanged, but mute/solo state is NOT part of that hash.
+      await syncMuteSoloToRust();
       await syncLoopToRust();
       await invoke('playback_set_speed', { speed: playbackSpeed.value });
       await invoke('playback_set_volume', { volume: volume.value });
@@ -320,11 +321,6 @@ export const usePlaybackStore = defineStore('playback', () => {
   }
 
   async function seek(time: number): Promise<void> {
-    const wasPlaying = isPlaying.value;
-    if (wasPlaying) {
-      pause();
-    }
-
     let seekTime = Math.max(0, Math.min(time, getEffectiveDuration()));
 
     // If skip-silence is enabled and seeking into silence, snap forward
@@ -334,8 +330,15 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     currentTime.value = seekTime;
 
-    if (wasPlaying) {
-      await play();
+    if (isPlaying.value) {
+      // Hot-seek: send position directly to Rust without pause/play cycle
+      // CON-M2: suppress poll overwrites until Rust acknowledges the seek
+      seekInFlight = true;
+      try {
+        await invoke('playback_seek', { position: seekTime });
+      } finally {
+        seekInFlight = false;
+      }
     }
   }
 
@@ -531,22 +534,6 @@ export const usePlaybackStore = defineStore('playback', () => {
     }
   }
 
-  // Debug function
-  function testAudioOutput(): void {
-    const freshCtx = new AudioContext();
-    freshCtx.resume().then(() => {
-      const osc = freshCtx.createOscillator();
-      const testGain = freshCtx.createGain();
-      testGain.gain.value = 0.3;
-      osc.frequency.value = 440;
-      osc.connect(testGain);
-      testGain.connect(freshCtx.destination);
-      osc.start();
-      osc.stop(freshCtx.currentTime + 1);
-      console.log('[Playback] Test tone played');
-    });
-  }
-
   // Watch for track volume changes during playback — sync to Rust engine live
   // Uses hash-based approach (matching mute/solo watcher) to avoid deep comparison overhead
   let lastVolumeKey = 0;
@@ -684,7 +671,6 @@ export const usePlaybackStore = defineStore('playback', () => {
     getActiveTracks,
     getActiveRegion,
     getLoopRegion,
-    testAudioOutput,
     startHoldPlay,
     stopHoldPlay,
     startHoldReverse,

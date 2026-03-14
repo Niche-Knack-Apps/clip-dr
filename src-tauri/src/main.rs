@@ -92,6 +92,7 @@ fn main() {
             recording::get_preview_levels,
             recording::stop_all_previews,
             recording::get_recording_level,
+            recording::get_recording_duration_secs,
             recording::is_recording,
             recording::cancel_recording,
             recording::start_monitoring,

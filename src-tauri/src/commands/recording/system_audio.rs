@@ -246,7 +246,7 @@ fn system_audio_monitor_reader(stdout: ChildStdout, ctx: SysAudioReaderCtx) {
                         let used = wp.wrapping_sub(rp);
                         if used + samples.len() <= ring.capacity {
                             for (i, &s) in samples.iter().enumerate() {
-                                let idx = (wp + i) % ring.capacity;
+                                let idx = (wp + i) & ring.mask;
                                 unsafe { *ring.data_ptr.add(idx) = s; }
                             }
                             ring.write_pos.store(wp + samples.len(), Ordering::Release);
@@ -393,7 +393,7 @@ pub async fn start_system_audio_recording(output_dir: String, channel_mode: Opti
         let writer_handle = spawn_wav_writer_thread(
             ring.clone(), audio_writer, channels, target_mono,
             output_path.clone(), spec, use_rf64,
-        );
+        )?;
 
         // Make ring buffer available to reader thread
         if let Ok(mut guard) = mgr.system_ring.lock() {

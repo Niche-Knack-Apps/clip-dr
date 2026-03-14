@@ -9,8 +9,8 @@ import { useSilenceStore } from './silence';
 import { useSettingsStore } from './settings';
 import { listen } from '@tauri-apps/api/event';
 import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip, VolumeAutomationPoint } from '@/shared/types';
-import { encodeWavFloat32 } from '@/shared/audio-utils';
-import { isTrackPlayable } from '@/shared/utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
+import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
 import { useUIStore } from './ui';
 
 const FORMAT_LABELS: Record<string, string> = {
@@ -39,6 +39,37 @@ function normalizeAudioPath(path: string, expectedFormat: ExportFormat): { path:
   return { path: base + '.' + expectedFormat, format: expectedFormat };
 }
 
+/**
+ * Build a human-readable export summary showing which tracks are included/excluded.
+ * Follows DAW conventions: explicitly list what's being exported and why others are excluded.
+ */
+function buildExportSummary(
+  allTracks: Track[],
+  active: Track[],
+): string {
+  const hasSolo = allTracks.some(t => t.solo);
+  const excluded = allTracks.filter(t => !active.includes(t));
+
+  const lines: string[] = [];
+  lines.push(`Exporting ${active.length} of ${allTracks.length} track(s):`);
+
+  for (const t of active) {
+    const tags: string[] = [];
+    if (t.solo) tags.push('solo');
+    const suffix = tags.length ? ` (${tags.join(', ')})` : '';
+    lines.push(`  + ${t.name}${suffix}`);
+  }
+
+  if (excluded.length > 0) {
+    for (const t of excluded) {
+      const reason = t.muted ? 'muted' : hasSolo && !t.solo ? 'not soloed' : 'excluded';
+      lines.push(`  - ${t.name} (${reason})`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export const useExportStore = defineStore('export', () => {
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
@@ -50,15 +81,10 @@ export const useExportStore = defineStore('export', () => {
   const lastExportResult = ref<string | null>(null);
   const currentExportPath = ref<string | null>(null);
 
-  // Get active (non-muted) tracks, excluding tracks still importing
+  // DUP-07: use canonical solo/mute filter
   const activeTracks = computed(() => {
     const tracks = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
-    const hasSolo = tracks.some(t => t.solo);
-
-    if (hasSolo) {
-      return tracks.filter(t => t.solo && !t.muted);
-    }
-    return tracks.filter(t => !t.muted);
+    return filterActiveTracks(tracks);
   });
 
   const canExport = computed(() => {
@@ -74,6 +100,10 @@ export const useExportStore = defineStore('export', () => {
    * Opens native save dialog with a single filter matching the profile format.
    */
   async function exportWithProfile(profile: ExportProfile): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     if (!canExport.value) {
       error.value = 'Nothing to export';
       return null;
@@ -102,6 +132,9 @@ export const useExportStore = defineStore('export', () => {
 
       // Normalize extension (handles GTK not appending extension)
       const { path: outputPath } = normalizeAudioPath(outputPathRaw, format);
+
+      const allPlayable = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
+      useUIStore().showToast(buildExportSummary(allPlayable, activeTracks.value), 'info', 6000);
 
       settingsStore.setLastExportFolder(outputPath);
       settingsStore.setLastExportFormat(format);
@@ -132,6 +165,9 @@ export const useExportStore = defineStore('export', () => {
     if (!profile) return null;
 
     const { format } = normalizeAudioPath(lastPath, profile.format);
+
+    const allPlayable = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
+    useUIStore().showToast(buildExportSummary(allPlayable, activeTracks.value), 'info', 6000);
 
     try {
       return await doMixedExport(lastPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
@@ -274,7 +310,7 @@ export const useExportStore = defineStore('export', () => {
       }
       progress.value = 50;
 
-      const wavData = encodeWavFloat32(mixedBuffer);
+      const wavData = await encodeWavFloat32InWorker(mixedBuffer);
       const tempPath = await writeTempFile(`mixed_temp_${Date.now()}.wav`, wavData);
       progress.value = 70;
 
@@ -324,6 +360,10 @@ export const useExportStore = defineStore('export', () => {
    * Export a single track using a specific profile.
    */
   async function exportTrackWithProfile(track: Track, profile: ExportProfile): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     console.log(`[Export] Starting single track export: "${track.name}", profile: ${profile.name}`);
     if (!tracksStore.hasAudio) {
       error.value = 'No audio loaded';
@@ -399,7 +439,7 @@ export const useExportStore = defineStore('export', () => {
         throw new Error('No audio clips to export for this track');
       }
 
-      const wavData = encodeWavFloat32(trackBuffer);
+      const wavData = await encodeWavFloat32InWorker(trackBuffer);
       const tempPath = await writeTempFile(`track_export_${Date.now()}.wav`, wavData);
 
       if (format === 'mp3') {
@@ -448,24 +488,6 @@ export const useExportStore = defineStore('export', () => {
   }
 
   /**
-   * Legacy: export active tracks (uses favorite profile).
-   */
-  async function exportActiveTracks(): Promise<string | null> {
-    const profile = settingsStore.getFavoriteProfile();
-    if (!profile) return null;
-    return exportWithProfile(profile);
-  }
-
-  /**
-   * Legacy: export mixed tracks (uses favorite profile).
-   */
-  async function exportMixedTracks(): Promise<string | null> {
-    const profile = settingsStore.getFavoriteProfile();
-    if (!profile) return null;
-    return exportWithProfile(profile);
-  }
-
-  /**
    * Legacy: export single track (uses favorite profile).
    */
   async function exportTrack(track: Track): Promise<string | null> {
@@ -478,6 +500,8 @@ export const useExportStore = defineStore('export', () => {
    * Mix a single track's clips into an AudioBuffer.
    */
   function mixSingleTrack(trackId: string, audioContext: AudioContext): AudioBuffer | null {
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (!track) return null;
     const clips = tracksStore.getTrackClips(trackId);
     if (clips.length === 0) return null;
 
@@ -500,6 +524,14 @@ export const useExportStore = defineStore('export', () => {
     const numChannels = Math.max(...bufferedClips.map(c => c.buffer.numberOfChannels));
     const mixedBuffer = audioContext.createBuffer(numChannels, totalSamples, sampleRate);
 
+    // AQ-02: apply track volume + volume envelope (matches mixActiveTracks behaviour)
+    const trackVolume = track.volume;
+    const hasEnvelope = track.volumeEnvelope && track.volumeEnvelope.length > 0;
+    // PERF-15: linear-walk envelope interpolation for sequential export access
+    const envelopeWalker = hasEnvelope
+      ? tracksStore.createEnvelopeWalker(track.volumeEnvelope!, trackVolume)
+      : null;
+
     for (const clip of bufferedClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
       for (let ch = 0; ch < numChannels; ch++) {
@@ -508,7 +540,13 @@ export const useExportStore = defineStore('export', () => {
         const inputData = clip.buffer.getChannelData(inputCh);
         for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
           if (startSample + i >= 0) {
-            outputData[startSample + i] += inputData[i];
+            let vol = trackVolume;
+            if (envelopeWalker) {
+              const timelineTime = timelineStart + (startSample + i) / sampleRate;
+              const trackRelTime = timelineTime - track.trackStart;
+              vol = envelopeWalker(trackRelTime);
+            }
+            outputData[startSample + i] += inputData[i] * vol;
           }
         }
       }
@@ -517,6 +555,10 @@ export const useExportStore = defineStore('export', () => {
   }
 
   async function exportWithSilenceRemoval(format: ExportFormat = 'wav'): Promise<string | null> {
+    if (loading.value) {
+      useUIStore().showToast('Export already in progress.', 'warn');
+      return null;
+    }
     const silenceStore = useSilenceStore();
 
     if (!tracksStore.hasAudio) {
@@ -638,8 +680,11 @@ export const useExportStore = defineStore('export', () => {
 
     for (const clip of allClips) {
       const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
-      // Determine if we need per-sample envelope evaluation
+      // PERF-15: linear-walk envelope interpolation for sequential export access
       const hasEnvelope = clip.volumeEnvelope && clip.volumeEnvelope.length > 0;
+      const envelopeWalker = hasEnvelope
+        ? tracksStore.createEnvelopeWalker(clip.volumeEnvelope!, clip.volume)
+        : null;
 
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = mixedBuffer.getChannelData(ch);
@@ -648,11 +693,10 @@ export const useExportStore = defineStore('export', () => {
         for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
           if (startSample + i >= 0) {
             let vol = clip.volume;
-            if (hasEnvelope) {
-              // Compute track-relative time for this sample
+            if (envelopeWalker) {
               const timelineTime = timelineStart + (startSample + i) / sampleRate;
               const trackRelTime = timelineTime - clip.trackStart;
-              vol = tracksStore.interpolateEnvelope(clip.volumeEnvelope!, clip.volume, trackRelTime);
+              vol = envelopeWalker(trackRelTime);
             }
             outputData[startSample + i] += inputData[i] * vol;
           }
@@ -675,8 +719,6 @@ export const useExportStore = defineStore('export', () => {
     return mixedBuffer;
   }
 
-  // encodeWavFloat32 imported from @/shared/audio-utils
-
   return {
     loading,
     error,
@@ -686,8 +728,6 @@ export const useExportStore = defineStore('export', () => {
     canQuickReExport,
     lastExportResult,
     currentExportPath,
-    exportActiveTracks,
-    exportMixedTracks,
     exportTrack,
     exportWithProfile,
     exportTrackWithProfile,
@@ -695,6 +735,6 @@ export const useExportStore = defineStore('export', () => {
     exportWithSilenceRemoval,
     clear,
     mixActiveTracks,
-    encodeWavFloat32,
+    encodeWavFloat32: encodeWavFloat32InWorker,
   };
 });

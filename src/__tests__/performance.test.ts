@@ -78,7 +78,7 @@ describe('Performance: hot-path triggerRef', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
 
     // Add a second clip so clips array is set
     type TrackClip = import('@/shared/types').TrackClip;
@@ -106,7 +106,7 @@ describe('Performance: hot-path triggerRef', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(2, 44100 * 5, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
 
     const arrayRef = tracksStore.tracks;
 
@@ -127,11 +127,33 @@ describe('Performance: hot-path triggerRef', () => {
     // Add multiple tracks
     for (let i = 0; i < 5; i++) {
       const buf = ctx.createBuffer(2, 44100 * 5, 44100);
-      tracksStore.createTrackFromBuffer(buf, null, `Track ${i}`, 0);
+      await tracksStore.createTrackFromBuffer(buf, null, `Track ${i}`, 0);
     }
 
     // getActiveTracksAtTime should not throw and return tracks
     const active = tracksStore.getActiveTracksAtTime(0);
     expect(active.length).toBeGreaterThan(0);
+  });
+
+  it('PERF-02 regression: shallowRef tracks triggers computed reactivity via triggerRef', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    // tracks.value should start empty
+    expect(tracksStore.tracks.length).toBe(0);
+    expect(tracksStore.hasAudio).toBe(false);
+
+    // Add a track — this triggers shallowRef via new array assignment
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+
+    // hasAudio (computed) should reflect the new track
+    expect(tracksStore.tracks.length).toBe(1);
+    expect(tracksStore.hasAudio).toBe(true);
+
+    // Mutate a track property via store function (uses triggerRef internally)
+    tracksStore.renameTrack(tracksStore.tracks[0].id, 'Renamed');
+    expect(tracksStore.tracks[0].name).toBe('Renamed');
   });
 });

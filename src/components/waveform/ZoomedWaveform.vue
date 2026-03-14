@@ -557,6 +557,7 @@ onUnmounted(() => {
         @drag-start="playbackStore.startScrubbing()"
         @drag="(time) => playbackStore.scrub(time)"
         @drag-end="playbackStore.endScrubbing()"
+        @click="(time) => playbackStore.seek(time)"
       />
 
       <!-- Time markers -->

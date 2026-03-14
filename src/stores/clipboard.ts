@@ -9,7 +9,7 @@ import { useTranscriptionStore } from './transcription';
 import { useUIStore } from './ui';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
-import { encodeWavFloat32 } from '@/shared/audio-utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { writeTempFile } from '@/shared/fs-utils';
 
 export interface VirtualClipboardSegment {
@@ -61,7 +61,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         if (!clip.buffer) continue;
 
         try {
-          const wavData = encodeWavFloat32(clip.buffer);
+          const wavData = await encodeWavFloat32InWorker(clip.buffer);
           clip.sourceFile = await writeTempFile(`clip_${clip.id}_${Date.now()}.wav`, wavData);
           clip.sourceOffset = 0;
         } catch (err) {
@@ -185,7 +185,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     clipboardBuffer.value = newBuffer;
 
     // Generate waveform for the clipboard content
-    const waveformData = tracksStore.generateWaveformFromBuffer(newBuffer);
+    const waveformData = await tracksStore.generateWaveformFromBuffer(newBuffer);
 
     clipboard.value = {
       samples,
@@ -229,7 +229,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
       clipboardBuffer.value = clonedBuffer;
 
-      const waveform = tracksStore.generateWaveformFromBuffer(clonedBuffer);
+      const waveform = await tracksStore.generateWaveformFromBuffer(clonedBuffer);
       clipboard.value = {
         samples: [],
         sampleRate: clonedBuffer.sampleRate,
@@ -455,14 +455,18 @@ export const useClipboardStore = defineStore('clipboard', () => {
         : undefined;
       const pasteSourceFile = sourceTrack?.cachedAudioPath || sourceTrack?.sourcePath;
 
-      const success = tracksStore.insertClipAtPlayhead(
+      // EDL-H1: pass the source region start as sourceOffset so the pasted
+      // clip knows where in the original file its audio came from
+      const pasteSourceOffset = clipboard.value.sourceRegion.start;
+
+      const success = await tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
         waveform,
         playheadTime,
         ctx,
         pasteSourceFile,
-        0
+        pasteSourceOffset
       );
 
       if (success) {
@@ -478,7 +482,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const trackName = `Pasted ${tracksStore.tracks.length + 1}`;
     console.log(`[Clipboard] Creating NEW track "${trackName}" at time ${pasteTime.toFixed(2)}s`);
 
-    const newTrack = tracksStore.createTrackFromBuffer(
+    const newTrack = await tracksStore.createTrackFromBuffer(
       clonedBuffer,
       [...clipboard.value.waveformData],
       trackName,

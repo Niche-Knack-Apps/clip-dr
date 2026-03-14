@@ -33,6 +33,17 @@ export function isTrackPlayable(status: string | undefined): boolean {
   return !status || status === 'ready' || status === 'large-file' || status === 'caching';
 }
 
+/**
+ * DUP-07: Canonical solo/mute filter for active tracks.
+ * Returns tracks that should produce audio: solo'd tracks if any are solo'd,
+ * otherwise all non-muted tracks. Input should already be filtered to playable tracks.
+ */
+export function filterActiveTracks<T extends { solo: boolean; muted: boolean }>(tracks: T[]): T[] {
+  const soloed = tracks.filter(t => t.solo && !t.muted);
+  if (soloed.length > 0) return soloed;
+  return tracks.filter(t => !t.muted);
+}
+
 export function formatTime(seconds: number, format: 'hms' | 'ms' = 'ms'): string {
   if (format === 'hms') {
     const h = Math.floor(seconds / 3600);

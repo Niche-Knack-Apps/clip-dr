@@ -11,7 +11,7 @@ import type { Word, Track } from '@/shared/types';
 import { WORD_HEIGHT } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
 import { TRACK_COLORS } from '@/shared/types';
-import { isTrackPlayable } from '@/shared/utils';
+import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
 
 const openSettings = inject<() => void>('openSettings');
 
@@ -56,8 +56,8 @@ const globalDragLastX = ref(0);
 const activeTrackIds = computed((): Set<string> => {
   const tracks = tracksStore.tracks;
   const playable = tracks.filter((t: Track) => isTrackPlayable(t.importStatus));
-  const soloed = playable.filter((t: Track) => t.solo && !t.muted);
-  const active = soloed.length > 0 ? soloed : playable.filter((t: Track) => !t.muted);
+  // DUP-07: use canonical solo/mute filter
+  const active = filterActiveTracks(playable);
   return new Set(active.map((t: Track) => t.id));
 });
 

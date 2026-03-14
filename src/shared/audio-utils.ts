@@ -1,7 +1,64 @@
+import { invoke } from '@tauri-apps/api/core';
 import type { TrackClip } from '@/shared/types';
+import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 
 const MAX_WAV_BYTES = 1_073_741_824; // 1GB
 const MAX_MIX_DURATION = 7200; // 2 hours
+
+/** Audio data loaded from a WAV file on disk (metadata + waveform + decoded buffer). */
+export interface LoadedAudioData {
+  path: string;
+  buffer: AudioBuffer;
+  waveformData: number[];
+  duration: number;
+  sampleRate: number;
+}
+
+/**
+ * DUP-02: Shared utility to load audio from a WAV file on disk.
+ * Fetches metadata, waveform, and decoded buffer via Rust IPC.
+ * Used by both cleaning and silence stores.
+ */
+export async function loadAudioFromFile(
+  path: string,
+  audioContext: AudioContext,
+): Promise<LoadedAudioData> {
+  const metadata = await invoke<{ duration: number; sampleRate: number; channels: number }>(
+    'get_audio_metadata',
+    { path }
+  );
+
+  const waveformData = await invoke<number[]>('extract_waveform', {
+    path,
+    bucketCount: WAVEFORM_BUCKET_COUNT,
+  });
+
+  const audioData = await invoke<number[]>('load_audio_buffer', { path });
+
+  const float32Data = new Float32Array(audioData);
+  const samplesPerChannel = Math.floor(float32Data.length / metadata.channels);
+
+  const buffer = audioContext.createBuffer(
+    metadata.channels,
+    samplesPerChannel,
+    metadata.sampleRate
+  );
+
+  for (let channel = 0; channel < metadata.channels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < channelData.length; i++) {
+      channelData[i] = float32Data[i * metadata.channels + channel];
+    }
+  }
+
+  return {
+    path,
+    buffer,
+    waveformData,
+    duration: metadata.duration,
+    sampleRate: metadata.sampleRate,
+  };
+}
 
 function writeWavString(view: DataView, offset: number, str: string): void {
   for (let i = 0; i < str.length; i++) {
@@ -53,19 +110,17 @@ export function encodeWav(buffer: AudioBuffer): Uint8Array {
   writeWavString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
 
-  // Interleave channels and write samples
-  let offset = 44;
+  // PERF-09: Use Int16Array for bulk sample writes instead of per-sample DataView
   const channels: Float32Array[] = [];
   for (let ch = 0; ch < numChannels; ch++) {
     channels.push(buffer.getChannelData(ch));
   }
 
+  const int16View = new Int16Array(arrayBuffer, headerSize);
   for (let i = 0; i < buffer.length; i++) {
     for (let ch = 0; ch < numChannels; ch++) {
       const sample = Math.max(-1, Math.min(1, channels[ch][i]));
-      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-      view.setInt16(offset, intSample, true);
-      offset += 2;
+      int16View[i * numChannels + ch] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
     }
   }
 
@@ -117,17 +172,23 @@ export function encodeWavFloat32(buffer: AudioBuffer): Uint8Array {
   writeWavString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
 
-  // Interleave channels and write float32 samples
-  let offset = 44;
+  // PERF-09: Use typed array for float32 data — avoids per-sample DataView overhead.
+  // For mono, direct copy; for multi-channel, interleave via typed array.
   const channels: Float32Array[] = [];
   for (let ch = 0; ch < numChannels; ch++) {
     channels.push(buffer.getChannelData(ch));
   }
 
-  for (let i = 0; i < buffer.length; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      view.setFloat32(offset, channels[ch][i], true);
-      offset += 4;
+  if (numChannels === 1) {
+    // Fast path: single channel — copy directly (no interleaving needed)
+    new Float32Array(arrayBuffer, headerSize).set(channels[0]);
+  } else {
+    // Multi-channel: interleave into a typed array (still faster than DataView)
+    const floatView = new Float32Array(arrayBuffer, headerSize);
+    for (let i = 0; i < buffer.length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        floatView[i * numChannels + ch] = channels[ch][i];
+      }
     }
   }
 

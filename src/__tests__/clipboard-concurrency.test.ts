@@ -95,7 +95,7 @@ describe('Clipboard Concurrency Guards', () => {
 
     // Set up a track with I/O points so cut() has something to do
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     selectionStore.setInPoint(2);
     selectionStore.setOutPoint(5);
 
@@ -127,7 +127,7 @@ describe('Clipboard Concurrency Guards', () => {
     const selectionStore = useSelectionStore();
 
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     selectionStore.setInPoint(2);
     selectionStore.setOutPoint(5);
 
@@ -143,7 +143,7 @@ describe('Clipboard Concurrency Guards', () => {
 
     const tracksStore = useTracksStore();
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     const epochBefore = tracksStore.tracks[idx].editEpoch ?? 0;
@@ -166,7 +166,7 @@ describe('Clipboard Concurrency Guards', () => {
 
     const tracksStore = useTracksStore();
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Set up two clips
@@ -186,5 +186,32 @@ describe('Clipboard Concurrency Guards', () => {
     if (afterTrack) {
       expect(afterTrack.editEpoch ?? 0).toBeGreaterThan(epochBefore);
     }
+  });
+
+  it('CON-M1 regression: setPendingRecache chains sequential promises', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const order: number[] = [];
+    const p1 = new Promise<void>(resolve => {
+      setTimeout(() => { order.push(1); resolve(); }, 20);
+    });
+    const p2 = new Promise<void>(resolve => {
+      setTimeout(() => { order.push(2); resolve(); }, 10);
+    });
+
+    // Chain two recache promises — second must wait for first
+    tracksStore.setPendingRecache(p1);
+    tracksStore.setPendingRecache(p2);
+
+    // Wait for the chained promise to resolve
+    await tracksStore.pendingRecache;
+
+    // p2 resolves faster (10ms) but should be chained after p1 (20ms)
+    // so both should be complete by the time pendingRecache resolves
+    expect(order).toContain(1);
+    expect(order).toContain(2);
+    // The chained promise should be cleared
+    expect(tracksStore.pendingRecache).toBeNull();
   });
 });

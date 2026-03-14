@@ -671,7 +671,7 @@ pub async fn start_recording(device_id: Option<String>, output_dir: String, chan
     let writer_handle = spawn_wav_writer_thread(
         ring.clone(), audio_writer, channels, target_mono,
         output_path.clone(), spec, use_rf64,
-    );
+    )?;
 
     // Drain pre-record buffer into ring buffer (prepends captured monitoring audio)
     let mut pre_record_secs = 0.0f64;
@@ -943,7 +943,7 @@ pub async fn start_multi_recording(
         let writer_handle = spawn_wav_writer_thread(
             ring.clone(), audio_writer, channels, target_mono,
             output_path.clone(), spec, use_rf64,
-        );
+        )?;
 
         // Start capture
         input.start().map_err(|e| format!("Failed to start multi-session '{}': {}", session_id, e))?;
@@ -1213,7 +1213,7 @@ pub async fn start_session(
     let writer_handle = spawn_wav_writer_thread(
         ring.clone(), audio_writer, channels, target_mono,
         output_path.clone(), spec, use_rf64,
-    );
+    )?;
 
     // Start capture
     input.start().map_err(|e| format!("Failed to start session '{}': {}", session_id, e))?;
@@ -1449,6 +1449,26 @@ pub fn get_recording_level(mgr: State<'_, RecordingManager>) -> f32 {
     mgr.current_level.load(Ordering::SeqCst) as f32 / 1000.0
 }
 
+/// TIME-02: Return recording duration derived from actual sample count (not wall clock).
+/// Returns seconds as f64, or 0.0 if not recording.
+#[tauri::command]
+pub fn get_recording_duration_secs(mgr: State<'_, RecordingManager>) -> f64 {
+    let sessions = match mgr.sessions.lock() {
+        Ok(s) => s,
+        Err(_) => return 0.0,
+    };
+    // Check default session first, then any session
+    if let Some(session) = sessions.get("default") {
+        if let Some(ref ring) = session.ring_buffer {
+            let total_samples = ring.write_pos.load(Ordering::Relaxed);
+            let channels = session.channels.max(1) as f64;
+            let rate = session.sample_rate.max(1) as f64;
+            return total_samples as f64 / channels / rate + session.pre_record_seconds;
+        }
+    }
+    0.0
+}
+
 #[tauri::command]
 pub fn is_recording(mgr: State<'_, RecordingManager>) -> bool {
     mgr.is_any_recording()
@@ -1677,7 +1697,7 @@ mod tests {
 
         // Write 4 samples
         for i in 0..4 {
-            let idx = i % ring.capacity;
+            let idx = i & ring.mask;
             unsafe { *ring.data_ptr.add(idx) = (i as f32) * 0.1; }
         }
         ring.write_pos.store(4, Ordering::Release);
@@ -1688,7 +1708,7 @@ mod tests {
         assert_eq!(wp - rp, 4);
 
         for i in 0..4 {
-            let idx = (rp + i) % ring.capacity;
+            let idx = (rp + i) & ring.mask;
             let val = unsafe { *ring.data_ptr.add(idx) };
             assert!((val - (i as f32) * 0.1).abs() < 1e-6, "sample {} mismatch: {}", i, val);
         }
@@ -1702,7 +1722,7 @@ mod tests {
 
         // Write 6 samples
         for i in 0..6 {
-            let idx = i % ring.capacity;
+            let idx = i & ring.mask;
             unsafe { *ring.data_ptr.add(idx) = i as f32; }
         }
         ring.write_pos.store(6, Ordering::Release);
@@ -1713,7 +1733,7 @@ mod tests {
         // Write 6 more (wraps: positions 6,7,0,1,2,3)
         for i in 6..12 {
             let wp = ring.write_pos.load(Ordering::Relaxed);
-            let idx = (wp + (i - 6)) % ring.capacity;
+            let idx = (wp + (i - 6)) & ring.mask;
             unsafe { *ring.data_ptr.add(idx) = i as f32; }
         }
         ring.write_pos.store(12, Ordering::Release);
@@ -1725,7 +1745,7 @@ mod tests {
         assert_eq!(available, 8);
 
         for i in 0..available {
-            let idx = (rp + i) % ring.capacity;
+            let idx = (rp + i) & ring.mask;
             let val = unsafe { *ring.data_ptr.add(idx) };
             assert!((val - (rp + i) as f32).abs() < 1e-6,
                 "wrap sample {} (pos {}) mismatch: got {}, expected {}", i, rp + i, val, rp + i);
@@ -1799,8 +1819,8 @@ mod tests {
             let mut ch0_clipped = 0usize;
             let mut ch1_clipped = 0usize;
             for i in 0..check_pairs {
-                let idx0 = (rp + i * 2) % ring.capacity;
-                let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                let idx0 = (rp + i * 2) & ring.mask;
+                let idx1 = (rp + i * 2 + 1) & ring.mask;
                 let s0 = unsafe { *ring.data_ptr.add(idx0) };
                 let s1 = unsafe { *ring.data_ptr.add(idx1) };
                 if s0.abs() >= 0.999 { ch0_clipped += 1; }
@@ -1839,8 +1859,8 @@ mod tests {
         let mut ch0_clipped = 0usize;
         let mut ch1_clipped = 0usize;
         for i in 0..check_pairs {
-            let idx0 = (rp + i * 2) % ring.capacity;
-            let idx1 = (rp + i * 2 + 1) % ring.capacity;
+            let idx0 = (rp + i * 2) & ring.mask;
+            let idx1 = (rp + i * 2 + 1) & ring.mask;
             let s0 = unsafe { *ring.data_ptr.add(idx0) };
             let s1 = unsafe { *ring.data_ptr.add(idx1) };
             if s0.abs() >= 0.999 { ch0_clipped += 1; }
@@ -1869,8 +1889,8 @@ mod tests {
         let mut ch0_clipped = 0usize;
         let mut ch1_clipped = 0usize;
         for i in 0..check_pairs {
-            let s0 = unsafe { *ring.data_ptr.add((rp + i * 2) % ring.capacity) };
-            let s1 = unsafe { *ring.data_ptr.add((rp + i * 2 + 1) % ring.capacity) };
+            let s0 = unsafe { *ring.data_ptr.add((rp + i * 2) & ring.mask) };
+            let s1 = unsafe { *ring.data_ptr.add((rp + i * 2 + 1) & ring.mask) };
             if s0.abs() >= 0.999 { ch0_clipped += 1; }
             if s1.abs() >= 0.999 { ch1_clipped += 1; }
         }

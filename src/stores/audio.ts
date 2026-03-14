@@ -267,6 +267,11 @@ export const useAudioStore = defineStore('audio', () => {
             const track = tracksStore.tracks.find(t => t.id === trackId);
             if (!track) return;
             tracksStore.updateImportWaveform(trackId, payload);
+            // Feed waveform progress into importDecodeProgress so the
+            // progress modal shows waveform extraction progress for large files
+            if (isLargeFile) {
+              tracksStore.updateImportDecodeProgress(trackId, payload.progress);
+            }
             chunkCount++;
             if (chunkCount === 1) {
               console.log(`[Audio] [${ms()}] First waveform chunk received (progress: ${(payload.progress * 100).toFixed(0)}%)`);
@@ -462,6 +467,15 @@ export const useAudioStore = defineStore('audio', () => {
         console.log(`[Audio] [${ms()}] Waiting for waveform to finalize...`);
         await waveformDone;
         console.log(`[Audio] [${ms()}] Waveform settled`);
+      }
+
+      // Mark import fully complete — waveform and cache are both settled.
+      // setImportBuffer already sets 'ready' for small files; this covers
+      // large-file and fallback paths where setCachedAudioPath no longer
+      // changes importStatus (so the progress indicator stays visible).
+      const finalTrack = tracksStore.tracks.find(t => t.id === trackId);
+      if (finalTrack && finalTrack.importStatus !== 'ready') {
+        tracksStore.setImportReady(trackId);
       }
 
       // NOW waveform is settled — load cached transcription or defer auto-transcription

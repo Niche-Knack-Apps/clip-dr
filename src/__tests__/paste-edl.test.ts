@@ -93,12 +93,12 @@ describe('Paste EDL Integrity', () => {
 
     // Create a track to paste into
     const trackBuf = ctx.createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(trackBuf, null, 'Target', 0);
+    const track = await tracksStore.createTrackFromBuffer(trackBuf, null, 'Target', 0);
 
     // Create a buffer to paste
     const pasteBuf = ctx.createBuffer(2, 44100 * 2, 44100);
 
-    tracksStore.insertClipAtPlayhead(
+    await tracksStore.insertClipAtPlayhead(
       track.id,
       pasteBuf,
       [],
@@ -125,7 +125,7 @@ describe('Paste EDL Integrity', () => {
     const ctx = new MockAudioContext();
 
     const trackBuf = ctx.createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(trackBuf, null, 'Split', 0);
+    const track = await tracksStore.createTrackFromBuffer(trackBuf, null, 'Split', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Replace with a null-buffer clip (EDL clip)
@@ -141,7 +141,7 @@ describe('Paste EDL Integrity', () => {
     tracksStore.tracks[idx] = { ...tracksStore.tracks[idx], clips: [edlClip] };
     tracksStore.tracks = [...tracksStore.tracks];
 
-    const result = tracksStore.splitClipAtTime(track.id, 'edl-clip', 4, ctx as unknown as AudioContext);
+    const result = await tracksStore.splitClipAtTime(track.id, 'edl-clip', 4, ctx as unknown as AudioContext);
     expect(result).not.toBeNull();
     const { before, after } = result!;
 
@@ -165,7 +165,7 @@ describe('Paste EDL Integrity', () => {
     const ctx = new MockAudioContext();
 
     const trackBuf = ctx.createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(trackBuf, null, 'WaveformSplit', 0);
+    const track = await tracksStore.createTrackFromBuffer(trackBuf, null, 'WaveformSplit', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     const waveformData = new Array(200).fill(0.3);  // 100 min/max pairs
@@ -181,7 +181,7 @@ describe('Paste EDL Integrity', () => {
     tracksStore.tracks[idx] = { ...tracksStore.tracks[idx], clips: [edlClip] };
     tracksStore.tracks = [...tracksStore.tracks];
 
-    const result = tracksStore.splitClipAtTime(track.id, 'wv-clip', 5, ctx as unknown as AudioContext);
+    const result = await tracksStore.splitClipAtTime(track.id, 'wv-clip', 5, ctx as unknown as AudioContext);
     expect(result).not.toBeNull();
     const totalAfter = result!.before.waveformData.length + result!.after.waveformData.length;
     // Allow ±2 (rounding at split boundary)
@@ -195,7 +195,7 @@ describe('Paste EDL Integrity', () => {
     const ctx = new MockAudioContext();
 
     const trackBuf = ctx.createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(trackBuf, null, 'Multi', 0);
+    const track = await tracksStore.createTrackFromBuffer(trackBuf, null, 'Multi', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Set up one large EDL clip covering 0..10s
@@ -213,7 +213,7 @@ describe('Paste EDL Integrity', () => {
 
     // Paste a 2s clip at playhead=5
     const pasteBuf = ctx.createBuffer(2, 44100 * 2, 44100);
-    tracksStore.insertClipAtPlayhead(track.id, pasteBuf, [], 5, ctx as unknown as AudioContext);
+    await tracksStore.insertClipAtPlayhead(track.id, pasteBuf, [], 5, ctx as unknown as AudioContext);
 
     const clips = tracksStore.getTrackClips(track.id);
     // Should now have 3 clips: before(0..5), pasted(5..7), after(7..12)

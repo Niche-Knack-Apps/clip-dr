@@ -73,7 +73,7 @@ function mkBuf(dur: number, rate = 44100, ch = 2): AudioBuffer {
 async function setupTracksWithClips(tracksStore: Awaited<ReturnType<typeof import('@/stores/tracks').useTracksStore>>) {
   type TrackClip = import('@/shared/types').TrackClip;
   const buf = mkBuf(10);
-  const track = tracksStore.createTrackFromBuffer(buf, null, 'Test Track', 0);
+  const track = await tracksStore.createTrackFromBuffer(buf, null, 'Test Track', 0);
   const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
   // Replace with two explicit clips (no buffer — EDL clips)
@@ -134,7 +134,7 @@ describe('EDL Export', () => {
 
     type TrackClip = import('@/shared/types').TrackClip;
     const buf = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Insert clips in reverse order to test sorting
@@ -162,7 +162,7 @@ describe('EDL Export', () => {
 
     type TrackClip = import('@/shared/types').TrackClip;
     const buf = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Track starts at time 0. Second clip starts at timeline 5s.
@@ -223,7 +223,7 @@ describe('EDL Export', () => {
 
     type TrackClip = import('@/shared/types').TrackClip;
     const buf = mkBuf(5);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // No sourcePath on track, no sourceFile on clip
@@ -248,7 +248,7 @@ describe('EDL Export', () => {
     const tracksStore = useTracksStore();
 
     const buf = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Single Buffer', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Single Buffer', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // No clips array set — getTrackClips synthesizes from audioData
@@ -271,7 +271,7 @@ describe('EDL Export', () => {
 
     type TrackClip = import('@/shared/types').TrackClip;
     const buf = mkBuf(5);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     tracksStore.tracks[idx] = {

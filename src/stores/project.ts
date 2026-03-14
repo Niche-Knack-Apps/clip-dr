@@ -378,6 +378,35 @@ export const useProjectStore = defineStore('project', () => {
     );
   }
 
+  // ── Close guard ────────────────────────────────────────────────────
+
+  function setupCloseGuard(): void {
+    const appWindow = getCurrentWindow();
+    appWindow.onCloseRequested(async (event) => {
+      if (!dirty.value) return;
+
+      event.preventDefault();
+
+      const shouldSave = await ask(
+        'You have unsaved changes.\n\nSave before closing?',
+        { title: 'Unsaved Changes', kind: 'warning', okLabel: 'Save', cancelLabel: "Don't Save" },
+      );
+
+      if (shouldSave) {
+        await saveProject();
+      }
+
+      // Defer destroy to next tick — calling destroy() from within the
+      // onCloseRequested handler doesn't work because Tauri's Rust runtime
+      // is still processing the close-request event.
+      setTimeout(() => {
+        appWindow.destroy().catch((e: unknown) => {
+          console.error('[Project] destroy() failed:', e);
+        });
+      }, 0);
+    });
+  }
+
   return {
     projectPath,
     projectName,
@@ -390,6 +419,7 @@ export const useProjectStore = defineStore('project', () => {
     openProject,
     loadProject,
     setupDirtyTracking,
+    setupCloseGuard,
     renameProject,
     newProject,
   };

@@ -69,8 +69,8 @@ fn export_audio_region_inner(
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
     // Calculate sample positions
-    let start_sample = (start_time * sample_rate as f64) as u64;
-    let end_sample = (end_time * sample_rate as f64) as u64;
+    let start_sample = (start_time * sample_rate as f64).floor() as u64;
+    let end_sample = (end_time * sample_rate as f64).ceil() as u64;
 
     // Collect samples in the region
     let mut all_samples: Vec<f32> = Vec::new();
@@ -275,7 +275,8 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
     // Sort by timeline position for deterministic mixing
     sources.sort_by(|a, b| a.track_start.partial_cmp(&b.track_start).unwrap_or(std::cmp::Ordering::Equal));
 
-    let total_frames = ((edl.end_time - edl.start_time) * edl.sample_rate as f64) as usize;
+    // TIME-07: ceil total frames to avoid truncating the last partial sample
+    let total_frames = ((edl.end_time - edl.start_time) * edl.sample_rate as f64).ceil() as usize;
 
     let result = match edl.format.as_str() {
         "wav"  => export_edl_wav(edl, &sources, total_frames, app),
@@ -326,7 +327,8 @@ fn mix_chunk(
             };
 
             // Apply file_offset: rel_t is position within the clip; add offset to reach into source file
-            let src_frame = ((rel_t + src.file_offset) * src_rate) as usize;
+            // TIME-07: explicit floor for sample lookup (was implicit truncation via `as usize`)
+            let src_frame = ((rel_t + src.file_offset) * src_rate).floor() as usize;
             let interleaved_idx = src_frame * src_ch;
             if interleaved_idx >= samples.len() { continue; }
 
@@ -689,8 +691,8 @@ fn export_audio_ogg_inner(
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    let start_sample = (start_time * sample_rate as f64) as u64;
-    let end_sample = (end_time * sample_rate as f64) as u64;
+    let start_sample = (start_time * sample_rate as f64).floor() as u64;
+    let end_sample = (end_time * sample_rate as f64).ceil() as u64;
 
     // Set up Vorbis encoder BEFORE decode loop — encode in chunks
     let output_file = BufWriter::new(
@@ -1172,6 +1174,7 @@ mod tests {
         EdlSource {
             track_start,
             duration,
+            file_offset: 0.0,
             volume: 1.0,
             volume_envelope: None,
             pcm,
@@ -1245,6 +1248,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 1.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: output_path.to_str().unwrap().to_string(),
@@ -1304,6 +1308,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 2.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: output_orig.to_str().unwrap().to_string(),
@@ -1326,6 +1331,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 1.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: output_edited.to_str().unwrap().to_string(),
@@ -1376,6 +1382,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 2.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: output_orig.to_str().unwrap().to_string(),
@@ -1398,6 +1405,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 1.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: output_edited.to_str().unwrap().to_string(),
@@ -1456,6 +1464,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 2.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: temp_wav_orig.to_str().unwrap().to_string(),
@@ -1480,6 +1489,7 @@ mod tests {
                 track_start: 0.0,
                 duration: 1.0,
                 volume: 1.0,
+                file_offset: 0.0,
                 volume_envelope: None,
             }],
             output_path: temp_wav_edited.to_str().unwrap().to_string(),

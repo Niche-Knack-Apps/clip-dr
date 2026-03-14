@@ -32,7 +32,7 @@ pub fn spawn_wav_writer_thread(
     base_path: PathBuf,
     wav_spec: WavSpec,
     use_rf64: bool,
-) -> JoinHandle<(AudioWriter, usize, Vec<PathBuf>, u32)> {
+) -> Result<JoinHandle<(AudioWriter, usize, Vec<PathBuf>, u32)>, String> {
     std::thread::Builder::new()
         .name("wav-writer".into())
         .spawn(move || {
@@ -67,8 +67,8 @@ pub fn spawn_wav_writer_thread(
                     let mut ch0_clipped = 0usize;
                     let mut ch1_clipped = 0usize;
                     for i in 0..check_pairs {
-                        let idx0 = (rp + i * 2) % ring.capacity;
-                        let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                        let idx0 = (rp + i * 2) & ring.mask;
+                        let idx1 = (rp + i * 2 + 1) & ring.mask;
                         let s0 = unsafe { *ring.data_ptr.add(idx0) };
                         let s1 = unsafe { *ring.data_ptr.add(idx1) };
                         if s0.abs() >= 0.999 { ch0_clipped += 1; }
@@ -130,8 +130,8 @@ pub fn spawn_wav_writer_thread(
                     // Write with bad-channel fixup (replace bad channel with good one)
                     let pairs = available / 2;
                     for i in 0..pairs {
-                        let idx0 = (rp + i * 2) % ring.capacity;
-                        let idx1 = (rp + i * 2 + 1) % ring.capacity;
+                        let idx0 = (rp + i * 2) & ring.mask;
+                        let idx1 = (rp + i * 2 + 1) & ring.mask;
                         let s0 = unsafe { *ring.data_ptr.add(idx0) };
                         let s1 = unsafe { *ring.data_ptr.add(idx1) };
                         if bad_ch == 1 {
@@ -190,7 +190,7 @@ pub fn spawn_wav_writer_thread(
                 } else {
                     // Normal path: write all samples directly
                     for i in 0..available {
-                        let idx = (rp + i) % ring.capacity;
+                        let idx = (rp + i) & ring.mask;
                         let sample = unsafe { *ring.data_ptr.add(idx) };
                         match writer.write_sample(sample) {
                             Ok(_) => { consecutive_errors = 0; }
@@ -224,7 +224,7 @@ pub fn spawn_wav_writer_thread(
             let rp = ring.read_pos.load(std::sync::atomic::Ordering::Relaxed);
             let remaining = wp.wrapping_sub(rp);
             for i in 0..remaining {
-                let idx = (rp + i) % ring.capacity;
+                let idx = (rp + i) & ring.mask;
                 let sample = unsafe { *ring.data_ptr.add(idx) };
                 match writer.write_sample(sample) {
                     Ok(_) => { consecutive_errors = 0; }
@@ -256,7 +256,7 @@ pub fn spawn_wav_writer_thread(
 
             (writer, total_written, completed_segments, write_error_count)
         })
-        .expect("Failed to spawn wav-writer thread")
+        .map_err(|e| format!("Failed to spawn wav-writer thread: {}", e))
 }
 
 /// Streaming stereo-to-mono WAV conversion (file-to-file, constant memory)
@@ -455,4 +455,131 @@ pub fn read_wav_format(path: &Path) -> Result<(u32, u16), String> {
     ]);
 
     Ok((sample_rate, channels))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// REC-H3 regression: spawn_wav_writer_thread must return Result, not panic.
+    #[test]
+    fn spawn_writer_returns_result() {
+        let ring = Arc::new(RecordingRingBuffer::new(4096));
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("test.wav");
+
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let file = File::create(&out_path).unwrap();
+        let writer = AudioWriter::Hound(
+            WavWriter::new(BufWriter::new(file), spec).unwrap()
+        );
+
+        // Signal immediate stop so the thread drains and exits
+        ring.active.store(false, Ordering::Release);
+
+        let result = spawn_wav_writer_thread(
+            ring, writer, 1, false, out_path, spec, false,
+        );
+        assert!(result.is_ok(), "spawn_wav_writer_thread must return Ok");
+
+        let handle = result.unwrap();
+        let (_writer, total, _segs, errors) = handle.join().unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(errors, 0);
+    }
+
+    /// REC-H3 regression: writer thread drains samples written to ring buffer.
+    #[test]
+    fn writer_drains_ring_buffer_samples() {
+        let ring = Arc::new(RecordingRingBuffer::new(8192));
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("drain_test.wav");
+
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let file = File::create(&out_path).unwrap();
+        let writer = AudioWriter::Hound(
+            WavWriter::new(BufWriter::new(file), spec).unwrap()
+        );
+
+        // Write 100 samples into the ring buffer before spawning
+        let sample_count = 100usize;
+        for i in 0..sample_count {
+            unsafe {
+                *ring.data_ptr.add(i & ring.mask) = (i as f32) / 1000.0;
+            }
+        }
+        ring.write_pos.store(sample_count, Ordering::Release);
+
+        let handle = spawn_wav_writer_thread(
+            ring.clone(), writer, 1, false, out_path.clone(), spec, false,
+        ).expect("spawn must succeed");
+
+        // Give the writer time to drain, then signal stop
+        std::thread::sleep(Duration::from_millis(100));
+        ring.active.store(false, Ordering::Release);
+
+        let (_writer, total, _segs, errors) = handle.join().unwrap();
+        assert_eq!(total, sample_count, "all samples must be drained");
+        assert_eq!(errors, 0, "no write errors expected");
+        assert!(out_path.exists(), "WAV file must exist on disk");
+    }
+
+    #[test]
+    fn segment_path_first_is_base() {
+        let base = PathBuf::from("/tmp/rec.wav");
+        assert_eq!(segment_path(&base, 1), base);
+    }
+
+    #[test]
+    fn segment_path_second_has_suffix() {
+        let base = PathBuf::from("/tmp/rec.wav");
+        let p2 = segment_path(&base, 2);
+        assert_eq!(p2, PathBuf::from("/tmp/rec_002.wav"));
+    }
+
+    /// REC-H1 regression: ring buffer capacity is always power-of-two.
+    #[test]
+    fn ring_buffer_capacity_is_power_of_two() {
+        // Non-power-of-two input should be rounded up
+        let ring = RecordingRingBuffer::new(5000);
+        assert!(ring.capacity.is_power_of_two(), "capacity must be power of two");
+        assert!(ring.capacity >= 5000, "capacity must be >= requested");
+        assert_eq!(ring.capacity, 8192); // next power of two above 5000
+        assert_eq!(ring.mask, 8191);
+
+        // Already power-of-two input should stay the same
+        let ring2 = RecordingRingBuffer::new(4096);
+        assert_eq!(ring2.capacity, 4096);
+        assert_eq!(ring2.mask, 4095);
+    }
+
+    /// REC-H1 regression: bitwise mask indexing works correctly for wrap-around.
+    #[test]
+    fn ring_buffer_mask_wraps_correctly() {
+        let ring = Arc::new(RecordingRingBuffer::new(16)); // will stay 16 (already power-of-two)
+        assert_eq!(ring.capacity, 16);
+
+        // Write at position 15 (last slot) and 16 (should wrap to 0)
+        unsafe {
+            *ring.data_ptr.add(15 & ring.mask) = 1.0;
+            *ring.data_ptr.add(16 & ring.mask) = 2.0; // wraps to index 0
+        }
+        unsafe {
+            assert_eq!(*ring.data_ptr.add(15), 1.0);
+            assert_eq!(*ring.data_ptr.add(0), 2.0);
+        }
+    }
 }

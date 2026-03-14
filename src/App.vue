@@ -4,6 +4,7 @@ import AppLayout from '@/components/layout/AppLayout.vue';
 import SettingsView from '@/views/SettingsView.vue';
 import EditorView from '@/views/EditorView.vue';
 import FloatingMeter from '@/components/ui/FloatingMeter.vue';
+import Toast from '@/components/ui/Toast.vue';
 import { useSettingsStore } from '@/stores/settings';
 
 const settingsStore = useSettingsStore();
@@ -64,4 +65,5 @@ const missingDeps = computed(() => {
   />
 
   <FloatingMeter />
+  <Toast />
 </template>

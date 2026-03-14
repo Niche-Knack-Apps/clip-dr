@@ -3,7 +3,7 @@ import { useTracksStore } from '@/stores/tracks';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { TRACK_COLORS } from '@/shared/types';
 import type { TrackClip, WaveformLayer, WaveformLayerClip, Track } from '@/shared/types';
-import { isTrackPlayable } from '@/shared/utils';
+import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
 
 /**
  * Composable that creates a composite waveform from all tracks.
@@ -125,10 +125,9 @@ export function useCompositeWaveform() {
     const timelineDuration = tracksStore.timelineDuration;
     if (timelineDuration <= 0) return [];
 
-    // Solo/mute filtering (same logic as playback)
+    // DUP-07: use canonical solo/mute filter (same logic as playback/export)
     const playable = tracks.filter((t: Track) => isTrackPlayable(t.importStatus));
-    const soloed = playable.filter((t: Track) => t.solo && !t.muted);
-    const active = soloed.length > 0 ? soloed : playable.filter((t: Track) => !t.muted);
+    const active = filterActiveTracks(playable);
 
     if (active.length === 0) return [];
 

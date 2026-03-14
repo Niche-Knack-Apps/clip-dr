@@ -64,6 +64,14 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
   // Track if JKL playback is active
   let jklActive = false;
 
+  // Busy guard: prevent key-repeat from firing edit ops faster than they complete (UI-05)
+  let editBusy = false;
+  async function guardedEditAction(fn: (() => void) | (() => Promise<unknown>) | undefined): Promise<void> {
+    if (!fn || editBusy) return;
+    editBusy = true;
+    try { await fn(); } finally { editBusy = false; }
+  }
+
   // Calculate JKL speed based on held keys
   function calculateJklSpeed(): { speed: number; reverse: boolean } | null {
     const hasL = heldKeys.has('l') || heldKeys.has('L') || heldKeys.has('ArrowRight');
@@ -123,26 +131,26 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
         case 'x':
           event.preventDefault();
           console.log('[Keyboard] Ctrl+X (cut)');
-          actions.onCut?.();
+          guardedEditAction(actions.onCut);
           return;
         case 'c':
           event.preventDefault();
           console.log('[Keyboard] Ctrl+C (copy)');
-          actions.onCopy?.();
+          guardedEditAction(actions.onCopy);
           return;
         case 'v':
           event.preventDefault();
           console.log('[Keyboard] Ctrl+V (paste)');
-          actions.onPaste?.();
+          guardedEditAction(actions.onPaste);
           return;
         case 'z':
           event.preventDefault();
           if (event.shiftKey) {
             console.log('[Keyboard] Ctrl+Shift+Z (redo)');
-            actions.onRedo?.();
+            guardedEditAction(actions.onRedo);
           } else {
             console.log('[Keyboard] Ctrl+Z (undo)');
-            actions.onUndo?.();
+            guardedEditAction(actions.onUndo);
           }
           return;
         case 'e':
@@ -355,7 +363,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
         if (!isCtrlOrCmd) {
           event.preventDefault();
           console.log(`[Keyboard] ${event.key} (delete)`);
-          actions.onDeleteDirect?.();
+          guardedEditAction(actions.onDeleteDirect);
         }
         break;
 
