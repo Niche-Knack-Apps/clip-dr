@@ -380,10 +380,13 @@ export const useProjectStore = defineStore('project', () => {
 
   // ── Close guard ────────────────────────────────────────────────────
 
+  let closeConfirmed = false;
+
   function setupCloseGuard(): void {
     const appWindow = getCurrentWindow();
     appWindow.onCloseRequested(async (event) => {
-      if (!dirty.value) return;
+      // Bypass guard after user already confirmed via dialog
+      if (closeConfirmed || !dirty.value) return;
 
       event.preventDefault();
 
@@ -396,7 +399,9 @@ export const useProjectStore = defineStore('project', () => {
         await saveProject();
       }
 
-      appWindow.destroy();
+      // Flag bypass so re-entrant close doesn't show dialog again
+      closeConfirmed = true;
+      appWindow.close();
     });
   }
 
