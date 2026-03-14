@@ -1197,7 +1197,10 @@ fn build_output_stream(
                     // Evaluate volume: use automation envelope if available, else base volume
                     let track_vol = if let Some(Some(env)) = track_envelopes.get(track_idx) {
                         if !env.is_empty() {
-                            let idx_ref = envelope_indices.get_mut(track_idx).unwrap();
+                            let idx_ref = match envelope_indices.get_mut(track_idx) {
+                                Some(r) => r,
+                                None => continue,
+                            };
                             eval_envelope(env, rel_pos, base_vol, idx_ref)
                         } else {
                             base_vol
