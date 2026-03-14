@@ -187,7 +187,7 @@ pub async fn detect_speech_segments(
     }
 
     let mut sorted_energies = all_energies.clone();
-    sorted_energies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_energies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     // Use percentile-based threshold (noise floor + margin)
     let noise_floor_idx = (sorted_energies.len() as f64 * 0.1) as usize;
@@ -211,7 +211,7 @@ pub async fn detect_speech_segments(
         0.4 // Default threshold
     } else {
         let mut sorted_zcrs = high_energy_zcrs.clone();
-        sorted_zcrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_zcrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median_zcr = sorted_zcrs[sorted_zcrs.len() / 2];
         // Allow ZCR up to 1.5x median, but cap at 0.5
         (median_zcr * 1.5).min(0.5)

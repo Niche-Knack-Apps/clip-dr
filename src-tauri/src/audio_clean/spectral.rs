@@ -116,7 +116,7 @@ impl SpectralDenoiser {
         }
 
         // Sort by energy and take bottom 10%
-        frame_energies.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        frame_energies.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let quiet_count = (frame_energies.len() / 10).max(1);
 
         let mut spectrum_sum = vec![0.0f32; self.fft_size / 2 + 1];
