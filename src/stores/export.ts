@@ -39,6 +39,37 @@ function normalizeAudioPath(path: string, expectedFormat: ExportFormat): { path:
   return { path: base + '.' + expectedFormat, format: expectedFormat };
 }
 
+/**
+ * Build a human-readable export summary showing which tracks are included/excluded.
+ * Follows DAW conventions: explicitly list what's being exported and why others are excluded.
+ */
+function buildExportSummary(
+  allTracks: Track[],
+  active: Track[],
+): string {
+  const hasSolo = allTracks.some(t => t.solo);
+  const excluded = allTracks.filter(t => !active.includes(t));
+
+  const lines: string[] = [];
+  lines.push(`Exporting ${active.length} of ${allTracks.length} track(s):`);
+
+  for (const t of active) {
+    const tags: string[] = [];
+    if (t.solo) tags.push('solo');
+    const suffix = tags.length ? ` (${tags.join(', ')})` : '';
+    lines.push(`  + ${t.name}${suffix}`);
+  }
+
+  if (excluded.length > 0) {
+    for (const t of excluded) {
+      const reason = t.muted ? 'muted' : hasSolo && !t.solo ? 'not soloed' : 'excluded';
+      lines.push(`  - ${t.name} (${reason})`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export const useExportStore = defineStore('export', () => {
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
@@ -102,8 +133,8 @@ export const useExportStore = defineStore('export', () => {
       // Normalize extension (handles GTK not appending extension)
       const { path: outputPath } = normalizeAudioPath(outputPathRaw, format);
 
-      const names = activeTracks.value.map(t => t.name).join(', ');
-      useUIStore().showToast(`Exporting ${activeTracks.value.length} track(s): ${names}`, 'info');
+      const allPlayable = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
+      useUIStore().showToast(buildExportSummary(allPlayable, activeTracks.value), 'info', 6000);
 
       settingsStore.setLastExportFolder(outputPath);
       settingsStore.setLastExportFormat(format);
@@ -135,8 +166,8 @@ export const useExportStore = defineStore('export', () => {
 
     const { format } = normalizeAudioPath(lastPath, profile.format);
 
-    const names = activeTracks.value.map(t => t.name).join(', ');
-    useUIStore().showToast(`Re-exporting ${activeTracks.value.length} track(s): ${names}`, 'info');
+    const allPlayable = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
+    useUIStore().showToast(buildExportSummary(allPlayable, activeTracks.value), 'info', 6000);
 
     try {
       return await doMixedExport(lastPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
