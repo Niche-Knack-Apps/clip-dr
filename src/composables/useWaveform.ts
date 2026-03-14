@@ -48,6 +48,22 @@ function quantizeRange(start: number, end: number) {
   return { qStart, qEnd };
 }
 
+/**
+ * Compute an RMS-based display scale factor for waveform buckets.
+ * Targets ~70% of half-height for the RMS level. Clamped to [0, 1]
+ * so we only attenuate loud/compressed waveforms, never amplify quiet ones.
+ */
+function computeWaveformScale(buckets: WaveformBucket[]): number {
+  let sumSq = 0;
+  for (const { min, max } of buckets) {
+    const absMax = Math.max(Math.abs(min), Math.abs(max));
+    sumSq += absMax * absMax;
+  }
+  const rms = Math.sqrt(sumSq / buckets.length);
+  const targetRms = 0.7;
+  return rms > 0.001 ? Math.min(targetRms / rms, 1.0) : 1.0;
+}
+
 export function useWaveform() {
   const { effectiveWaveformData, effectiveDuration, waveformLayers } = useEffectiveAudio();
   const tracksStore = useTracksStore();
@@ -230,14 +246,18 @@ export function useWaveform() {
     const centerY = height / 2;
     const barWidth = Math.max(width / buckets.length, 1);
 
+    // RMS-based amplitude scaling: attenuate loud/compressed waveforms so they
+    // don't render as solid blocks. Never amplify — quiet tracks keep natural scale.
+    const scale = computeWaveformScale(buckets);
+
     ctx.fillStyle = color;
     ctx.beginPath();
 
     for (let i = 0; i < buckets.length; i++) {
       const { min, max } = buckets[i];
       const x = i * barWidth;
-      const topY = centerY - max * centerY;
-      const bottomY = centerY - min * centerY;
+      const topY = centerY - (max * scale) * centerY;
+      const bottomY = centerY - (min * scale) * centerY;
       const barH = bottomY - topY;
 
       if (barH < 0.5) continue; // skip zero/negligible bars
@@ -451,6 +471,9 @@ export function useWaveform() {
     for (const layer of layerBuckets) {
       if (!layer.buckets.length) continue;
 
+      // Per-layer RMS scaling so each track is independently normalized
+      const scale = computeWaveformScale(layer.buckets);
+
       ctx.globalAlpha = singleLayer ? 1.0 : 0.7;
       ctx.fillStyle = layer.color;
       ctx.beginPath();
@@ -459,8 +482,8 @@ export function useWaveform() {
       for (let i = 0; i < layer.buckets.length; i++) {
         const { min, max } = layer.buckets[i];
         const x = i * barWidth;
-        const topY = centerY - max * centerY;
-        const bottomY = centerY - min * centerY;
+        const topY = centerY - (max * scale) * centerY;
+        const bottomY = centerY - (min * scale) * centerY;
         const barH = bottomY - topY;
         if (barH < 0.5) continue;
         ctx.rect(x, topY, barWidth, barH);

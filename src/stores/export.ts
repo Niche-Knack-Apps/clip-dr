@@ -102,6 +102,9 @@ export const useExportStore = defineStore('export', () => {
       // Normalize extension (handles GTK not appending extension)
       const { path: outputPath } = normalizeAudioPath(outputPathRaw, format);
 
+      const names = activeTracks.value.map(t => t.name).join(', ');
+      useUIStore().showToast(`Exporting ${activeTracks.value.length} track(s): ${names}`, 'info');
+
       settingsStore.setLastExportFolder(outputPath);
       settingsStore.setLastExportFormat(format);
       settingsStore.setLastExportProfileId(profile.id);
@@ -131,6 +134,9 @@ export const useExportStore = defineStore('export', () => {
     if (!profile) return null;
 
     const { format } = normalizeAudioPath(lastPath, profile.format);
+
+    const names = activeTracks.value.map(t => t.name).join(', ');
+    useUIStore().showToast(`Re-exporting ${activeTracks.value.length} track(s): ${names}`, 'info');
 
     try {
       return await doMixedExport(lastPath, format, profile.mp3Bitrate || 192, profile.oggQuality);

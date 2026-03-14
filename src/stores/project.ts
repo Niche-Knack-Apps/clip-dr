@@ -378,6 +378,28 @@ export const useProjectStore = defineStore('project', () => {
     );
   }
 
+  // ── Close guard ────────────────────────────────────────────────────
+
+  function setupCloseGuard(): void {
+    const appWindow = getCurrentWindow();
+    appWindow.onCloseRequested(async (event) => {
+      if (!dirty.value) return;
+
+      event.preventDefault();
+
+      const shouldSave = await ask(
+        'You have unsaved changes.\n\nSave before closing?',
+        { title: 'Unsaved Changes', kind: 'warning', okLabel: 'Save', cancelLabel: "Don't Save" },
+      );
+
+      if (shouldSave) {
+        await saveProject();
+      }
+
+      appWindow.destroy();
+    });
+  }
+
   return {
     projectPath,
     projectName,
@@ -390,6 +412,7 @@ export const useProjectStore = defineStore('project', () => {
     openProject,
     loadProject,
     setupDirtyTracking,
+    setupCloseGuard,
     renameProject,
     newProject,
   };
