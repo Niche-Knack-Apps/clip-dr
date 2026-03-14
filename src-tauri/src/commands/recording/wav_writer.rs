@@ -354,10 +354,10 @@ pub fn patch_wav_header_if_needed(path: &Path) -> Result<(), String> {
     let expected_data_u32 = if actual_data_size > u32::MAX as u64 { u32::MAX } else { actual_data_size as u32 };
 
     // Read current header values
-    let current_riff_u32 = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let current_riff_u32 = u32::from_le_bytes(header[4..8].try_into().expect("4-byte slice converts to [u8; 4]"));
     let data_size_offset = data_offset - 4;
     let current_data_u32 = u32::from_le_bytes(
-        header[data_size_offset..data_size_offset + 4].try_into().unwrap()
+        header[data_size_offset..data_size_offset + 4].try_into().expect("4-byte slice converts to [u8; 4]")
     );
 
     if current_riff_u32 == expected_riff_u32 && current_data_u32 == expected_data_u32 {
