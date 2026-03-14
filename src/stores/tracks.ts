@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, shallowRef, computed, triggerRef, watch } from 'vue';
 import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, WaveformChunkEvent, VolumeAutomationPoint } from '@/shared/types';
 import { TRACK_COLORS } from '@/shared/types';
-import { generateId, binarySearch } from '@/shared/utils';
+import { generateId, binarySearch, isTrackPlayable } from '@/shared/utils';
 import { mixTrackClipsToBuffer } from '@/shared/audio-utils';
 import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
@@ -997,7 +997,8 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     // During initial import phases, don't return a clip — the import waveform canvas handles rendering
-    if (track.importStatus === 'importing' || track.importStatus === 'decoding') return [];
+    // DUP-08: use canonical isTrackPlayable check instead of inline status comparison
+    if (!isTrackPlayable(track.importStatus)) return [];
 
     // Need either a buffer OR waveform data with valid duration to render a clip
     const hasRenderableData = !!track.audioData.buffer

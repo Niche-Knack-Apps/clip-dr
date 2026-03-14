@@ -453,3 +453,42 @@ describe('PERF-15: createEnvelopeWalker for sequential access', () => {
     expect(Number.isFinite(sum)).toBe(true);
   });
 });
+
+describe('DUP-08: importStatus playable check consistency', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('getTrackClips returns empty for non-playable import statuses', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    const trackId = tracksStore.tracks[0].id;
+
+    // Track with ready status should have clips
+    expect(tracksStore.getTrackClips(trackId).length).toBeGreaterThan(0);
+
+    // Simulate importing status — should return empty
+    tracksStore.createImportingTrack('Importing Track', { duration: 5, sampleRate: 44100, channels: 1 }, 0, 'test-session');
+    const importingId = tracksStore.tracks[1].id;
+    expect(tracksStore.tracks[1].importStatus).toBe('importing');
+    expect(tracksStore.getTrackClips(importingId)).toEqual([]);
+  });
+
+  it('isTrackPlayable is the single source of truth', async () => {
+    const { isTrackPlayable } = await import('@/shared/utils');
+
+    // These should be playable
+    expect(isTrackPlayable(undefined)).toBe(true);
+    expect(isTrackPlayable('ready')).toBe(true);
+    expect(isTrackPlayable('large-file')).toBe(true);
+    expect(isTrackPlayable('caching')).toBe(true);
+
+    // These should NOT be playable
+    expect(isTrackPlayable('importing')).toBe(false);
+    expect(isTrackPlayable('decoding')).toBe(false);
+  });
+});
