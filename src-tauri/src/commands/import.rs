@@ -285,7 +285,7 @@ pub async fn import_audio_start(
     // Store session
     let state = app_handle.state::<ImportState>();
     {
-        let mut sessions = state.sessions.lock().unwrap();
+        let mut sessions = state.sessions.lock().expect("import sessions mutex poisoned");
         sessions.insert(
             session_id.clone(),
             ImportSession {
@@ -319,7 +319,7 @@ pub async fn import_audio_start(
 
         // Clean up session
         let state = bg_app.state::<ImportState>();
-        let mut sessions = state.sessions.lock().unwrap();
+        let mut sessions = state.sessions.lock().expect("import sessions mutex poisoned");
         sessions.remove(&bg_session_id);
 
         // Build peak pyramid in background
@@ -1178,7 +1178,7 @@ fn build_and_save_pyramid(path: &Path) {
     let build_id = PYRAMID_BUILD_ID.fetch_add(1, Ordering::Relaxed);
     let cancel_flag = Arc::new(AtomicBool::new(false));
     {
-        let mut builds = get_active_pyramid_builds().lock().unwrap();
+        let mut builds = get_active_pyramid_builds().lock().expect("pyramid builds mutex poisoned");
         builds.insert(build_id, cancel_flag.clone());
     }
 
@@ -1186,7 +1186,7 @@ fn build_and_save_pyramid(path: &Path) {
     struct BuildCleanup(u64);
     impl Drop for BuildCleanup {
         fn drop(&mut self) {
-            let mut builds = get_active_pyramid_builds().lock().unwrap();
+            let mut builds = get_active_pyramid_builds().lock().expect("pyramid builds mutex poisoned");
             builds.remove(&self.0);
         }
     }
@@ -1437,7 +1437,7 @@ pub fn get_peak_tile(
 
     // Check in-memory LRU cache first (avoids disk I/O during smooth zoom/pan)
     {
-        let mut cache = get_pyramid_mem_cache().lock().unwrap();
+        let mut cache = get_pyramid_mem_cache().lock().expect("pyramid mem cache mutex poisoned");
         if let Some(idx) = cache.get(file_hash) {
             let cached = &cache.entries[idx];
             return Ok(get_peaks_for_range(&cached.levels, cached.sample_rate, start_time, end_time, bucket_count));
@@ -1449,7 +1449,7 @@ pub fn get_peak_tile(
         let result = get_peaks_for_range(&levels, sample_rate, start_time, end_time, bucket_count);
 
         // Store in LRU cache for subsequent calls
-        let mut cache = get_pyramid_mem_cache().lock().unwrap();
+        let mut cache = get_pyramid_mem_cache().lock().expect("pyramid mem cache mutex poisoned");
         cache.insert(file_hash, levels, sample_rate);
 
         return Ok(result);
@@ -1467,7 +1467,7 @@ pub fn cancel_pyramid_builds() {
     PYRAMID_BUILD_GENERATION.fetch_add(1, Ordering::Release);
 
     // Signal all currently active builds to stop
-    let mut builds = get_active_pyramid_builds().lock().unwrap();
+    let mut builds = get_active_pyramid_builds().lock().expect("pyramid builds mutex poisoned");
     let count = builds.len();
     for (_gen, cancel_flag) in builds.iter() {
         cancel_flag.store(true, Ordering::Relaxed);
@@ -1485,7 +1485,7 @@ pub async fn import_audio_cancel(
     session_id: String,
 ) -> Result<(), String> {
     let state = app_handle.state::<ImportState>();
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().expect("import sessions mutex poisoned");
     if let Some(session) = sessions.remove(&session_id) {
         session.cancel.store(true, Ordering::Relaxed);
     }

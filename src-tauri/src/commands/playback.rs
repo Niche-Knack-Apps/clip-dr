@@ -340,7 +340,7 @@ impl MeterData {
             self.track_rms_r[i].store(0, Ordering::Relaxed);
         }
         self.track_count.store(count.min(MAX_METER_TRACKS), Ordering::Release);
-        *self.track_ids.lock().unwrap() = ids;
+        *self.track_ids.lock().expect("track_ids mutex poisoned") = ids;
     }
 
     fn store_f32(atom: &AtomicU32, val: f32) {

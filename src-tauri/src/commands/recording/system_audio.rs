@@ -172,7 +172,7 @@ fn start_system_audio_monitoring_impl(mgr: &RecordingManager) -> Result<(), Stri
     let mut child = child_result.map_err(|e| format!("Failed to start audio capture: {}", e))?;
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
 
-    *mgr.system_monitor_child.lock().unwrap() = Some(child);
+    *mgr.system_monitor_child.lock().expect("system_monitor_child mutex poisoned") = Some(child);
     mgr.system_monitor_active.store(true, Ordering::SeqCst);
     mgr.current_level.store(0, Ordering::SeqCst);
 
