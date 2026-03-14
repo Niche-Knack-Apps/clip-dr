@@ -10,7 +10,7 @@ import { useSettingsStore } from './settings';
 import { listen } from '@tauri-apps/api/event';
 import type { ExportFormat, ExportProfile, ExportEDL, ExportEDLTrack, Track, TrackClip, VolumeAutomationPoint } from '@/shared/types';
 import { encodeWavFloat32 } from '@/shared/audio-utils';
-import { isTrackPlayable } from '@/shared/utils';
+import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
 import { useUIStore } from './ui';
 
 const FORMAT_LABELS: Record<string, string> = {
@@ -50,15 +50,10 @@ export const useExportStore = defineStore('export', () => {
   const lastExportResult = ref<string | null>(null);
   const currentExportPath = ref<string | null>(null);
 
-  // Get active (non-muted) tracks, excluding tracks still importing
+  // DUP-07: use canonical solo/mute filter
   const activeTracks = computed(() => {
     const tracks = tracksStore.tracks.filter(t => isTrackPlayable(t.importStatus));
-    const hasSolo = tracks.some(t => t.solo);
-
-    if (hasSolo) {
-      return tracks.filter(t => t.solo && !t.muted);
-    }
-    return tracks.filter(t => !t.muted);
+    return filterActiveTracks(tracks);
   });
 
   const canExport = computed(() => {

@@ -7,7 +7,7 @@ import { useSilenceStore } from './silence';
 import { useMeterStore } from './meter';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
-import { isTrackPlayable } from '@/shared/utils';
+import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
 
 export const usePlaybackStore = defineStore('playback', () => {
   const selectionStore = useSelectionStore();
@@ -54,14 +54,8 @@ export const usePlaybackStore = defineStore('playback', () => {
     // Filter out tracks that are still importing (large files are OK — Rust engine handles them)
     const playable = tracks.filter(t => isTrackPlayable(t.importStatus));
 
-    // Check if any track is soloed
-    const soloedTracks = playable.filter(t => t.solo && !t.muted);
-    if (soloedTracks.length > 0) {
-      return soloedTracks;
-    }
-
-    // No solo - get all unmuted tracks
-    return playable.filter(t => !t.muted);
+    // DUP-07: use canonical solo/mute filter
+    return filterActiveTracks(playable);
   }
 
   // Get the active playback region (union of all active tracks)

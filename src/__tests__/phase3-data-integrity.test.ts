@@ -480,6 +480,46 @@ describe('DUP-02: loadAudioFromFile shared utility', () => {
   });
 });
 
+describe('DUP-07: filterActiveTracks canonical solo/mute filter', () => {
+  it('returns only soloed unmuted tracks when any are soloed', async () => {
+    const { filterActiveTracks } = await import('@/shared/utils');
+
+    const tracks = [
+      { id: 'a', solo: false, muted: false },
+      { id: 'b', solo: true, muted: false },
+      { id: 'c', solo: true, muted: true },  // soloed but muted — excluded
+      { id: 'd', solo: false, muted: false },
+    ];
+
+    const result = filterActiveTracks(tracks);
+    expect(result.map(t => t.id)).toEqual(['b']);
+  });
+
+  it('returns all unmuted tracks when none are soloed', async () => {
+    const { filterActiveTracks } = await import('@/shared/utils');
+
+    const tracks = [
+      { id: 'a', solo: false, muted: false },
+      { id: 'b', solo: false, muted: true },
+      { id: 'c', solo: false, muted: false },
+    ];
+
+    const result = filterActiveTracks(tracks);
+    expect(result.map(t => t.id)).toEqual(['a', 'c']);
+  });
+
+  it('returns empty when all tracks are muted', async () => {
+    const { filterActiveTracks } = await import('@/shared/utils');
+
+    const tracks = [
+      { id: 'a', solo: false, muted: true },
+      { id: 'b', solo: false, muted: true },
+    ];
+
+    expect(filterActiveTracks(tracks)).toEqual([]);
+  });
+});
+
 describe('DUP-08: importStatus playable check consistency', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
