@@ -396,8 +396,14 @@ export const useProjectStore = defineStore('project', () => {
         await saveProject();
       }
 
-      // destroy() force-closes without re-emitting closeRequested
-      await appWindow.destroy();
+      // Defer destroy to next tick — calling destroy() from within the
+      // onCloseRequested handler doesn't work because Tauri's Rust runtime
+      // is still processing the close-request event.
+      setTimeout(() => {
+        appWindow.destroy().catch((e: unknown) => {
+          console.error('[Project] destroy() failed:', e);
+        });
+      }, 0);
     });
   }
 
