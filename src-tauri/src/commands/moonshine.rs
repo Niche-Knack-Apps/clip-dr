@@ -352,7 +352,7 @@ fn run_moonshine_inference(
 
     for i in 0..max_tokens {
         let use_cache_branch = i > 0;
-        let last_token = *tokens.last().unwrap();
+        let last_token = *tokens.last().expect("tokens vec initialized non-empty");
 
         let input_ids = Array2::from_shape_vec((1, 1), vec![last_token])
             .map_err(|e| format!("input_ids shape error: {}", e))?;

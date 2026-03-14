@@ -135,7 +135,7 @@ fn load_peak_cache(path: &Path, bucket_count: usize) -> Option<(Vec<f32>, f64)> 
 
     let peaks: Vec<f32> = peak_bytes[..expected_len]
         .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .map(|c| f32::from_le_bytes(c.try_into().expect("chunks_exact(4) yields 4-byte slices")))
         .collect();
 
     log::info!("Peak cache hit for {:?} ({} buckets)", path, bucket_count);
@@ -932,7 +932,7 @@ impl PyramidLruCache {
                 .enumerate()
                 .min_by_key(|(_, e)| e.last_accessed)
                 .map(|(i, _)| i)
-                .unwrap(); // entries is non-empty
+                .expect("LRU cache non-empty at capacity");
             self.entries[lru_idx] = entry;
         }
     }
@@ -1252,8 +1252,8 @@ fn build_and_save_pyramid(path: &Path) {
     levels.push(PyramidLevel { samples_per_peak: PYRAMID_LEVELS[0], peaks: level0 });
 
     for &spp in &PYRAMID_LEVELS[1..] {
-        let prev = &levels.last().unwrap().peaks;
-        let prev_spp = levels.last().unwrap().samples_per_peak;
+        let prev = &levels.last().expect("levels always has at least one entry").peaks;
+        let prev_spp = levels.last().expect("levels always has at least one entry").samples_per_peak;
         let ratio = spp / prev_spp;
         let downsampled = downsample_peaks(prev, ratio);
         log::info!("[Pyramid] Level {}: {} peaks ({} spp)", levels.len(), downsampled.len(), spp);
