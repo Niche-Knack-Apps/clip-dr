@@ -86,8 +86,8 @@ describe('Bug #1 regression: play() always syncs mute/solo state', () => {
 
     // Add two tracks: one will be muted (simulating clip source), one unmuted
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Source', 0);
-    tracksStore.createTrackFromBuffer(buf, null, 'Clip', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Source', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Clip', 0);
     tracksStore.tracks[0].cachedAudioPath = '/tmp/source.wav';
     tracksStore.tracks[1].cachedAudioPath = '/tmp/clip.wav';
 
@@ -145,7 +145,7 @@ describe('Bug #2 regression: seek() during playback sends hot-seek to Rust', () 
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'playback_get_position') return 0;
@@ -190,7 +190,7 @@ describe('Bug #2 regression: seek() during playback sends hot-seek to Rust', () 
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     mockInvoke.mockClear();
     mockInvoke.mockResolvedValue([] as never);
@@ -221,7 +221,7 @@ describe('Waveform color regression: mute/unmute via new object identity (shallo
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     const originalTrackRef = tracksStore.tracks[0];
     const originalArrayRef = tracksStore.tracks;
@@ -250,9 +250,9 @@ describe('Waveform color regression: mute/unmute via new object identity (shallo
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    const t1 = tracksStore.createTrackFromBuffer(buf, null, 'Original', 0);
-    const t2 = tracksStore.createTrackFromBuffer(buf, null, 'Clip 1', 0);
-    const t3 = tracksStore.createTrackFromBuffer(buf, null, 'Clip 2', 0);
+    const t1 = await tracksStore.createTrackFromBuffer(buf, null, 'Original', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(buf, null, 'Clip 1', 0);
+    const t3 = await tracksStore.createTrackFromBuffer(buf, null, 'Clip 2', 0);
 
     const colors = [t1.color, t2.color, t3.color];
 
@@ -288,7 +288,7 @@ describe('Waveform color regression: mute/unmute via new object identity (shallo
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const originalColor = track.color;
     const originalDuration = track.duration;
 

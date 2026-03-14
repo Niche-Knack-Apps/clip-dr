@@ -111,7 +111,7 @@ describe('EDL Editing Architecture', () => {
       const tracksStore = useTracksStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
 
       // Simulate that the track has a cached audio path (like after import)
       tracksStore.setCachedAudioPath(track.id, '/tmp/test.wav');
@@ -127,7 +127,7 @@ describe('EDL Editing Architecture', () => {
       const tracksStore = useTracksStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
 
       // Manually set clips with EDL data (simulating post-cut state)
       const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
@@ -160,7 +160,7 @@ describe('EDL Editing Architecture', () => {
       const selectionStore = useSelectionStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       selectionStore.setInPoint(3);
@@ -187,7 +187,7 @@ describe('EDL Editing Architecture', () => {
       const selectionStore = useSelectionStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       selectionStore.setInPoint(3);
@@ -220,7 +220,7 @@ describe('EDL Editing Architecture', () => {
       const playbackStore = usePlaybackStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       selectionStore.setInPoint(5);
@@ -243,7 +243,7 @@ describe('EDL Editing Architecture', () => {
       const playbackStore = usePlaybackStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       selectionStore.setInPoint(0.5);
@@ -266,7 +266,7 @@ describe('EDL Editing Architecture', () => {
       const playbackStore = usePlaybackStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       selectionStore.setInPoint(4);
@@ -289,7 +289,7 @@ describe('EDL Editing Architecture', () => {
       const selectionStore = useSelectionStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       // Copy first
@@ -319,8 +319,8 @@ describe('EDL Editing Architecture', () => {
 
       const buffer1 = createMockAudioBuffer(10);
       const buffer2 = createMockAudioBuffer(8);
-      tracksStore.createTrackFromBuffer(buffer1, null, 'Track 1', 0);
-      const track2 = tracksStore.createTrackFromBuffer(buffer2, null, 'Track 2', 5);
+      await tracksStore.createTrackFromBuffer(buffer1, null, 'Track 1', 0);
+      const track2 = await tracksStore.createTrackFromBuffer(buffer2, null, 'Track 2', 5);
       tracksStore.selectTrack('ALL');
 
       const track2Start = track2.trackStart;
@@ -343,7 +343,7 @@ describe('EDL Editing Architecture', () => {
 
       // Create a track and manually set it up with an EDL clip
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
       // Replace with an EDL clip (buffer=null, sourceFile set)
@@ -400,7 +400,7 @@ describe('EDL Editing Architecture', () => {
 
       // Set up EDL track (buffer=null, sourceFile set)
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track C1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track C1', 0);
       const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
       tracksStore.tracks[trackIdx] = {
         ...tracksStore.tracks[trackIdx],
@@ -443,7 +443,7 @@ describe('EDL Editing Architecture', () => {
 
       const tracksStore = useTracksStore();
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
 
       vi.mocked(invoke).mockClear();
 
@@ -463,7 +463,7 @@ describe('EDL Editing Architecture', () => {
       const historyStore = useHistoryStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
       // Replace with an EDL clip (buffer=null, sourceFile set)
@@ -519,7 +519,7 @@ describe('EDL Editing Architecture', () => {
 
       const tracksStore = useTracksStore();
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0, '/tmp/small-file.wav');
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0, '/tmp/small-file.wav');
 
       const ctx = new AudioContext();
       await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
@@ -550,8 +550,8 @@ describe('EDL Editing Architecture', () => {
 
       const buffer1 = createMockAudioBuffer(10);
       const buffer2 = createMockAudioBuffer(8);
-      const track1 = tracksStore.createTrackFromBuffer(buffer1, null, 'Track 1', 0);
-      const track2 = tracksStore.createTrackFromBuffer(buffer2, null, 'Track 2', 12);
+      const track1 = await tracksStore.createTrackFromBuffer(buffer1, null, 'Track 1', 0);
+      const track2 = await tracksStore.createTrackFromBuffer(buffer2, null, 'Track 2', 12);
       tracksStore.selectTrack(track1.id);
 
       selectionStore.setInPoint(2);
@@ -586,7 +586,7 @@ describe('EDL Editing Architecture', () => {
       const playbackStore = usePlaybackStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       selectionStore.setInPoint(3);
@@ -607,7 +607,7 @@ describe('EDL Editing Architecture', () => {
       const selectionStore = useSelectionStore();
 
       const buffer = createMockAudioBuffer(10);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
       tracksStore.selectTrack(track.id);
 
       const originalDuration = track.duration;
@@ -634,7 +634,7 @@ describe('EDL Editing Architecture', () => {
 
       // Simulate an already-edited EDL clip that starts 10s into its source file
       const buffer = createMockAudioBuffer(20);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
       const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
       tracksStore.tracks[idx] = {
         ...tracksStore.tracks[idx],
@@ -683,7 +683,7 @@ describe('EDL Editing Architecture', () => {
 
       // Start: single 20s clip with sourceOffset=0
       const buffer = createMockAudioBuffer(20);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
       const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
       tracksStore.tracks[idx] = {
         ...tracksStore.tracks[idx],
@@ -750,7 +750,7 @@ describe('EDL Editing Architecture', () => {
       const tracksStore = useTracksStore();
 
       const buffer = createMockAudioBuffer(30);
-      const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
       const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
       // Three clips: A(0–10,srcOff=0), B(10–20,srcOff=10), C(20–30,srcOff=20)
       tracksStore.tracks[idx] = {

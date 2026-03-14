@@ -369,7 +369,7 @@ export const useSilenceStore = defineStore('silence', () => {
       // Create a new track from the cut audio
       console.log('[CutSilence] Creating new track...');
       const cutName = `No Silence - ${sourceTrack.name}`;
-      const cutTrack = tracksStore.createTrackFromBuffer(
+      const cutTrack = await tracksStore.createTrackFromBuffer(
         cutAudioEntry.buffer,
         cutAudioEntry.waveformData,
         cutName,

@@ -95,7 +95,7 @@ describe('Clipboard Concurrency Guards', () => {
 
     // Set up a track with I/O points so cut() has something to do
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     selectionStore.setInPoint(2);
     selectionStore.setOutPoint(5);
 
@@ -127,7 +127,7 @@ describe('Clipboard Concurrency Guards', () => {
     const selectionStore = useSelectionStore();
 
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     selectionStore.setInPoint(2);
     selectionStore.setOutPoint(5);
 
@@ -143,7 +143,7 @@ describe('Clipboard Concurrency Guards', () => {
 
     const tracksStore = useTracksStore();
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     const epochBefore = tracksStore.tracks[idx].editEpoch ?? 0;
@@ -166,7 +166,7 @@ describe('Clipboard Concurrency Guards', () => {
 
     const tracksStore = useTracksStore();
     const buf = new MockAudioContext().createBuffer(2, 44100 * 10, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Set up two clips

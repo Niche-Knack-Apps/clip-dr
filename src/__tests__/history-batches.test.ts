@@ -91,7 +91,7 @@ describe('History Batch Safety', () => {
     historyStore.clear();
 
     const buffer = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
     const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Set up two clips
@@ -126,7 +126,7 @@ describe('History Batch Safety', () => {
     const historyStore = useHistoryStore();
 
     const buffer = mkBuf(10);
-    tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+    await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
 
     // Clear after setup
     historyStore.clear();
@@ -150,8 +150,8 @@ describe('History Batch Safety', () => {
 
     const buf1 = mkBuf(10);
     const buf2 = mkBuf(8);
-    tracksStore.createTrackFromBuffer(buf1, null, 'Track 1', 0);
-    tracksStore.createTrackFromBuffer(buf2, null, 'Track 2', 2);
+    await tracksStore.createTrackFromBuffer(buf1, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf2, null, 'Track 2', 2);
 
     const dursBefore = tracksStore.tracks.map(t => t.duration);
 
@@ -177,7 +177,7 @@ describe('History Batch Safety', () => {
     const historyStore = useHistoryStore();
 
     const buffer = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
     const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Add a clip with a custom extra field to test that spread preserves it

@@ -103,7 +103,7 @@ describe('CON-H4: Export re-entrancy guard', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     exportStore.loading = true;
 
@@ -164,7 +164,7 @@ describe('CON-H3: Transcription job cancellation on track delete', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     // Add a queued job for this track
     transcriptionStore.jobQueue = [
@@ -195,7 +195,7 @@ describe('CON-M2: Seek suppresses poll overwrites', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'playback_get_position') return 0;
@@ -233,7 +233,7 @@ describe('CON-M6: Cleaning concurrent guard', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     tracksStore.selectTrack(tracksStore.tracks[0].id);
 
     // Simulate cleaning in progress

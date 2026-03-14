@@ -155,7 +155,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
       console.log('[Clean] Creating new track...');
       // Create a new track for the cleaned audio
       const cleanedName = `Cleaned ${sourceTrack.name}`;
-      const cleanedTrack = tracksStore.createTrackFromBuffer(
+      const cleanedTrack = await tracksStore.createTrackFromBuffer(
         cleanedAudioEntry.buffer,
         cleanedAudioEntry.waveformData,
         cleanedName,

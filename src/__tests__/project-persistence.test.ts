@@ -96,7 +96,7 @@ describe('Project Persistence — Clip EDL', () => {
     const projectStore = useProjectStore();
 
     const buf = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'My Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'My Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Give track a stable sourcePath and set edited clips
@@ -133,7 +133,7 @@ describe('Project Persistence — Clip EDL', () => {
 
     const tracksStore = useTracksStore();
     const buf = mkBuf(5);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     tracksStore.tracks[idx] = {
@@ -158,7 +158,7 @@ describe('Project Persistence — Clip EDL', () => {
 
     const tracksStore = useTracksStore();
     const buf = mkBuf(5);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     tracksStore.tracks[idx] = {
@@ -182,7 +182,7 @@ describe('Project Persistence — Clip EDL', () => {
 
     const tracksStore = useTracksStore();
     const buf = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
 
     const clips: TrackClip[] = [
       { id: 'r1', buffer: null, waveformData: [], clipStart: 0, duration: 5, sourceFile: '/s.wav', sourceOffset: 0 },
@@ -203,7 +203,7 @@ describe('Project Persistence — Clip EDL', () => {
 
     const tracksStore = useTracksStore();
     const buf = mkBuf(10);
-    const track = tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Track', 0);
     const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
 
     // Set a synthetic parent waveform (200 values = 100 min/max buckets)

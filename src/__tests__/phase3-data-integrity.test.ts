@@ -86,7 +86,7 @@ describe('EDL-H1: Paste preserves sourceOffset from clipboard sourceRegion', () 
 
     // Create a track with audio
     const buf = ctx.createBuffer(1, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const track = tracksStore.tracks[0];
     track.cachedAudioPath = '/tmp/source.wav';
 
@@ -125,7 +125,7 @@ describe('EDL-H1: Paste preserves sourceOffset from clipboard sourceRegion', () 
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 10, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const track = tracksStore.tracks[0];
     track.cachedAudioPath = '/tmp/source.wav';
 
@@ -165,7 +165,7 @@ describe('CON-C2: editEpoch stale-state detection in cutRegion', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const track = tracksStore.tracks[0];
 
     const initialEpoch = track.editEpoch ?? 0;
@@ -181,7 +181,7 @@ describe('CON-C2: editEpoch stale-state detection in cutRegion', () => {
 
     // Create a large-file track (no audioData.buffer) to exercise the EDL path
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const track = tracksStore.tracks[0];
 
     // Null out the buffer to simulate a large-file track (EDL path)
@@ -233,7 +233,7 @@ describe('AQ-02: mixSingleTrack applies track volume and envelope', () => {
     for (let i = 0; i < data.length; i++) {
       data[i] = 0.8; // constant signal
     }
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
 
     // Set track volume to 0.5
     tracksStore.tracks[0].volume = 0.5;
@@ -340,8 +340,8 @@ describe('PERF-06: O(1) track lookup via trackMap', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Track A', 0);
-    tracksStore.createTrackFromBuffer(buf, null, 'Track B', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track A', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track B', 0);
 
     const trackA = tracksStore.tracks[0];
     const trackB = tracksStore.tracks[1];
@@ -363,13 +363,13 @@ describe('PERF-06: O(1) track lookup via trackMap', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'First', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'First', 0);
     const firstId = tracksStore.tracks[0].id;
 
     expect(tracksStore.getTrackById(firstId)).toBeDefined();
 
     // Add another track — map should include both
-    tracksStore.createTrackFromBuffer(buf, null, 'Second', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Second', 0);
     const secondId = tracksStore.tracks[1].id;
 
     expect(tracksStore.getTrackById(firstId)).toBeDefined();
@@ -531,7 +531,7 @@ describe('DUP-08: importStatus playable check consistency', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
 
     // Track with ready status should have clips
@@ -556,5 +556,50 @@ describe('DUP-08: importStatus playable check consistency', () => {
     // These should NOT be playable
     expect(isTrackPlayable('importing')).toBe(false);
     expect(isTrackPlayable('decoding')).toBe(false);
+  });
+});
+
+describe('PERF-03: generateWaveformFromBuffer is async (Web Worker offload)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('generateWaveformFromBuffer returns a Promise', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    const result = tracksStore.generateWaveformFromBuffer(buf);
+    expect(result).toBeInstanceOf(Promise);
+    const waveform = await result;
+    expect(Array.isArray(waveform)).toBe(true);
+    expect(waveform.length).toBeGreaterThan(0);
+  });
+
+  it('createTrackFromBuffer returns a Promise', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    const result = tracksStore.createTrackFromBuffer(buf, null, 'Async Track', 0);
+    expect(result).toBeInstanceOf(Promise);
+    const track = await result;
+    expect(track.name).toBe('Async Track');
+    expect(tracksStore.tracks.length).toBe(1);
+  });
+
+  it('splitClipAtTime returns a Promise', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 44100 * 2, 44100);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Split', 0);
+    const clips = tracksStore.getTrackClips(track.id);
+    const result = tracksStore.splitClipAtTime(track.id, clips[0].id, 1.0, ctx as unknown as AudioContext);
+    expect(result).toBeInstanceOf(Promise);
+    const split = await result;
+    expect(split).not.toBeNull();
+    expect(split!.before.duration).toBeCloseTo(1.0, 1);
+    expect(split!.after.duration).toBeCloseTo(1.0, 1);
   });
 });

@@ -92,7 +92,7 @@ describe('TIME-04: sourceOffset drift harness', () => {
     const totalSamples = totalDuration * sampleRate;
     const buf = ctx.createBuffer(1, sampleRate * 10, sampleRate); // only 10s buffer (enough for test)
 
-    tracksStore.createTrackFromBuffer(buf, null, 'LongTrack', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'LongTrack', 0);
     const trackId = tracksStore.tracks[0].id;
 
     // Manually set duration to simulate 10-hour track

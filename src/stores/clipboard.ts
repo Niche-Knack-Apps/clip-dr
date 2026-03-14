@@ -185,7 +185,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     clipboardBuffer.value = newBuffer;
 
     // Generate waveform for the clipboard content
-    const waveformData = tracksStore.generateWaveformFromBuffer(newBuffer);
+    const waveformData = await tracksStore.generateWaveformFromBuffer(newBuffer);
 
     clipboard.value = {
       samples,
@@ -229,7 +229,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
       clipboardBuffer.value = clonedBuffer;
 
-      const waveform = tracksStore.generateWaveformFromBuffer(clonedBuffer);
+      const waveform = await tracksStore.generateWaveformFromBuffer(clonedBuffer);
       clipboard.value = {
         samples: [],
         sampleRate: clonedBuffer.sampleRate,
@@ -459,7 +459,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       // clip knows where in the original file its audio came from
       const pasteSourceOffset = clipboard.value.sourceRegion.start;
 
-      const success = tracksStore.insertClipAtPlayhead(
+      const success = await tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
         waveform,
@@ -482,7 +482,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const trackName = `Pasted ${tracksStore.tracks.length + 1}`;
     console.log(`[Clipboard] Creating NEW track "${trackName}" at time ${pasteTime.toFixed(2)}s`);
 
-    const newTrack = tracksStore.createTrackFromBuffer(
+    const newTrack = await tracksStore.createTrackFromBuffer(
       clonedBuffer,
       [...clipboard.value.waveformData],
       trackName,

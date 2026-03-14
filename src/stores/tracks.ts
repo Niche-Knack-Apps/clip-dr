@@ -4,6 +4,7 @@ import type { Track, TrackAudioData, TrackClip, ViewMode, ImportStatus, Waveform
 import { TRACK_COLORS } from '@/shared/types';
 import { generateId, binarySearch, isTrackPlayable } from '@/shared/utils';
 import { mixTrackClipsToBuffer } from '@/shared/audio-utils';
+import { generateWaveformInWorker } from '@/workers/audio-processing-api';
 import { WAVEFORM_BUCKET_COUNT, MAX_VOLUME_LINEAR } from '@/shared/constants';
 import { useHistoryStore } from './history';
 import { useTranscriptionStore } from './transcription';
@@ -126,41 +127,22 @@ export const useTracksStore = defineStore('tracks', () => {
     selectedClipTrackId.value = null;
   }
 
-  // Generate waveform data from AudioBuffer (min/max pairs format)
-  function generateWaveformFromBuffer(buffer: AudioBuffer, bucketCount: number = WAVEFORM_BUCKET_COUNT): number[] {
-    const channelData = buffer.getChannelData(0);
-    const samplesPerBucket = Math.ceil(channelData.length / bucketCount);
-    const waveform: number[] = [];
-
-    for (let i = 0; i < bucketCount; i++) {
-      const start = i * samplesPerBucket;
-      const end = Math.min(start + samplesPerBucket, channelData.length);
-
-      let min = 0;
-      let max = 0;
-      for (let j = start; j < end; j++) {
-        const sample = channelData[j];
-        if (sample < min) min = sample;
-        if (sample > max) max = sample;
-      }
-      // Push min/max pair - this is the format expected by useWaveform.ts
-      waveform.push(min, max);
-    }
-
-    return waveform;
+  // PERF-03: Generate waveform data in Web Worker to avoid blocking main thread
+  async function generateWaveformFromBuffer(buffer: AudioBuffer, bucketCount: number = WAVEFORM_BUCKET_COUNT): Promise<number[]> {
+    return generateWaveformInWorker(buffer, bucketCount);
   }
 
   // Create a new track from an AudioBuffer
-  function createTrackFromBuffer(
+  async function createTrackFromBuffer(
     buffer: AudioBuffer,
     waveformData: number[] | null,
     name: string,
     trackStart: number = 0,
     sourcePath?: string
-  ): Track {
+  ): Promise<Track> {
     useHistoryStore().pushState('Add track');
     // Generate waveform if not provided
-    const waveform = waveformData ?? generateWaveformFromBuffer(buffer);
+    const waveform = waveformData ?? await generateWaveformFromBuffer(buffer);
 
     const audioData: TrackAudioData = {
       buffer,
@@ -353,11 +335,11 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Append audio to the end of an existing track
-  function appendAudioToTrack(
+  async function appendAudioToTrack(
     trackId: string,
     buffer: AudioBuffer,
     audioContext: AudioContext
-  ): boolean {
+  ): Promise<boolean> {
     const track = getTrackById(trackId);
     if (!track) {
       console.error('[Tracks] Track not found:', trackId);
@@ -371,7 +353,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (!existingBuffer) {
       const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
       if (trackIndex !== -1) {
-        const newWaveformData = generateWaveformFromBuffer(buffer);
+        const newWaveformData = await generateWaveformFromBuffer(buffer);
         tracks.value[trackIndex] = {
           ...track,
           audioData: {
@@ -421,7 +403,7 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     // Regenerate waveform from the combined buffer to maintain consistent bucket count
-    const newWaveformData = generateWaveformFromBuffer(newBuffer);
+    const newWaveformData = await generateWaveformFromBuffer(newBuffer);
 
     // Update track - need to replace the entire track object to trigger reactivity
     const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
@@ -445,12 +427,12 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Move track audio from one track to another at specified position
-  function moveTrackToTrack(
+  async function moveTrackToTrack(
     sourceTrackId: string,
     targetTrackId: string,
     newTrackStart: number,
     audioContext: AudioContext
-  ): boolean {
+  ): Promise<boolean> {
     if (sourceTrackId === targetTrackId) {
       // Just update position
       setTrackStart(sourceTrackId, newTrackStart);
@@ -474,7 +456,7 @@ export const useTracksStore = defineStore('tracks', () => {
         console.log('[Tracks] Source track is empty, nothing to move');
         return false;
       }
-      const success = appendAudioToTrack(
+      const success = await appendAudioToTrack(
         targetTrackId,
         sourceTrack.audioData.buffer,
         audioContext
@@ -542,7 +524,7 @@ export const useTracksStore = defineStore('tracks', () => {
             console.warn('[Tracks] cutRegion (single-buffer): track modified during extraction, aborting');
             return null;
           }
-          if (cutBuffer) cutWaveform = generateWaveformFromBuffer(cutBuffer);
+          if (cutBuffer) cutWaveform = await generateWaveformFromBuffer(cutBuffer);
         }
 
         // Build before/after clips as EDL references (pure math, no file copying)
@@ -658,7 +640,7 @@ export const useTracksStore = defineStore('tracks', () => {
         destData[i] = sourceData[cutStartSample + i];
       }
     }
-    const cutWaveform = generateWaveformFromBuffer(cutBuffer);
+    const cutWaveform = await generateWaveformFromBuffer(cutBuffer);
 
     // Check what remains
     const hasAudioBefore = cutStart > 0.001; // More than 1ms
@@ -700,10 +682,11 @@ export const useTracksStore = defineStore('tracks', () => {
           destData[i] = sourceData[i];
         }
       }
+      const beforeWaveform = await generateWaveformFromBuffer(beforeBuffer);
       newClips.push({
         id: generateId(),
         buffer: beforeBuffer,
-        waveformData: generateWaveformFromBuffer(beforeBuffer),
+        waveformData: beforeWaveform,
         clipStart: trackStart,
         duration: beforeBuffer.duration,
         sourceFile,
@@ -724,10 +707,11 @@ export const useTracksStore = defineStore('tracks', () => {
         }
       }
       // Position after clip at the cut point (where the cut region ended)
+      const afterWaveform = await generateWaveformFromBuffer(afterBuffer);
       newClips.push({
         id: generateId(),
         buffer: afterBuffer,
-        waveformData: generateWaveformFromBuffer(afterBuffer),
+        waveformData: afterWaveform,
         clipStart: trackStart + cutEnd,
         duration: afterBuffer.duration,
         sourceFile,
@@ -877,10 +861,11 @@ export const useTracksStore = defineStore('tracks', () => {
             const dest = beforeBuf.getChannelData(ch);
             for (let i = 0; i < oStartSample; i++) dest[i] = src[i];
           }
+          const beforeWf = await generateWaveformFromBuffer(beforeBuf);
           newClips.push({
             id: generateId(),
             buffer: beforeBuf,
-            waveformData: generateWaveformFromBuffer(beforeBuf),
+            waveformData: beforeWf,
             clipStart: clip.clipStart,
             duration: beforeBuf.duration,
             sourceFile: clip.sourceFile,
@@ -898,10 +883,11 @@ export const useTracksStore = defineStore('tracks', () => {
             const dest = afterBuf.getChannelData(ch);
             for (let i = 0; i < afterLen; i++) dest[i] = src[afterStart + i];
           }
+          const afterWf = await generateWaveformFromBuffer(afterBuf);
           newClips.push({
             id: generateId(),
             buffer: afterBuf,
-            waveformData: generateWaveformFromBuffer(afterBuf),
+            waveformData: afterWf,
             clipStart: overlapEnd,
             duration: afterBuf.duration,
             sourceFile: clip.sourceFile,
@@ -931,7 +917,7 @@ export const useTracksStore = defineStore('tracks', () => {
           }
         }
       }
-      cutWaveform = generateWaveformFromBuffer(mixedCut);
+      cutWaveform = await generateWaveformFromBuffer(mixedCut);
     } else if (hasEDLClips) {
       // EDL clips in edit-only mode — slice waveform from existing clip data
       for (const clip of clips) {
@@ -1394,7 +1380,7 @@ export const useTracksStore = defineStore('tracks', () => {
       }
     }
 
-    const waveformData = generateWaveformFromBuffer(mixedBuffer);
+    const waveformData = await generateWaveformFromBuffer(mixedBuffer);
     console.log(`[Tracks] Extracted ${regionDuration.toFixed(2)}s from ${contributions.length} tracks`);
     return { buffer: mixedBuffer, waveformData };
   }
@@ -1546,12 +1532,12 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Split a clip at a specific time, returning the two resulting clips
-  function splitClipAtTime(
+  async function splitClipAtTime(
     trackId: string,
     clipId: string,
     splitTime: number,
     audioContext: AudioContext
-  ): { before: TrackClip; after: TrackClip } | null {
+  ): Promise<{ before: TrackClip; after: TrackClip } | null> {
     const track = getTrackById(trackId);
     if (!track) return null;
 
@@ -1613,10 +1599,13 @@ export const useTracksStore = defineStore('tracks', () => {
       for (let i = 0; i < afterLength; i++) dest[i] = src[splitSample + i];
     }
 
+    const beforeWf = await generateWaveformFromBuffer(beforeBuffer);
+    const afterWf = await generateWaveformFromBuffer(afterBuffer);
+
     const beforeClip: TrackClip = {
       id: generateId(),
       buffer: beforeBuffer,
-      waveformData: generateWaveformFromBuffer(beforeBuffer),
+      waveformData: beforeWf,
       clipStart: clip.clipStart,
       duration: beforeBuffer.duration,
       sourceFile: clip.sourceFile,
@@ -1626,7 +1615,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const afterClip: TrackClip = {
       id: generateId(),
       buffer: afterBuffer,
-      waveformData: generateWaveformFromBuffer(afterBuffer),
+      waveformData: afterWf,
       clipStart: splitTime,
       duration: afterBuffer.duration,
       sourceFile: clip.sourceFile,
@@ -1637,7 +1626,7 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Insert a clip at the playhead position in a track, splitting existing clips if needed
-  function insertClipAtPlayhead(
+  async function insertClipAtPlayhead(
     trackId: string,
     buffer: AudioBuffer,
     waveformData: number[],
@@ -1645,7 +1634,7 @@ export const useTracksStore = defineStore('tracks', () => {
     audioContext: AudioContext,
     sourceFile?: string,
     sourceOffset?: number
-  ): boolean {
+  ): Promise<boolean> {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return false;
     useHistoryStore().pushState('Insert clip');
@@ -1680,7 +1669,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     if (overlappingIndex !== -1) {
       const overlapping = currentClips[overlappingIndex];
-      const splitResult = splitClipAtTime(trackId, overlapping.id, playheadTime, audioContext);
+      const splitResult = await splitClipAtTime(trackId, overlapping.id, playheadTime, audioContext);
       if (splitResult) {
         // Replace the overlapping clip with the two halves
         currentClips.splice(overlappingIndex, 1, splitResult.before, splitResult.after);

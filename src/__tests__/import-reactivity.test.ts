@@ -87,7 +87,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
 
     // Create a track in importing state
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
 
     // Transition to large-file first
@@ -107,7 +107,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
     const refBefore = tracksStore.tracks;
 
@@ -123,7 +123,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
 
     // Set to caching first (realistic flow)
@@ -145,7 +145,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
 
     tracksStore.setImportLargeFile(trackId);
@@ -166,7 +166,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
 
     tracksStore.setImportCaching(trackId);
@@ -185,7 +185,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
     const refBefore = tracksStore.tracks;
 
@@ -202,7 +202,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'LargeFile', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'LargeFile', 0);
     const trackId = tracksStore.tracks[0].id;
 
     // Collect array references at each transition
@@ -239,7 +239,7 @@ describe('Import status reactivity: new array identity on transitions', () => {
     const ctx = new MockAudioContext();
 
     const buf = ctx.createBuffer(1, 44100 * 5, 44100);
-    tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Test', 0);
     const trackId = tracksStore.tracks[0].id;
 
     const trackBefore = tracksStore.tracks[0];

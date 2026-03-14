@@ -313,7 +313,7 @@ function handleClipDrag(trackId: string, clipId: string, newClipStart: number) {
   tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
 }
 
-function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number) {
+async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number) {
   // Final position update (with snap if enabled)
   tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
 
@@ -324,7 +324,7 @@ function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number
   // TODO: Support moving individual clips between tracks
   if (clipDragTargetTrackId.value && clipDragTargetTrackId.value !== trackId) {
     const ctx = audioStore.getAudioContext();
-    tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
+    await tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
   }
 
   // Reset state
