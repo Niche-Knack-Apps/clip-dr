@@ -9,7 +9,7 @@ import { useTranscriptionStore } from './transcription';
 import { useUIStore } from './ui';
 import type { Track } from '@/shared/types';
 import { useHistoryStore } from './history';
-import { encodeWavFloat32 } from '@/shared/audio-utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { writeTempFile } from '@/shared/fs-utils';
 
 export interface VirtualClipboardSegment {
@@ -61,7 +61,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         if (!clip.buffer) continue;
 
         try {
-          const wavData = encodeWavFloat32(clip.buffer);
+          const wavData = await encodeWavFloat32InWorker(clip.buffer);
           clip.sourceFile = await writeTempFile(`clip_${clip.id}_${Date.now()}.wav`, wavData);
           clip.sourceOffset = 0;
         } catch (err) {

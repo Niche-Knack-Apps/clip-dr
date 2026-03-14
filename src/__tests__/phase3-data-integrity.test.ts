@@ -603,3 +603,34 @@ describe('PERF-03: generateWaveformFromBuffer is async (Web Worker offload)', ()
     expect(split!.after.duration).toBeCloseTo(1.0, 1);
   });
 });
+
+describe('UI-01/UI-02: encodeWavFloat32 offloaded to Web Worker', () => {
+  it('encodeWavFloat32InWorker returns a Promise<Uint8Array>', async () => {
+    const { encodeWavFloat32InWorker } = await import('@/workers/audio-processing-api');
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    const result = encodeWavFloat32InWorker(buf);
+    expect(result).toBeInstanceOf(Promise);
+    const wavData = await result;
+    expect(wavData).toBeInstanceOf(Uint8Array);
+    // WAV header is 44 bytes + 44100 samples * 4 bytes (float32)
+    expect(wavData.length).toBe(44 + 44100 * 4);
+  });
+
+  it('stores import encodeWavFloat32InWorker, not sync version', async () => {
+    // Verify that production stores no longer import the sync function
+    const vadSource = await import('@/stores/vad?raw' as string);
+    expect((vadSource as unknown as {default: string}).default).toContain('encodeWavFloat32InWorker');
+    expect((vadSource as unknown as {default: string}).default).not.toContain("from '@/shared/audio-utils'");
+  });
+
+  it('encodeWav16InWorker returns valid 16-bit WAV', async () => {
+    const { encodeWav16InWorker } = await import('@/workers/audio-processing-api');
+    const ctx = new MockAudioContext();
+    const buf = ctx.createBuffer(1, 44100, 44100);
+    const wavData = await encodeWav16InWorker(buf);
+    expect(wavData).toBeInstanceOf(Uint8Array);
+    // WAV header is 44 bytes + 44100 samples * 2 bytes (int16)
+    expect(wavData.length).toBe(44 + 44100 * 2);
+  });
+});

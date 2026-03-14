@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { tempDir } from '@tauri-apps/api/path';
 import type { VadResult, VadOptions } from '@/shared/types';
-import { encodeWavFloat32 } from '@/shared/audio-utils';
+import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 
@@ -110,7 +110,7 @@ export const useVadStore = defineStore('vad', () => {
       }
 
       // Encode to WAV and write to temp file
-      const wavData = encodeWavFloat32(mixedBuffer);
+      const wavData = await encodeWavFloat32InWorker(mixedBuffer);
       const tempFileName = `vad_buffer_${Date.now()}.wav`;
       await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
       const tempDirPath = await tempDir();
