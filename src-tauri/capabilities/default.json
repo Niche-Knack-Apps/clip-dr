@@ -20,6 +20,7 @@
     "fs:allow-appdata-write",
     "fs:allow-appdata-write-recursive",
     "fs:write-files",
-    "core:event:default"
+    "core:event:default",
+    "core:window:allow-destroy"
   ]
 }
