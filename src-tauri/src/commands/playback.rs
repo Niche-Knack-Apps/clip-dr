@@ -1206,13 +1206,16 @@ fn build_output_stream(
                         base_vol
                     };
 
-                    // Convert to sample position in the source (file_offset shifts into source file for EDL clips)
+                    // Convert to fractional sample position in the source (file_offset shifts into source file for EDL clips)
                     let src_rate = track_src.sample_rate as f64;
                     let src_ch = track_src.channels as usize;
-                    let sample_idx = ((track_src.config.file_offset + rel_pos) * src_rate) as usize;
+                    let src_pos = (track_src.config.file_offset + rel_pos) * src_rate;
+                    let sample_idx = src_pos.floor() as usize;
+                    let frac = (src_pos - sample_idx as f64) as f32;
                     let interleaved_idx = sample_idx * src_ch;
 
                     // Read source sample(s) — lock-free for Stream, slice for Mmap/Vec
+                    // Mmap/Vec path uses linear interpolation between adjacent samples for quality
                     let (sl, sr) = match &track_src.pcm {
                         PcmData::Stream(buf) => {
                             if let Some(s) = buf.read_sample(interleaved_idx) {
@@ -1231,13 +1234,22 @@ fn build_output_stream(
                             if interleaved_idx >= samples.len() { continue; }
 
                             if src_ch == 1 {
-                                let s = samples[interleaved_idx] * track_vol;
+                                let s0 = samples[interleaved_idx];
+                                let s1 = if interleaved_idx + src_ch < samples.len() {
+                                    samples[interleaved_idx + src_ch]
+                                } else { s0 };
+                                let s = (s0 + (s1 - s0) * frac) * track_vol;
                                 (s, s)
                             } else {
-                                let l = samples[interleaved_idx] * track_vol;
-                                let r = if interleaved_idx + 1 < samples.len() {
-                                    samples[interleaved_idx + 1] * track_vol
+                                let l0 = samples[interleaved_idx];
+                                let r0 = if interleaved_idx + 1 < samples.len() {
+                                    samples[interleaved_idx + 1]
                                 } else { 0.0 };
+                                let next = interleaved_idx + src_ch;
+                                let l1 = if next < samples.len() { samples[next] } else { l0 };
+                                let r1 = if next + 1 < samples.len() { samples[next + 1] } else { r0 };
+                                let l = (l0 + (l1 - l0) * frac) * track_vol;
+                                let r = (r0 + (r1 - r0) * frac) * track_vol;
                                 (l, r)
                             }
                         }

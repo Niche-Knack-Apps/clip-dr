@@ -69,8 +69,8 @@ fn export_audio_region_inner(
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
     // Calculate sample positions
-    let start_sample = (start_time * sample_rate as f64) as u64;
-    let end_sample = (end_time * sample_rate as f64) as u64;
+    let start_sample = (start_time * sample_rate as f64).floor() as u64;
+    let end_sample = (end_time * sample_rate as f64).ceil() as u64;
 
     // Collect samples in the region
     let mut all_samples: Vec<f32> = Vec::new();
@@ -691,8 +691,8 @@ fn export_audio_ogg_inner(
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    let start_sample = (start_time * sample_rate as f64) as u64;
-    let end_sample = (end_time * sample_rate as f64) as u64;
+    let start_sample = (start_time * sample_rate as f64).floor() as u64;
+    let end_sample = (end_time * sample_rate as f64).ceil() as u64;
 
     // Set up Vorbis encoder BEFORE decode loop — encode in chunks
     let output_file = BufWriter::new(
