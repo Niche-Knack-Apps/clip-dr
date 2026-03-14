@@ -49,11 +49,26 @@ function quantizeRange(start: number, end: number) {
 }
 
 /**
- * Compute an RMS-based display scale factor for waveform buckets.
+ * Compute an RMS-based display scale factor from a flat min/max waveform array.
  * Targets ~70% of half-height for the RMS level. Clamped to [0, 1]
  * so we only attenuate loud/compressed waveforms, never amplify quiet ones.
+ * Works on both flat arrays (number[]: [min,max,min,max,...]) used by ClipRegion
+ * and the main waveform renderers.
  */
+export function computeWaveformScaleFromArray(data: number[], count: number): number {
+  if (count <= 0) return 1.0;
+  let sumSq = 0;
+  for (let i = 0; i < count; i++) {
+    const absMax = Math.max(Math.abs(data[i * 2]), Math.abs(data[i * 2 + 1]));
+    sumSq += absMax * absMax;
+  }
+  const rms = Math.sqrt(sumSq / count);
+  const targetRms = 0.7;
+  return rms > 0.001 ? Math.min(targetRms / rms, 1.0) : 1.0;
+}
+
 function computeWaveformScale(buckets: WaveformBucket[]): number {
+  if (buckets.length === 0) return 1.0;
   let sumSq = 0;
   for (const { min, max } of buckets) {
     const absMax = Math.max(Math.abs(min), Math.abs(max));

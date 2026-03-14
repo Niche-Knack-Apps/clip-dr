@@ -2,6 +2,7 @@
 import { computed, ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { Track, TrackClip } from '@/shared/types';
+import { computeWaveformScaleFromArray } from '@/composables/useWaveform';
 
 interface Props {
   track: Track;
@@ -204,6 +205,9 @@ function drawWaveform() {
   ctx.fillStyle = waveformColor.value;
   ctx.beginPath();
 
+  // RMS-based amplitude scaling (matches main waveform normalization)
+  const scale = computeWaveformScaleFromArray(data, bucketCount);
+
   // Downsample or upsample to fit pixel width
   const barsToRender = Math.min(barsNeeded, bucketCount);
   const barWidth = pixelWidth / barsToRender;
@@ -227,8 +231,8 @@ function drawWaveform() {
     }
 
     const x = i * barWidth;
-    const topY = centerY - max * centerY;
-    const bottomY = centerY - min * centerY;
+    const topY = centerY - (max * scale) * centerY;
+    const bottomY = centerY - (min * scale) * centerY;
     const barH = Math.max(1, bottomY - topY);
 
     ctx.rect(x, topY, barWidth, barH);
