@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
+import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import type { TrackPlacement, TimeMark, RecordingSource } from '@/shared/types';
@@ -627,7 +628,8 @@ export const useRecordingStore = defineStore('recording', () => {
 
       // Adjust track start for pre-record buffer (ring buffer drained at record start)
       const preRecordOffset = result.pre_record_seconds || 0;
-      const baseStart = trackStart ?? tracksStore.timelineDuration;
+      const playbackStore = usePlaybackStore();
+      const baseStart = trackStart ?? playbackStore.currentTime;
       const effectiveStart = Math.max(0, baseStart - preRecordOffset);
       if (preRecordOffset > 0) {
         console.log(`[Recording] Pre-record buffer: ${preRecordOffset.toFixed(2)}s, ` +
@@ -990,9 +992,12 @@ export const useRecordingStore = defineStore('recording', () => {
     error.value = null;
     try {
       // Set recording epoch on first session start (for timeline sync)
+      // Use current playhead position so recording aligns with where the user is working,
+      // not the end of the timeline
       if (recordingEpoch.value === null) {
         recordingEpoch.value = Date.now();
-        recordingBasePosition.value = tracksStore.timelineDuration;
+        const playbackStore = usePlaybackStore();
+        recordingBasePosition.value = playbackStore.currentTime;
       }
 
       const outputDir = await settingsStore.getProjectFolder();

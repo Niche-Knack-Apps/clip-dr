@@ -19,9 +19,11 @@ const emit = defineEmits<{
   dragStart: [];
   drag: [time: number];
   dragEnd: [];
+  click: [time: number];
 }>();
 
 const isDragging = ref(false);
+const hasDragged = ref(false);
 const playheadRef = ref<HTMLDivElement | null>(null);
 
 // rAF-based throttle for mousemove during drag
@@ -59,6 +61,7 @@ function handleMouseDown(event: MouseEvent) {
   event.preventDefault();
 
   isDragging.value = true;
+  hasDragged.value = false;
   emit('dragStart');
 
   document.addEventListener('mousemove', handleMouseMove);
@@ -67,6 +70,7 @@ function handleMouseDown(event: MouseEvent) {
 
 function handleMouseMove(event: MouseEvent) {
   if (!isDragging.value) return;
+  hasDragged.value = true;
   pendingDragClientX = event.clientX;
   if (dragRafId === null) {
     dragRafId = requestAnimationFrame(flushDrag);
@@ -82,7 +86,7 @@ function flushDrag() {
   }
 }
 
-function handleMouseUp() {
+function handleMouseUp(event: MouseEvent) {
   // Flush any pending drag before ending
   if (pendingDragClientX !== null) {
     const time = xToTime(pendingDragClientX);
@@ -93,7 +97,15 @@ function handleMouseUp() {
     cancelAnimationFrame(dragRafId);
     dragRafId = null;
   }
+
+  // If user clicked the playhead without dragging, treat as a seek click
+  if (!hasDragged.value) {
+    const time = xToTime(event.clientX);
+    emit('click', time);
+  }
+
   isDragging.value = false;
+  hasDragged.value = false;
   emit('dragEnd');
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseup', handleMouseUp);
