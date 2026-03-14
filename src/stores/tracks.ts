@@ -257,20 +257,24 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function setTrackVolume(trackId: string, volume: number, skipHistory = false): void {
-    const track = getTrackById(trackId);
-    if (track) {
-      if (!skipHistory) useHistoryStore().pushState('Set volume');
-      const clamped = Math.max(0, Math.min(MAX_VOLUME_LINEAR, volume));
-      // Scale envelope points proportionally so relative automation shape is preserved
-      if (track.volumeEnvelope && track.volumeEnvelope.length > 0 && track.volume > 0) {
-        const ratio = clamped / track.volume;
-        for (const point of track.volumeEnvelope) {
-          point.value = Math.max(0, Math.min(MAX_VOLUME_LINEAR, point.value * ratio));
-        }
-      }
-      track.volume = clamped;
-      triggerRef(tracks);
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    if (!skipHistory) useHistoryStore().pushState('Set volume');
+    const track = tracks.value[idx];
+    const clamped = Math.max(0, Math.min(MAX_VOLUME_LINEAR, volume));
+    // Scale envelope points proportionally so relative automation shape is preserved
+    let newEnvelope = track.volumeEnvelope;
+    if (track.volumeEnvelope && track.volumeEnvelope.length > 0 && track.volume > 0) {
+      const ratio = clamped / track.volume;
+      newEnvelope = track.volumeEnvelope.map((p) => ({
+        ...p,
+        value: Math.max(0, Math.min(MAX_VOLUME_LINEAR, p.value * ratio)),
+      }));
     }
+    // Create new array + new track object so shallowRef detects the change
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volume: clamped, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   function renameTrack(trackId: string, name: string): void {
@@ -2101,41 +2105,50 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Add a keyframe to a track's volume envelope. */
   function addVolumePoint(trackId: string, time: number, value: number): void {
-    const track = getTrackById(trackId);
-    if (!track) return;
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
     useHistoryStore().pushState('Add volume point');
 
-    if (!track.volumeEnvelope) track.volumeEnvelope = [];
-    track.volumeEnvelope.push({
-      id: generateId(),
-      time,
-      value: Math.max(0, Math.min(MAX_VOLUME_LINEAR, value)),
-    });
-    track.volumeEnvelope.sort((a, b) => a.time - b.time);
-    triggerRef(tracks);
+    const track = tracks.value[idx];
+    const newEnvelope = [
+      ...(track.volumeEnvelope || []),
+      { id: generateId(), time, value: Math.max(0, Math.min(MAX_VOLUME_LINEAR, value)) },
+    ].sort((a, b) => a.time - b.time);
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   /** Update a keyframe's position/value (no history — drag convention). */
   function updateVolumePoint(trackId: string, pointId: string, time: number, value: number): void {
-    const track = getTrackById(trackId);
-    if (!track?.volumeEnvelope) return;
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.volumeEnvelope) return;
 
-    const point = track.volumeEnvelope.find(p => p.id === pointId);
-    if (point) {
-      point.time = Math.max(0, time);
-      point.value = Math.max(0, Math.min(MAX_VOLUME_LINEAR, value));
-      track.volumeEnvelope.sort((a, b) => a.time - b.time);
-      triggerRef(tracks);
-    }
+    const pointIdx = track.volumeEnvelope.findIndex((p) => p.id === pointId);
+    if (pointIdx === -1) return;
+    const newEnvelope = track.volumeEnvelope.map((p) =>
+      p.id === pointId
+        ? { ...p, time: Math.max(0, time), value: Math.max(0, Math.min(MAX_VOLUME_LINEAR, value)) }
+        : p,
+    ).sort((a, b) => a.time - b.time);
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   /** Remove a keyframe from a track's volume envelope. */
   function removeVolumePoint(trackId: string, pointId: string): void {
-    const track = getTrackById(trackId);
-    if (!track?.volumeEnvelope) return;
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.volumeEnvelope) return;
     useHistoryStore().pushState('Remove volume point');
-    track.volumeEnvelope = track.volumeEnvelope.filter(p => p.id !== pointId);
-    triggerRef(tracks);
+    const newEnvelope = track.volumeEnvelope.filter((p) => p.id !== pointId);
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   /**
@@ -2180,53 +2193,65 @@ export const useTracksStore = defineStore('tracks', () => {
 
   /** Adjust envelope after a cut (ripple): remove points in [cutStart, cutEnd), shift after left. */
   function adjustVolumeEnvelopeForCut(trackId: string, cutStart: number, cutEnd: number): void {
-    const track = getTrackById(trackId);
-    if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.volumeEnvelope || track.volumeEnvelope.length === 0) return;
 
     const trackEnd = track.trackStart + track.duration;
     if (track.trackStart >= cutEnd || trackEnd <= cutStart) return;
 
     const gapDuration = cutEnd - cutStart;
-    track.volumeEnvelope = track.volumeEnvelope
-      .filter(p => {
+    const newEnvelope = track.volumeEnvelope
+      .filter((p) => {
         const absTime = track.trackStart + p.time;
         return absTime < cutStart || absTime >= cutEnd;
       })
-      .map(p => {
+      .map((p) => {
         const absTime = track.trackStart + p.time;
         if (absTime >= cutEnd) {
           return { ...p, time: p.time - gapDuration };
         }
         return p;
       });
-    triggerRef(tracks);
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   /** Adjust envelope after a delete (no ripple): remove points in [deleteStart, deleteEnd). */
   function adjustVolumeEnvelopeForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
-    const track = getTrackById(trackId);
-    if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.volumeEnvelope || track.volumeEnvelope.length === 0) return;
 
-    track.volumeEnvelope = track.volumeEnvelope.filter(p => {
+    const newEnvelope = track.volumeEnvelope.filter((p) => {
       const absTime = track.trackStart + p.time;
       return absTime < deleteStart || absTime >= deleteEnd;
     });
-    triggerRef(tracks);
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   /** Adjust envelope after an insert: shift points at/after insertPoint right by insertDuration. */
   function adjustVolumeEnvelopeForInsert(trackId: string, insertPoint: number, insertDuration: number): void {
-    const track = getTrackById(trackId);
-    if (!track?.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.volumeEnvelope || track.volumeEnvelope.length === 0) return;
 
-    track.volumeEnvelope = track.volumeEnvelope.map(p => {
+    const newEnvelope = track.volumeEnvelope.map((p) => {
       const absTime = track.trackStart + p.time;
       if (absTime >= insertPoint - 0.001) {
         return { ...p, time: p.time + insertDuration };
       }
       return p;
     });
-    triggerRef(tracks);
+    const updated = [...tracks.value];
+    updated[idx] = { ...track, volumeEnvelope: newEnvelope };
+    tracks.value = updated;
   }
 
   // ── EDL helper functions ──
