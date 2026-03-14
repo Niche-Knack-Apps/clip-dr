@@ -501,7 +501,8 @@ fn test_pw_record(sink_name: &str) -> Result<String, String> {
     let _output = std::process::Command::new("timeout")
         .args(["1.5", "pw-record", "--target", sink_name,
                "--format", "f32", "--rate", "44100", "--channels", "2",
-               temp_file.to_str().unwrap()])
+               temp_file.to_str()
+                   .ok_or_else(|| "Temp path contains invalid UTF-8".to_string())?])
         .output()
         .map_err(|e| format!("Failed to run pw-record: {}", e))?;
 
@@ -533,7 +534,8 @@ fn test_parecord(monitor_source: &str) -> Result<String, String> {
     let _output = std::process::Command::new("timeout")
         .args(["1.5", "parecord", "-d", monitor_source,
                "--file-format=wav", "--rate=44100", "--channels=2",
-               temp_file.to_str().unwrap()])
+               temp_file.to_str()
+                   .ok_or_else(|| "Temp path contains invalid UTF-8".to_string())?])
         .output()
         .map_err(|e| format!("Failed to run parecord: {}", e))?;
 
