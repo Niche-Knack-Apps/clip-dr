@@ -444,7 +444,8 @@ pub async fn transcribe_audio(
     // Create whisper context
     let load_start = Instant::now();
     let ctx = WhisperContext::new_with_params(
-        model_path.to_str().unwrap(),
+        model_path.to_str()
+            .ok_or_else(|| format!("Model path contains invalid UTF-8: {:?}", model_path))?,
         WhisperContextParameters::default(),
     )
     .map_err(|e| format!("Failed to load whisper model: {}", e))?;
