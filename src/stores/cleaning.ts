@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { CleaningOptions, CleanResult, Track } from '@/shared/types';
-import { encodeWavFloat32 } from '@/shared/audio-utils';
+import { encodeWavFloat32, loadAudioFromFile } from '@/shared/audio-utils';
 import { DEFAULT_CLEANING_OPTIONS, CLEANING_PRESETS, WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -190,47 +190,10 @@ export const useCleaningStore = defineStore('cleaning', () => {
     }
   }
 
+  // DUP-02: use shared loadAudioFromFile utility
   async function loadCleanedAudio(path: string): Promise<CleanedAudioEntry> {
     const ctx = audioStore.getAudioContext();
-
-    // Load audio metadata
-    const metadata = await invoke<{ duration: number; sampleRate: number; channels: number }>(
-      'get_audio_metadata',
-      { path }
-    );
-
-    // Load waveform data
-    const waveformData = await invoke<number[]>('extract_waveform', {
-      path,
-      bucketCount: WAVEFORM_BUCKET_COUNT,
-    });
-
-    // Load audio buffer
-    const audioData = await invoke<number[]>('load_audio_buffer', { path });
-
-    const float32Data = new Float32Array(audioData);
-    const samplesPerChannel = Math.floor(float32Data.length / metadata.channels);
-
-    const buffer = ctx.createBuffer(
-      metadata.channels,
-      samplesPerChannel,
-      metadata.sampleRate
-    );
-
-    for (let channel = 0; channel < metadata.channels; channel++) {
-      const channelData = buffer.getChannelData(channel);
-      for (let i = 0; i < channelData.length; i++) {
-        channelData[i] = float32Data[i * metadata.channels + channel];
-      }
-    }
-
-    return {
-      path,
-      buffer,
-      waveformData,
-      duration: metadata.duration,
-      sampleRate: metadata.sampleRate,
-    };
+    return loadAudioFromFile(path, ctx);
   }
 
   // Get the audio buffer for a track (returns cleaned buffer if available)

@@ -1,7 +1,64 @@
+import { invoke } from '@tauri-apps/api/core';
 import type { TrackClip } from '@/shared/types';
+import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 
 const MAX_WAV_BYTES = 1_073_741_824; // 1GB
 const MAX_MIX_DURATION = 7200; // 2 hours
+
+/** Audio data loaded from a WAV file on disk (metadata + waveform + decoded buffer). */
+export interface LoadedAudioData {
+  path: string;
+  buffer: AudioBuffer;
+  waveformData: number[];
+  duration: number;
+  sampleRate: number;
+}
+
+/**
+ * DUP-02: Shared utility to load audio from a WAV file on disk.
+ * Fetches metadata, waveform, and decoded buffer via Rust IPC.
+ * Used by both cleaning and silence stores.
+ */
+export async function loadAudioFromFile(
+  path: string,
+  audioContext: AudioContext,
+): Promise<LoadedAudioData> {
+  const metadata = await invoke<{ duration: number; sampleRate: number; channels: number }>(
+    'get_audio_metadata',
+    { path }
+  );
+
+  const waveformData = await invoke<number[]>('extract_waveform', {
+    path,
+    bucketCount: WAVEFORM_BUCKET_COUNT,
+  });
+
+  const audioData = await invoke<number[]>('load_audio_buffer', { path });
+
+  const float32Data = new Float32Array(audioData);
+  const samplesPerChannel = Math.floor(float32Data.length / metadata.channels);
+
+  const buffer = audioContext.createBuffer(
+    metadata.channels,
+    samplesPerChannel,
+    metadata.sampleRate
+  );
+
+  for (let channel = 0; channel < metadata.channels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < channelData.length; i++) {
+      channelData[i] = float32Data[i * metadata.channels + channel];
+    }
+  }
+
+  return {
+    path,
+    buffer,
+    waveformData,
+    duration: metadata.duration,
+    sampleRate: metadata.sampleRate,
+  };
+}
 
 function writeWavString(view: DataView, offset: number, str: string): void {
   for (let i = 0; i < str.length; i++) {
