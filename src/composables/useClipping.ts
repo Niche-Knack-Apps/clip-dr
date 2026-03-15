@@ -98,6 +98,7 @@ export function useClipping() {
           solo: false,
           volume: 1,
           clips,
+          sourcePath: segments[0]?.sourceFile,
         };
 
         console.log(`[Clipping] Created EDL clip "${clipName}" (${totalDuration.toFixed(2)}s) with ${segments.length} segment(s)`);
@@ -110,6 +111,10 @@ export function useClipping() {
           return null;
         }
         const clipName = `Clip ${tracksStore.tracks.length + 1}`;
+        // Derive sourcePath from the first contributing track
+        const contributingTrack = tracksStore.tracks.find(t =>
+          t.trackStart < outPoint && t.trackStart + t.duration > inPoint
+        );
         newTrack = {
           id: generateId(),
           name: clipName,
@@ -125,6 +130,7 @@ export function useClipping() {
           muted: false,
           solo: false,
           volume: 1,
+          sourcePath: contributingTrack?.sourcePath || contributingTrack?.cachedAudioPath,
         };
       }
 

@@ -2464,6 +2464,7 @@ export const useTracksStore = defineStore('tracks', () => {
       solo: false,
       volume: 1,
       clips,
+      sourcePath: segments[0]?.sourceFile,
     };
 
     tracks.value = [...tracks.value, newTrack];

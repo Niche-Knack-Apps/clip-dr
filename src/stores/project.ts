@@ -83,10 +83,15 @@ export const useProjectStore = defineStore('project', () => {
     const baseDir = projectPath.value ? getDirectory(projectPath.value) : '.';
 
     const tracks: ProjectTrack[] = tracksStore.tracks.map(t => {
+      // Derive effective sourcePath: original > first clip source > cache
+      const effectiveSource = t.sourcePath
+        || (t.clips && t.clips.length > 0 ? t.clips[0].sourceFile : '')
+        || t.cachedAudioPath
+        || '';
       const base: ProjectTrack = {
         id: t.id,
         name: t.name,
-        sourcePath: t.sourcePath ? toRelativePath(t.sourcePath, baseDir) : '',
+        sourcePath: effectiveSource ? toRelativePath(effectiveSource, baseDir) : '',
         trackStart: t.trackStart,
         duration: t.duration,
         color: t.color,
@@ -214,12 +219,15 @@ export const useProjectStore = defineStore('project', () => {
 
       // Import each track
       for (const pt of project.tracks) {
-        if (!pt.sourcePath) {
-          errors.push(`Track "${pt.name}": no source path`);
+        // Fallback chain: sourcePath > first clip sourceFile > cachedAudioPath
+        const firstClipSource = pt.clips && pt.clips.length > 0 ? pt.clips[0].sourceFile : '';
+        const effectiveSource = pt.sourcePath || firstClipSource || pt.cachedAudioPath || '';
+        if (!effectiveSource) {
+          errors.push(`Track "${pt.name}": no source path, clip source, or cached path — skipped`);
           continue;
         }
 
-        const absPath = toAbsolutePath(pt.sourcePath, baseDir);
+        const absPath = toAbsolutePath(effectiveSource, baseDir);
 
         try {
           await audioStore.importFile(absPath, pt.trackStart);

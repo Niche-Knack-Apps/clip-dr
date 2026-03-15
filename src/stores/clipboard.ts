@@ -482,11 +482,18 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const trackName = `Pasted ${tracksStore.tracks.length + 1}`;
     console.log(`[Clipboard] Creating NEW track "${trackName}" at time ${pasteTime.toFixed(2)}s`);
 
+    // Derive sourcePath from the source track (prefer stable sourcePath over cache)
+    const sourceTrackForNew = clipboard.value.sourceTrackId
+      ? tracksStore.tracks.find(t => t.id === clipboard.value!.sourceTrackId)
+      : undefined;
+    const pasteSourcePath = sourceTrackForNew?.sourcePath || sourceTrackForNew?.cachedAudioPath;
+
     const newTrack = await tracksStore.createTrackFromBuffer(
       clonedBuffer,
       [...clipboard.value.waveformData],
       trackName,
-      pasteTime
+      pasteTime,
+      pasteSourcePath
     );
 
     console.log(`[Clipboard] Pasted ${clipboard.value.duration.toFixed(2)}s, new track ID: ${newTrack.id}`);
