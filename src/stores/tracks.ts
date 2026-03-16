@@ -577,16 +577,16 @@ export const useTracksStore = defineStore('tracks', () => {
           const firstClipStart = newClips.length > 0 ? Math.min(...newClips.map(c => c.clipStart)) : trackStart;
           const lastClipEnd = newClips.length > 0 ? Math.max(...newClips.map(c => c.clipStart + c.duration)) : trackStart;
           const newDuration = lastClipEnd - firstClipStart;
-          // Splice the waveform to remove the cut region's buckets
-          const beforeBucketEnd = Math.floor((cutStart / track.duration) * bucketCount);
-          const afterBucketStart = Math.ceil((cutEnd / track.duration) * bucketCount);
-          const splicedWaveform = [
-            ...existingWaveform.slice(0, beforeBucketEnd * 2),
-            ...existingWaveform.slice(afterBucketStart * 2),
-          ];
+          // Preserve parent waveform as immutable source-space data (don't splice).
+          // Individual clips already have their own waveformData sliced at cut time.
+          // Set sourceDuration to lock in the original source file duration.
           tracks.value[trackIndex] = {
             ...track,
-            audioData: { ...track.audioData, buffer: null, waveformData: splicedWaveform },
+            audioData: {
+              ...track.audioData,
+              buffer: null,
+              sourceDuration: track.audioData.sourceDuration ?? track.duration,
+            },
             clips: newClips.length > 0 ? newClips : undefined,
             duration: newDuration,
             hasPeakPyramid: false,
@@ -1161,9 +1161,11 @@ export const useTracksStore = defineStore('tracks', () => {
    * Slides tracks left to fill a gap. Handles both whole tracks after the gap
    * and clips within tracks that span the gap.
    */
-  function slideTracksLeft(gapStart: number, gapDuration: number): void {
+  function slideTracksLeft(gapStart: number, gapDuration: number, onlyTrackId?: string): void {
     if (gapDuration <= 0) return;
     tracks.value = tracks.value.map(t => {
+      // When onlyTrackId is set, skip all other tracks (clip-level cut)
+      if (onlyTrackId && t.id !== onlyTrackId) return t;
       const trackEnd = t.trackStart + t.duration;
 
       if (t.trackStart >= gapStart) {
@@ -1826,19 +1828,41 @@ export const useTracksStore = defineStore('tracks', () => {
     if (idx === -1) return;
     const track = tracks.value[idx];
 
-    console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, statusKept=${(['ready', 'large-file', 'caching'] as ImportStatus[]).includes(track.importStatus!)}`);
+    const hasClips = track.clips && track.clips.length > 0;
+    const statusKept = (['ready', 'large-file', 'caching'] as ImportStatus[]).includes(track.importStatus!);
+
+    console.log(`[Tracks] finalizeImportWaveform: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${actualDuration.toFixed(2)}, hasClips=${hasClips}, statusKept=${statusKept}`);
+
     const updated = [...tracks.value];
-    updated[idx] = {
-      ...track,
-      audioData: { ...track.audioData, waveformData: finalWaveform },
-      duration: actualDuration,
-      // If buffer already set (status 'ready'), keep it — don't regress to 'decoding'
-      importStatus: (['ready', 'large-file', 'caching'] as ImportStatus[]).includes(track.importStatus!)
-        ? track.importStatus!
-        : 'decoding' as ImportStatus,
-      importProgress: 1,
-      importSessionId: undefined, // waveform session done
-    };
+    if (hasClips) {
+      // Track already edited — update source-backing waveform data only.
+      // Do NOT overwrite track.duration (edited timeline span from clips).
+      updated[idx] = {
+        ...track,
+        audioData: {
+          ...track.audioData,
+          waveformData: finalWaveform,
+          sourceDuration: actualDuration,
+        },
+        importStatus: statusKept ? track.importStatus! : 'decoding' as ImportStatus,
+        importProgress: 1,
+        importSessionId: undefined,
+      };
+    } else {
+      // No clips — safe to update duration from actual import duration
+      updated[idx] = {
+        ...track,
+        audioData: {
+          ...track.audioData,
+          waveformData: finalWaveform,
+          sourceDuration: actualDuration,
+        },
+        duration: actualDuration,
+        importStatus: statusKept ? track.importStatus! : 'decoding' as ImportStatus,
+        importProgress: 1,
+        importSessionId: undefined,
+      };
+    }
     tracks.value = updated;
     // Propagate settled waveform into restored EDL clips (if any)
     finalizeClipWaveforms(trackId);
@@ -1861,23 +1885,37 @@ export const useTracksStore = defineStore('tracks', () => {
    * Proportionally slice the parent track waveform into each clip's waveformData.
    * Called after import settles (importStatus → ready/large-file/caching) or
    * immediately after setTrackClips if waveform already exists.
-   * Waveforms are eventually-consistent UI data — empty arrays are valid.
+   *
+   * Uses source-space coordinates (clip.sourceOffset + clip.duration mapped into
+   * sourceDuration) rather than timeline coordinates (clip.clipStart / track.duration).
+   * This ensures waveform slices remain correct after ripple cuts shift timeline positions.
    */
   function finalizeClipWaveforms(trackId: string): void {
     const track = getTrackById(trackId);
     if (!track?.clips || track.clips.length === 0) return;
     const parentWaveform = track.audioData.waveformData;
     if (parentWaveform.length === 0) return;
-    const totalDuration = track.duration;
-    if (totalDuration <= 0) return;
+
+    // Use authoritative sourceDuration; fall back to track.duration for pre-edit compat
+    const srcDuration = track.audioData.sourceDuration ?? track.duration;
+    if (srcDuration <= 0) {
+      if (!track.audioData.sourceDuration) {
+        console.warn(`[Tracks] finalizeClipWaveforms: no sourceDuration for track ${track.name}, falling back to track.duration`);
+      }
+      return;
+    }
     const buckets = parentWaveform.length / 2;
 
     const idx = tracks.value.findIndex(t => t.id === trackId);
     tracks.value[idx] = {
       ...track,
       clips: track.clips.map(clip => {
-        const startFrac = clip.clipStart / totalDuration;
-        const endFrac = (clip.clipStart + clip.duration) / totalDuration;
+        // Skip source-offset slicing for clips with in-memory buffer (small-file)
+        if (clip.buffer) return clip;
+
+        const srcOffset = clip.sourceOffset ?? 0;
+        const startFrac = srcOffset / srcDuration;
+        const endFrac = Math.min((srcOffset + clip.duration) / srcDuration, 1.0);
         const startBucket = Math.floor(startFrac * buckets);
         const endBucket = Math.ceil(endFrac * buckets);
         return { ...clip, waveformData: parentWaveform.slice(startBucket * 2, endBucket * 2) };
@@ -2428,6 +2466,7 @@ export const useTracksStore = defineStore('tracks', () => {
       solo: false,
       volume: 1,
       clips,
+      sourcePath: segments[0]?.sourceFile,
     };
 
     tracks.value = [...tracks.value, newTrack];

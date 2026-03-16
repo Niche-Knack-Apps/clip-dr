@@ -48,6 +48,8 @@ export interface TrackAudioData {
   waveformData: number[];
   sampleRate: number;
   channels: number;
+  /** Duration of the full source file that waveformData covers (set once at import, never edited) */
+  sourceDuration?: number;
 }
 
 /** A clip segment within a track (for multi-clip tracks) */

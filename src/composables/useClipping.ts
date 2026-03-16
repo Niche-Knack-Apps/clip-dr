@@ -98,11 +98,13 @@ export function useClipping() {
           solo: false,
           volume: 1,
           clips,
+          sourcePath: segments[0]?.sourceFile,
         };
 
         console.log(`[Clipping] Created EDL clip "${clipName}" (${totalDuration.toFixed(2)}s) with ${segments.length} segment(s)`);
       } else {
-        // Small file: extract audio (fast, in-memory) — existing path
+        // Small file: extract audio AND create EDL clips for save/load round-trip
+        const segments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
         const ctx = audioStore.getAudioContext();
         const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
         if (!extracted) {
@@ -110,21 +112,54 @@ export function useClipping() {
           return null;
         }
         const clipName = `Clip ${tracksStore.tracks.length + 1}`;
+        const totalDuration = outPoint - inPoint;
+        const waveform = extracted.waveformData;
+
+        // Build EDL clips from segments (mirrors the large-file path)
+        const clips: TrackClip[] = segments.map(seg => ({
+          id: generateId(),
+          buffer: null,
+          waveformData: [] as number[],
+          clipStart: inPoint + seg.offsetInRegion,
+          duration: seg.duration,
+          sourceFile: seg.sourceFile,
+          sourceOffset: seg.sourceOffset,
+        }));
+
+        // Distribute waveform across clips proportionally
+        if (clips.length > 0) {
+          const bucketCount = waveform.length / 2;
+          for (let i = 0; i < clips.length; i++) {
+            const seg = segments[i];
+            const startFrac = seg.offsetInRegion / totalDuration;
+            const endFrac = (seg.offsetInRegion + seg.duration) / totalDuration;
+            const startBucket = Math.floor(startFrac * bucketCount);
+            const endBucket = Math.ceil(endFrac * bucketCount);
+            clips[i].waveformData = waveform.slice(startBucket * 2, endBucket * 2);
+          }
+        }
+
+        // Derive sourcePath from segments or contributing track
+        const contributingTrack = tracksStore.tracks.find(t =>
+          t.trackStart < outPoint && t.trackStart + t.duration > inPoint
+        );
         newTrack = {
           id: generateId(),
           name: clipName,
           audioData: {
             buffer: extracted.buffer,
-            waveformData: extracted.waveformData,
+            waveformData: waveform,
             sampleRate: extracted.buffer.sampleRate,
             channels: extracted.buffer.numberOfChannels,
           },
           trackStart: inPoint,
-          duration: extracted.buffer.duration,
+          duration: totalDuration,
           color: TRACK_COLORS[tracksStore.tracks.length % TRACK_COLORS.length],
           muted: false,
           solo: false,
           volume: 1,
+          clips: clips.length > 0 ? clips : undefined,
+          sourcePath: segments[0]?.sourceFile || contributingTrack?.sourcePath || contributingTrack?.cachedAudioPath,
         };
       }
 

@@ -59,11 +59,13 @@ export function useCompositeWaveform() {
     }
   }
 
-  // Version hash tracking waveform data content (changes when clips are added/removed/edited,
-  // but NOT when only clip positions change during drag)
+  // Version hash tracking waveform data and clip spatial identity
+  // (invalidates when clips move, are added/removed, or change source offset)
   const waveformVersion = computed(() =>
     tracksStore.tracks.map(t =>
-      tracksStore.getTrackClips(t.id).map(c => c.waveformData.length).join(',')
+      tracksStore.getTrackClips(t.id).map(c =>
+        `${c.id}:${c.clipStart}:${c.duration}:${c.sourceOffset ?? 'na'}:${c.waveformData.length}`
+      ).join(',')
     ).join('|')
   );
 

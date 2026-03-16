@@ -12,7 +12,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile } from '@/shared/types';
 import { ALL_SHORTCUT_HINTS, DEFAULT_SETTINGS } from '@/shared/constants';
 
-const APP_VERSION = '0.19.36';
+const APP_VERSION = '0.19.38';
 
 const emit = defineEmits<{
   close: [];

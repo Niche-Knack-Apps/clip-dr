@@ -83,10 +83,15 @@ export const useProjectStore = defineStore('project', () => {
     const baseDir = projectPath.value ? getDirectory(projectPath.value) : '.';
 
     const tracks: ProjectTrack[] = tracksStore.tracks.map(t => {
+      // Derive effective sourcePath: original > first clip source > cache
+      const effectiveSource = t.sourcePath
+        || (t.clips && t.clips.length > 0 ? t.clips[0].sourceFile : '')
+        || t.cachedAudioPath
+        || '';
       const base: ProjectTrack = {
         id: t.id,
         name: t.name,
-        sourcePath: t.sourcePath ? toRelativePath(t.sourcePath, baseDir) : '',
+        sourcePath: effectiveSource ? toRelativePath(effectiveSource, baseDir) : '',
         trackStart: t.trackStart,
         duration: t.duration,
         color: t.color,
@@ -214,12 +219,15 @@ export const useProjectStore = defineStore('project', () => {
 
       // Import each track
       for (const pt of project.tracks) {
-        if (!pt.sourcePath) {
-          errors.push(`Track "${pt.name}": no source path`);
+        // Fallback chain: sourcePath > first clip sourceFile > cachedAudioPath
+        const firstClipSource = pt.clips && pt.clips.length > 0 ? pt.clips[0].sourceFile : '';
+        const effectiveSource = pt.sourcePath || firstClipSource || pt.cachedAudioPath || '';
+        if (!effectiveSource) {
+          errors.push(`Track "${pt.name}": no source path, clip source, or cached path — skipped`);
           continue;
         }
 
-        const absPath = toAbsolutePath(pt.sourcePath, baseDir);
+        const absPath = toAbsolutePath(effectiveSource, baseDir);
 
         try {
           await audioStore.importFile(absPath, pt.trackStart);
@@ -227,6 +235,15 @@ export const useProjectStore = defineStore('project', () => {
           // Find the just-imported track (last one added)
           const lastTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
           if (lastTrack) {
+            // Capture the import duration as sourceDuration BEFORE overwriting with
+            // saved pt.duration. This is the full source file duration — needed by
+            // finalizeClipWaveforms to correctly slice the parent waveform for clips
+            // that reference arbitrary portions of the source (via sourceOffset).
+            const importDuration = lastTrack.duration;
+            if (!lastTrack.audioData.sourceDuration) {
+              lastTrack.audioData.sourceDuration = importDuration;
+            }
+
             // Apply saved metadata directly (no history for initial load)
             lastTrack.name = pt.name;
             lastTrack.color = pt.color;
@@ -236,6 +253,13 @@ export const useProjectStore = defineStore('project', () => {
             if (pt.tag) lastTrack.tag = pt.tag;
             if (pt.timemarks) lastTrack.timemarks = pt.timemarks;
             if (pt.volumeEnvelope) lastTrack.volumeEnvelope = pt.volumeEnvelope;
+
+            // Loader invariant: the saved pt.duration and pt.trackStart are the
+            // authoritative timeline values — they were captured after VBR correction
+            // at save time. The import bootstraps audio/waveform but its metadata
+            // duration reflects the full source file, not the track's timeline extent.
+            lastTrack.duration = pt.duration;
+            lastTrack.trackStart = pt.trackStart;
 
             // v2: restore EDL clip state
             if (project.version === 2 && pt.clips && pt.clips.length > 0) {
