@@ -7,10 +7,11 @@ import { usePlaybackStore } from './playback';
 import { useSettingsStore } from './settings';
 import { useTranscriptionStore } from './transcription';
 import { useUIStore } from './ui';
-import type { Track } from '@/shared/types';
+import type { Track, TrackClip } from '@/shared/types';
 import { useHistoryStore } from './history';
 import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { writeTempFile } from '@/shared/fs-utils';
+import { generateId } from '@/shared/utils';
 
 export interface VirtualClipboardSegment {
   sourceFile: string;
@@ -230,6 +231,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
       clipboardBuffer.value = clonedBuffer;
 
       const waveform = await tracksStore.generateWaveformFromBuffer(clonedBuffer);
+
+      // Resolve source file for EDL segment metadata (save/load round-trip)
+      const srcTrack = tracksStore.tracks.find(t => t.id === trackId);
+      const segSourceFile = clip.sourceFile || srcTrack?.cachedAudioPath || srcTrack?.sourcePath || '';
+
       clipboard.value = {
         samples: [],
         sampleRate: clonedBuffer.sampleRate,
@@ -238,6 +244,17 @@ export const useClipboardStore = defineStore('clipboard', () => {
         sourceTrackId: trackId,
         waveformData: waveform,
         copiedAt: Date.now(),
+        virtualSource: segSourceFile ? {
+          kind: 'mixdown',
+          segments: [{
+            sourceFile: segSourceFile,
+            sourceOffset: clip.sourceOffset ?? 0,
+            duration: clip.duration,
+            offsetInRegion: 0,
+          }],
+          sampleRate: clonedBuffer.sampleRate,
+          channels: clonedBuffer.numberOfChannels,
+        } : undefined,
       };
 
       // Record gap position before deleting
@@ -247,15 +264,14 @@ export const useClipboardStore = defineStore('clipboard', () => {
       // Remove the clip but keep the track (clip was selected, not the track)
       tracksStore.removeClipKeepTrack(trackId, clip.id);
 
-      // Adjust timemarks and volume envelope before sliding (uses pre-slide positions)
+      // Adjust timemarks and volume envelope on the affected track only
       const gapEnd = gapStart + gapDuration;
-      for (const track of tracksStore.tracks) {
-        tracksStore.adjustTimemarksForCut(track.id, gapStart, gapEnd);
-        tracksStore.adjustVolumeEnvelopeForCut(track.id, gapStart, gapEnd);
-      }
+      tracksStore.adjustTimemarksForCut(trackId, gapStart, gapEnd);
+      tracksStore.adjustVolumeEnvelopeForCut(trackId, gapStart, gapEnd);
 
-      // Slide remaining clips left to close the gap
-      tracksStore.slideTracksLeft(gapStart, gapDuration);
+      // Slide remaining clips on the affected track only — don't ripple other tracks.
+      // Selected-clip cut is a clip-level operation, not a timeline-level operation.
+      tracksStore.slideTracksLeft(gapStart, gapDuration, trackId);
 
       tracksStore.clearClipSelection();
       playbackStore.seek(Math.max(0, gapStart - 1.0));
@@ -279,19 +295,15 @@ export const useClipboardStore = defineStore('clipboard', () => {
       });
 
       let extracted: { buffer: AudioBuffer; waveformData: number[] } | null = null;
-      let virtualSegments: VirtualClipboardSegment[] | null = null;
-      let sr = 44100;
-      let ch = 2;
-      let clipWaveform: number[] = [];
 
-      if (hasLargeFile) {
-        // Large file: collect virtual clipboard segments (instant, metadata only)
-        // Capture format and waveform BEFORE ripple delete modifies/removes tracks
-        virtualSegments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
-        ({ sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint));
-        clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
-      } else {
-        // Small file: extract audio (fast, in-memory)
+      // Always collect segments BEFORE ripple delete modifies tracks — needed for
+      // save/load round-trip even for small files (EDL clip metadata)
+      const virtualSegments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
+      const { sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint);
+      const clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
+
+      if (!hasLargeFile) {
+        // Small file: also extract in-memory audio for immediate playback
         extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
       }
 
@@ -299,37 +311,23 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, { mode: 'edit-only' });
 
       if (results.affectedCount > 0) {
-        if (extracted) {
-          // Small file: use extracted buffer directly
-          clipboardBuffer.value = extracted.buffer;
-          clipboard.value = {
-            samples: [],
-            sampleRate: extracted.buffer.sampleRate,
-            duration: extracted.buffer.duration,
-            sourceRegion: { start: inPoint, end: outPoint },
-            sourceTrackId: 'all',
-            waveformData: extracted.waveformData,
-            copiedAt: Date.now(),
-          };
-        } else if (virtualSegments && virtualSegments.length > 0) {
-          // Large file: store virtual clipboard reference (format/waveform captured above)
-          clipboardBuffer.value = null;
-          clipboard.value = {
-            samples: [],
+        // Store clipboard with both buffer (if available) and segment metadata (always)
+        clipboardBuffer.value = extracted?.buffer ?? null;
+        clipboard.value = {
+          samples: [],
+          sampleRate: extracted?.buffer.sampleRate ?? sr,
+          duration: extracted?.buffer.duration ?? (outPoint - inPoint),
+          sourceRegion: { start: inPoint, end: outPoint },
+          sourceTrackId: 'all',
+          waveformData: extracted?.waveformData ?? clipWaveform,
+          copiedAt: Date.now(),
+          virtualSource: virtualSegments.length > 0 ? {
+            kind: 'mixdown',
+            segments: virtualSegments,
             sampleRate: sr,
-            duration: outPoint - inPoint,
-            sourceRegion: { start: inPoint, end: outPoint },
-            sourceTrackId: 'all',
-            waveformData: clipWaveform,
-            copiedAt: Date.now(),
-            virtualSource: {
-              kind: 'mixdown',
-              segments: virtualSegments,
-              sampleRate: sr,
-              channels: ch,
-            },
-          };
-        }
+            channels: ch,
+          } : undefined,
+        };
 
         console.log(`[Clipboard] Ripple cut ${(outPoint - inPoint).toFixed(2)}s from ${results.affectedCount} track(s)`);
 
@@ -449,15 +447,14 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const waveform = [...clipboard.value.waveformData];
       console.log(`[Clipboard] Inserting ${clipboard.value.duration.toFixed(2)}s at playhead ${playheadTime.toFixed(2)}s in track "${selectedTrack.name}"`);
 
-      // Satisfy C2: resolve sourceFile from the source track so new clip has EDL metadata immediately
+      // Satisfy C2: resolve sourceFile from segment metadata or source track
       const sourceTrack = clipboard.value.sourceTrackId
         ? tracksStore.tracks.find(t => t.id === clipboard.value!.sourceTrackId)
         : undefined;
-      const pasteSourceFile = sourceTrack?.cachedAudioPath || sourceTrack?.sourcePath;
+      const pasteSourceFile = vs?.segments?.[0]?.sourceFile || sourceTrack?.cachedAudioPath || sourceTrack?.sourcePath;
 
-      // EDL-H1: pass the source region start as sourceOffset so the pasted
-      // clip knows where in the original file its audio came from
-      const pasteSourceOffset = clipboard.value.sourceRegion.start;
+      // Use segment's file offset (correct), not timeline position (sourceRegion.start)
+      const pasteSourceOffset = vs?.segments?.[0]?.sourceOffset ?? clipboard.value.sourceRegion.start;
 
       const success = await tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
@@ -482,11 +479,13 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const trackName = `Pasted ${tracksStore.tracks.length + 1}`;
     console.log(`[Clipboard] Creating NEW track "${trackName}" at time ${pasteTime.toFixed(2)}s`);
 
-    // Derive sourcePath from the source track (prefer stable sourcePath over cache)
+    // Derive sourcePath from segments or source track
     const sourceTrackForNew = clipboard.value.sourceTrackId
       ? tracksStore.tracks.find(t => t.id === clipboard.value!.sourceTrackId)
       : undefined;
-    const pasteSourcePath = sourceTrackForNew?.sourcePath || sourceTrackForNew?.cachedAudioPath;
+    const pasteSourcePath = vs?.segments?.[0]?.sourceFile
+      || sourceTrackForNew?.sourcePath
+      || sourceTrackForNew?.cachedAudioPath;
 
     const newTrack = await tracksStore.createTrackFromBuffer(
       clonedBuffer,
@@ -495,6 +494,34 @@ export const useClipboardStore = defineStore('clipboard', () => {
       pasteTime,
       pasteSourcePath
     );
+
+    // Create EDL clips from stored segments for save/load round-trip
+    if (vs?.segments && vs.segments.length > 0) {
+      const clips: TrackClip[] = vs.segments.map(seg => ({
+        id: generateId(),
+        buffer: null,
+        waveformData: [] as number[],
+        clipStart: pasteTime + seg.offsetInRegion,
+        duration: seg.duration,
+        sourceFile: seg.sourceFile,
+        sourceOffset: seg.sourceOffset,
+      }));
+
+      // Distribute waveform across clips proportionally
+      const waveformData = clipboard.value.waveformData;
+      const totalDuration = clipboard.value.duration;
+      const bucketCount = waveformData.length / 2;
+      for (let i = 0; i < clips.length; i++) {
+        const seg = vs.segments[i];
+        const startFrac = seg.offsetInRegion / totalDuration;
+        const endFrac = (seg.offsetInRegion + seg.duration) / totalDuration;
+        const startBucket = Math.floor(startFrac * bucketCount);
+        const endBucket = Math.ceil(endFrac * bucketCount);
+        clips[i].waveformData = waveformData.slice(startBucket * 2, endBucket * 2);
+      }
+
+      tracksStore.setTrackClips(newTrack.id, clips);
+    }
 
     console.log(`[Clipboard] Pasted ${clipboard.value.duration.toFixed(2)}s, new track ID: ${newTrack.id}`);
     return newTrack;

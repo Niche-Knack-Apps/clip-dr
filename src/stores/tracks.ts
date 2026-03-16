@@ -1161,9 +1161,11 @@ export const useTracksStore = defineStore('tracks', () => {
    * Slides tracks left to fill a gap. Handles both whole tracks after the gap
    * and clips within tracks that span the gap.
    */
-  function slideTracksLeft(gapStart: number, gapDuration: number): void {
+  function slideTracksLeft(gapStart: number, gapDuration: number, onlyTrackId?: string): void {
     if (gapDuration <= 0) return;
     tracks.value = tracks.value.map(t => {
+      // When onlyTrackId is set, skip all other tracks (clip-level cut)
+      if (onlyTrackId && t.id !== onlyTrackId) return t;
       const trackEnd = t.trackStart + t.duration;
 
       if (t.trackStart >= gapStart) {
