@@ -244,6 +244,21 @@ export const useExportStore = defineStore('export', () => {
   }
 
   /**
+   * Rebase EDL track_start values so the earliest clip starts at 0.
+   * Applied only for single-track exports to trim leading silence.
+   * Multi-track mixed exports must NOT be rebased (preserves timeline accuracy).
+   */
+  function rebaseEdlToZero(edl: ExportEDL): void {
+    if (edl.tracks.length === 0) return;
+    const minStart = Math.min(...edl.tracks.map(t => t.track_start));
+    if (minStart <= 0) return;
+    for (const track of edl.tracks) {
+      track.track_start -= minStart;
+    }
+    edl.end_time -= minStart;
+  }
+
+  /**
    * Core mixed export logic — used by both exportWithProfile and quickReExport.
    * Uses EDL streaming export when all tracks have source paths (handles large files).
    * Falls back to JS AudioBuffer mixing for tracks without source paths.
@@ -282,6 +297,11 @@ export const useExportStore = defineStore('export', () => {
       if (canUseEdlExport(tracks)) {
         console.log('[Export] Using EDL path:', true, 'tracks:', tracks.length);
         const edl = buildEdl(tracks, outputPath, format, bitrate, oggQuality);
+
+        // Single-track export: trim leading/trailing silence by rebasing to zero
+        if (tracks.length === 1) {
+          rebaseEdlToZero(edl);
+        }
 
         // Listen for progress events from Rust
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
@@ -415,6 +435,7 @@ export const useExportStore = defineStore('export', () => {
       // Use EDL path when all clips have a resolvable source (handles multi-clip edited tracks)
       if (canUseEdlExport([currentTrack])) {
         const edl = buildEdl([currentTrack], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality);
+        rebaseEdlToZero(edl);
 
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
           progress.value = Math.round(event.payload.progress * 100);
