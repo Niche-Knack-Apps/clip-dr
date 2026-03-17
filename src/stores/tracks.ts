@@ -242,6 +242,15 @@ export const useTracksStore = defineStore('tracks', () => {
     }
   }
 
+  function muteAllExcept(trackId: string): void {
+    useHistoryStore().pushState('Mute all except');
+    tracks.value = tracks.value.map(t =>
+      t.id === trackId
+        ? (t.muted ? { ...t, muted: false } : t)
+        : (t.muted ? t : { ...t, muted: true })
+    );
+  }
+
   function setTrackSolo(trackId: string, solo: boolean): void {
     useHistoryStore().pushState('Toggle solo');
     // Exclusive solo - de-solo all other tracks when enabling
@@ -2509,6 +2518,7 @@ export const useTracksStore = defineStore('tracks', () => {
     selectClip,
     clearClipSelection,
     setTrackMuted,
+    muteAllExcept,
     setTrackSolo,
     setTrackVolume,
     renameTrack,

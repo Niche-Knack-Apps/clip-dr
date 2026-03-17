@@ -10,6 +10,7 @@ import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { useVadStore } from './vad';
 import { useHistoryStore } from './history';
+import { usePlaybackStore } from './playback';
 import { useUIStore } from './ui';
 
 interface CleanedAudioEntry {
@@ -154,13 +155,14 @@ export const useCleaningStore = defineStore('cleaning', () => {
       console.log('[Clean] Loaded cleaned audio, duration:', cleanedAudioEntry.duration);
 
       console.log('[Clean] Creating new track...');
-      // Create a new track for the cleaned audio
+      // Create a new track for the cleaned audio, with sourcePath so Rust playback works
       const cleanedName = `Cleaned ${sourceTrack.name}`;
       const cleanedTrack = await tracksStore.createTrackFromBuffer(
         cleanedAudioEntry.buffer,
         cleanedAudioEntry.waveformData,
         cleanedName,
-        0
+        0,
+        result.outputPath
       );
       console.log('[Clean] Created track:', cleanedTrack.id, cleanedTrack.name);
 
@@ -171,10 +173,13 @@ export const useCleaningStore = defineStore('cleaning', () => {
       cleanedAudioFiles.value = newMap;
       console.log('[Clean] Mapped cleaned audio to track ID:', cleanedTrack.id);
 
-      // MUTE the source track (non-destructive)
-      console.log('[Clean] Muting source track:', sourceTrack.id, sourceTrack.name);
-      tracksStore.setTrackMuted(sourceTrack.id, true);
-      console.log('[Clean] Source track muted state:', tracksStore.tracks.find(t => t.id === sourceTrack.id)?.muted);
+      // Mute ALL other tracks so only the cleaned track plays
+      console.log('[Clean] Muting all tracks except cleaned:', cleanedTrack.id);
+      tracksStore.muteAllExcept(cleanedTrack.id);
+
+      // Reposition playhead to start of cleaned track
+      const playbackStore = usePlaybackStore();
+      await playbackStore.seek(Math.max(0, cleanedTrack.trackStart));
 
       console.log('[Clean] Audio cleaned successfully, new track added');
       console.log('[Clean] Total tracks now:', tracksStore.tracks.length);
