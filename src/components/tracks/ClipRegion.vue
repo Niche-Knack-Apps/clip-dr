@@ -3,6 +3,7 @@ import { computed, ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { Track, TrackClip } from '@/shared/types';
 import { computeWaveformScaleFromArray } from '@/composables/useWaveform';
+import { useTracksStore } from '@/stores/tracks';
 
 interface Props {
   track: Track;
@@ -143,9 +144,20 @@ async function fetchClipPeakTile(targetBuckets: number, cacheKey: string) {
   }
 }
 
+const tracksStore = useTracksStore();
+
+// Invalidate peak tile cache when source identity changes
 watch([sourceFile, sourceOffset, clipDuration], () => {
   peakTileData.value = null;
   peakTileCacheKey.value = '';
+});
+
+// Invalidate caches when syncEpoch changes (rendering-relevant edit occurred)
+watch(() => tracksStore.syncEpoch, () => {
+  peakTileData.value = null;
+  peakTileCacheKey.value = '';
+  hiResCache = null;
+  nextTick(drawWaveform);
 });
 
 function drawWaveform() {

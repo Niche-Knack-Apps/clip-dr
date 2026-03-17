@@ -61,7 +61,9 @@ export function useCompositeWaveform() {
 
   // Version hash tracking waveform data and clip spatial identity
   // (invalidates when clips move, are added/removed, or change source offset)
+  // Includes syncEpoch so rendering-relevant mutations always bust the cache.
   const waveformVersion = computed(() =>
+    `e${tracksStore.syncEpoch}|` +
     tracksStore.tracks.map(t =>
       tracksStore.getTrackClips(t.id).map(c =>
         `${c.id}:${c.clipStart}:${c.duration}:${c.sourceOffset ?? 'na'}:${c.waveformData.length}`

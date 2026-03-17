@@ -16,6 +16,7 @@ export interface WaveformRenderOptions {
 // Peak tile cache — shared across all useWaveform() instances for cross-instance reuse
 const tileCache = new Map<string, number[]>();
 const TILE_CACHE_MAX = 256;
+let lastTileCacheEpoch = 0;
 
 // LRU-aware cache access: move accessed key to end of Map iteration order
 function getCachedTile(key: string): number[] | undefined {
@@ -82,6 +83,13 @@ function computeWaveformScale(buckets: WaveformBucket[]): number {
 export function useWaveform() {
   const { effectiveWaveformData, effectiveDuration, waveformLayers } = useEffectiveAudio();
   const tracksStore = useTracksStore();
+
+  // Clear shared tile cache when syncEpoch changes (rendering-relevant edit)
+  const currentEpoch = tracksStore.syncEpoch;
+  if (currentEpoch !== lastTileCacheEpoch) {
+    tileCache.clear();
+    lastTileCacheEpoch = currentEpoch;
+  }
 
   // Use effective waveform/duration which switches when a processed track is soloed
   const waveformData = effectiveWaveformData;

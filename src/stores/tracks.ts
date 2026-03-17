@@ -25,6 +25,11 @@ export interface CutOptions {
 export const useTracksStore = defineStore('tracks', () => {
   const tracks = shallowRef<Track[]>([]);
 
+  // Sync epoch: monotonic counter incremented on rendering-relevant mutations.
+  // Used by waveform composables and playback to invalidate caches.
+  const syncEpoch = ref(0);
+  function bumpSyncEpoch() { syncEpoch.value++; }
+
   // PERF-06: O(1) track lookup by ID — rebuilt when tracks array reference changes
   const trackMap = computed(() => {
     const map = new Map<string, Track>();
@@ -165,6 +170,7 @@ export const useTracksStore = defineStore('tracks', () => {
     };
 
     tracks.value = [...tracks.value, track];
+    bumpSyncEpoch();
     console.log('[Tracks] Created track:', track.name, 'duration:', track.duration, 'at:', track.trackStart, 'source:', sourcePath);
 
     return track;
@@ -189,6 +195,7 @@ export const useTracksStore = defineStore('tracks', () => {
     transcriptionStore.cancelJobsForTrack(trackId);
 
     tracks.value = tracks.value.filter((t) => t.id !== trackId);
+    bumpSyncEpoch();
     console.log('[Tracks] Deleted track:', trackId);
 
     // Update selection: pick an adjacent track, or fall back to 'ALL' if none remain
@@ -298,6 +305,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function clearTracks(): void {
     useHistoryStore().pushState('Clear all');
     tracks.value = [];
+    bumpSyncEpoch();
     selectedTrackId.value = 'ALL';
     viewMode.value = 'all';
     colorIndex = 0;
@@ -344,6 +352,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (track) {
       track.trackStart = Math.max(0, newStart);
       triggerRef(tracks);
+      bumpSyncEpoch();
     }
   }
 
@@ -747,6 +756,7 @@ export const useTracksStore = defineStore('tracks', () => {
         hasPeakPyramid: false,
       };
       triggerRef(tracks);
+      bumpSyncEpoch();
     }
 
     console.log(`[Tracks] Cut ${(cutEnd - cutStart).toFixed(2)}s from track, created ${newClips.length} clips`);
@@ -1413,6 +1423,7 @@ export const useTracksStore = defineStore('tracks', () => {
         track.trackStart = activeDrag.value.position;
         activeDrag.value = null;
         triggerRef(tracks);
+        bumpSyncEpoch();
       }
       // Reset the timeline duration floor now that drag is complete.
       // During drag, minTimelineDuration prevents flickering, but after
@@ -1433,6 +1444,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Trigger reactivity
     triggerRef(tracks);
+    bumpSyncEpoch();
 
     // Reset the timeline duration floor now that drag is complete.
     minTimelineDuration.value = 0;
@@ -1476,6 +1488,7 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: lastClipEnd - firstClipStart,
       };
       triggerRef(tracks);
+      bumpSyncEpoch();
 
       // Clear clip selection if the deleted clip was selected
       if (selectedClipId.value === clipId) {
@@ -1509,6 +1522,7 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: 0,
       };
       triggerRef(tracks);
+      bumpSyncEpoch();
       console.log(`[Tracks] Removed main audio from track ${trackId}, track preserved`);
       return;
     }
@@ -1537,6 +1551,7 @@ export const useTracksStore = defineStore('tracks', () => {
       };
     }
     triggerRef(tracks);
+    bumpSyncEpoch();
 
     if (selectedClipId.value === clipId) {
       selectedClipId.value = null;
@@ -1746,6 +1761,7 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: lastClipEnd - firstClipStart,
     };
     triggerRef(tracks);
+    bumpSyncEpoch();
 
     console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip at playhead ${playheadTime.toFixed(2)}s in track ${track.name}`);
     return true;
@@ -1873,6 +1889,7 @@ export const useTracksStore = defineStore('tracks', () => {
       };
     }
     tracks.value = updated;
+    bumpSyncEpoch();
     // Propagate settled waveform into restored EDL clips (if any)
     finalizeClipWaveforms(trackId);
   }
@@ -1886,6 +1903,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (idx === -1) return;
     tracks.value[idx] = { ...tracks.value[idx], clips };
     triggerRef(tracks);
+    bumpSyncEpoch();
     // Fill waveforms immediately if parent waveform already available
     finalizeClipWaveforms(trackId);
   }
@@ -1931,6 +1949,7 @@ export const useTracksStore = defineStore('tracks', () => {
       }),
     };
     triggerRef(tracks);
+    bumpSyncEpoch();
   }
 
   // Update decode/fetch progress (hot path ~60Hz — mutate in-place, no array copy)
@@ -2547,6 +2566,7 @@ export const useTracksStore = defineStore('tracks', () => {
     addEmptyTrack,
     resetMinTimelineDuration,
     activeDrag,
+    syncEpoch,
     addTimemark,
     updateTimemarkTime,
     removeTrackTimemark,

@@ -635,6 +635,15 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Load stored output device on init
   loadOutputDevice();
 
+  // Re-sync Rust playback when rendering-relevant edits occur during live playback.
+  // Uses flush: 'post' to batch multiple same-tick mutations.
+  watch(() => tracksStore.syncEpoch, () => {
+    if (isPlaying.value) {
+      syncTracksToRust();
+      syncMuteSoloToRust();
+    }
+  }, { flush: 'post' });
+
   return {
     isPlaying,
     currentTime,
