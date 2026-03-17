@@ -25,10 +25,16 @@ const { getHighlightedWordIndices } = useSearch();
 const hasAudio = computed(() => audioStore.hasAudio);
 
 // Selected track ID (for editing operations like drag, text edit, falloff)
+// Auto-resolves when 'ALL' selected but only one track has a transcription
 const selectedTrackId = computed(() => {
   const sel = tracksStore.selectedTrackId;
-  if (!sel || sel === 'ALL') return null;
-  return sel;
+  if (sel && sel !== 'ALL') return sel;
+  // Auto-resolve: if exactly one track has a transcription, use it
+  const transcribed = tracksStore.tracks.filter(
+    t => transcriptionStore.hasTranscriptionForTrack(t.id)
+  );
+  if (transcribed.length === 1) return transcribed[0].id;
+  return null;
 });
 
 // Extended word type carrying the source trackId
