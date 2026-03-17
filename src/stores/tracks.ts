@@ -92,9 +92,11 @@ export const useTracksStore = defineStore('tracks', () => {
     }
   }
 
-  // Computed: Get selected track (null if 'ALL' or no selection)
+  // Computed: Get selected track (auto-resolves to single track when 'ALL')
   const selectedTrack = computed(() => {
     if (selectedTrackId.value === 'ALL' || selectedTrackId.value === null) {
+      // Auto-resolve: if exactly one track exists, use it
+      if (tracks.value.length === 1) return tracks.value[0];
       return null;
     }
     return getTrackById(selectedTrackId.value) ?? null;

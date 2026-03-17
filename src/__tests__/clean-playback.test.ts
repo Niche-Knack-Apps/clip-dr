@@ -131,6 +131,39 @@ describe('Clean Audio Playback', () => {
     expect(t3.muted).toBe(true);
   });
 
+  it('selectedTrack auto-resolves to single track when selection is ALL', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buf = mkBuf(5);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Only Track', 0);
+
+    // Default selection is 'ALL'
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrack).not.toBeNull();
+    expect(tracksStore.selectedTrack!.id).toBe(track.id);
+  });
+
+  it('selectedTrack returns null when multiple tracks and selection is ALL', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrack).toBeNull();
+  });
+
+  it('selectedTrack returns null when no tracks and selection is ALL', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrack).toBeNull();
+  });
+
   it('muteAllExcept unmutes the target track if it was muted', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();
