@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, provide, onMounted, onUnmounted } from 'vue';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import TitleBar from './TitleBar.vue';
 import AppToolbar from './AppToolbar.vue';
-import { TOOLBAR_HEIGHT, SUPPORTED_FORMATS } from '@/shared/constants';
+import { TOOLBAR_HEIGHT, TITLEBAR_HEIGHT, SUPPORTED_FORMATS } from '@/shared/constants';
 import { useAudioStore } from '@/stores/audio';
 import { useSettingsStore } from '@/stores/settings';
 
@@ -61,6 +62,7 @@ onUnmounted(() => {
 
 <template>
   <div class="h-screen flex flex-col bg-gray-950 text-gray-100 relative">
+    <TitleBar />
     <AppToolbar
       ref="toolbarRef"
       @open-settings="emit('openSettings')"
@@ -68,7 +70,7 @@ onUnmounted(() => {
 
     <main
       class="flex-1 overflow-hidden"
-      :style="{ height: `calc(100vh - ${TOOLBAR_HEIGHT}px)` }"
+      :style="{ height: `calc(100vh - ${TOOLBAR_HEIGHT + TITLEBAR_HEIGHT}px)` }"
     >
       <slot />
     </main>
