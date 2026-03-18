@@ -760,24 +760,26 @@ onUnmounted(() => {
         @mousedown="handleTimemarkMouseDown(mark.id, $event)"
         @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
       >
-        <!-- Triangle flag at top -->
+        <!-- Triangle flag at top (glows on hover) -->
         <div
-          class="absolute top-0 left-0"
+          class="absolute top-0 left-0 transition-[filter] duration-150 tm-flag"
           :style="{
             width: 0,
             height: 0,
             borderLeft: '5px solid transparent',
             borderRight: '5px solid transparent',
             borderTop: `8px solid ${mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24')}`,
+            '--tm-glow': mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
           }"
         />
-        <!-- Vertical line hanging into the clip -->
+        <!-- Vertical line hanging into the clip (brightens on hover) -->
         <div
-          class="absolute left-[4px] top-[8px] w-px"
+          class="absolute left-[4px] top-[8px] w-px transition-all duration-150 tm-line"
           :style="{
             height: '60%',
             backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
             opacity: 0.5,
+            '--tm-glow': mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
           }"
         />
         <!-- Tooltip on hover -->
@@ -833,3 +835,15 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.group\/tm:hover .tm-flag {
+  filter: drop-shadow(0 0 5px var(--tm-glow)) drop-shadow(0 0 2px var(--tm-glow));
+}
+.group\/tm:hover .tm-line {
+  opacity: 0.9 !important;
+  width: 2px;
+  left: 3.5px;
+  box-shadow: 0 0 6px var(--tm-glow);
+}
+</style>
