@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import type { ProjectFile, SilenceRegion } from '@/shared/types';
+import type { SilenceRegion } from '@/shared/types';
 
 // Mock Tauri internals
 vi.mock('@tauri-apps/api/core', () => ({
@@ -99,10 +99,10 @@ describe('Project v3 Schema', () => {
     // When loading v2 clips, sourceIn should default to sourceOffset, sourceDuration to duration
     const reconstructed = {
       ...v2Clip,
-      buffer: null,
-      waveformData: [],
-      sourceIn: v2Clip.sourceIn ?? v2Clip.sourceOffset,
-      sourceDuration: v2Clip.sourceDuration ?? v2Clip.duration,
+      buffer: null as AudioBuffer | null,
+      waveformData: [] as number[],
+      sourceIn: (v2Clip as Record<string, unknown>).sourceIn ?? v2Clip.sourceOffset,
+      sourceDuration: (v2Clip as Record<string, unknown>).sourceDuration ?? v2Clip.duration,
     };
 
     expect(reconstructed.sourceIn).toBe(3);      // defaults to sourceOffset

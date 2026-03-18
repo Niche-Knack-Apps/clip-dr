@@ -170,13 +170,18 @@ watch(showRecordingPanel, (show) => {
 transcriptionStore.checkModel();
 
 function handleTranscribe() {
-  const sel = tracksStore.selectedTrackId;
-  if (sel && sel !== 'ALL') {
-    if (transcriptionStore.hasTranscriptionForTrack(sel)) {
-      transcriptionStore.removeTranscription(sel);
+  // Auto-resolve: 'ALL' with exactly 1 track → use that track
+  const sel = tracksStore.selectedTrack;
+  if (!sel) {
+    if (tracksStore.tracks.length > 1) {
+      uiStore.showToast('Select a specific track to transcribe', 'warn');
     }
-    transcriptionStore.queueTranscription(sel, 'high');
+    return;
   }
+  if (transcriptionStore.hasTranscriptionForTrack(sel.id)) {
+    transcriptionStore.removeTranscription(sel.id);
+  }
+  transcriptionStore.queueTranscription(sel.id, 'high');
 }
 
 async function handleDetectSilence() {
