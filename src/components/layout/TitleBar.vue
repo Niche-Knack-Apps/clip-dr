@@ -24,8 +24,8 @@ function close() {
   >
     <!-- Left: icon + title -->
     <div class="flex items-center gap-0" data-tauri-drag-region>
-      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 object-contain" style="width: 50px; padding-top: 4px; margin-top: 2px" />
-      <span class="text-xl font-semibold text-gray-400" style="text-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 -1px 0 rgba(0,0,0,0.7)">Clip Dr.</span>
+      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 object-contain py-1 ml-1" style="height: 36px; width: auto" />
+      <span class="font-semibold text-gray-400" style="font-size: 36px; line-height: 36px; text-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 -1px 0 rgba(0,0,0,0.7)">Clip Dr.</span>
     </div>
 
     <!-- Right: window controls -->
