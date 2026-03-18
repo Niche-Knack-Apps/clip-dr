@@ -122,7 +122,7 @@ export const SUPPORTED_FORMATS = [
 
 export const TRACK_HEIGHT = 60;
 export const WORD_HEIGHT = 24;
-export const TITLEBAR_HEIGHT = 32;
+export const TITLEBAR_HEIGHT = 36;
 export const TOOLBAR_ROW_HEIGHT = 40;
 export const TOOLBAR_HEIGHT = TOOLBAR_ROW_HEIGHT * 2; // Two rows
 export const WAVEFORM_HEIGHT = 100;

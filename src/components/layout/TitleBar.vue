@@ -18,16 +18,16 @@ function close() {
 
 <template>
   <div
-    class="h-8 bg-gray-900 flex items-center justify-between px-2 select-none shrink-0"
+    class="h-9 bg-gray-900 flex items-center justify-between px-2 select-none shrink-0"
     style="-webkit-app-region: drag"
   >
     <!-- Left: icon + title -->
-    <div class="flex items-center gap-1.5">
-      <svg class="w-4 h-4 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <div class="flex items-center gap-2">
+      <svg class="text-cyan-400" style="width: 30px; height: 30px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
         <path d="M4 20L14.5 9.5C15.5 8.5 17 8 18.5 8.5L20 4L15.5 5.5C15 7 14.5 8.5 13.5 9.5L3 20" />
         <path d="M4 20C4 20 6 18 7 17" stroke-linecap="round" />
       </svg>
-      <span class="text-xs font-medium text-gray-400">Clip Dr.</span>
+      <span class="text-sm font-medium text-gray-400">Clip Dr.</span>
     </div>
 
     <!-- Right: window controls -->
