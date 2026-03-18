@@ -1143,8 +1143,8 @@ export const useTracksStore = defineStore('tracks', () => {
     return mixTrackClipsToBuffer(clips, audioContext);
   }
 
-  // Snap threshold in seconds (clips snap when within this distance)
-  const SNAP_THRESHOLD = 0.1;
+  // Snap threshold in seconds — generous so clips easily snap to edges
+  const SNAP_THRESHOLD = 0.5;
 
   /**
    * Find the nearest snap target across ALL tracks (for visualization).
@@ -1162,6 +1162,10 @@ export const useTracksStore = defineStore('tracks', () => {
     const desiredEnd = desiredStart + clipDuration;
     let bestDist = SNAP_THRESHOLD;
     let best: { time: number; edge: 'start' | 'end' } | null = null;
+
+    // Snap to timeline origin (t=0)
+    const d0 = Math.abs(desiredStart);
+    if (d0 < bestDist) { bestDist = d0; best = { time: 0, edge: 'start' }; }
 
     for (const t of tracks.value) {
       const clips = getTrackClips(t.id);
@@ -1206,6 +1210,11 @@ export const useTracksStore = defineStore('tracks', () => {
     if (snapEnabled) {
       // Check snap points across ALL tracks (cross-track alignment)
       let bestSnapDist = SNAP_THRESHOLD;
+
+      // Snap to timeline origin (t=0)
+      const d0 = Math.abs(desiredStart);
+      if (d0 < bestSnapDist) { bestSnapDist = d0; snappedStart = 0; }
+
       for (const t of tracks.value) {
         const clips = getTrackClips(t.id);
         for (const other of clips) {

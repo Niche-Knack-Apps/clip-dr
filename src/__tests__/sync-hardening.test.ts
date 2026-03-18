@@ -517,8 +517,12 @@ describe('Sync Hardening (INV-1 through INV-5)', () => {
       // getSnapTarget is a function, not persistent state
       expect(typeof tracksStore.getSnapTarget).toBe('function');
       // The returned value is computed on-demand, not stored
+      // With t=0 snap enabled, desiredStart=0 snaps to origin
       const result = tracksStore.getSnapTarget('nonexistent', 'nope', 0, 1, true);
-      expect(result).toBeNull();
+      expect(result).toEqual({ time: 0, edge: 'start' });
+      // Far from any snap point returns null
+      const farResult = tracksStore.getSnapTarget('nonexistent', 'nope', 999, 1, true);
+      expect(farResult).toBeNull();
     });
   });
 
