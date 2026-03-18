@@ -32,11 +32,19 @@ const emit = defineEmits<{
   export: [trackId: string];
   rename: [trackId: string, name: string];
   setVolume: [trackId: string, volume: number, skipHistory: boolean];
-  clipDragStart: [trackId: string, clipId: string, mouseOffsetX: number];
-  clipDrag: [trackId: string, clipId: string, newClipStart: number];
+  clipDragStart: [trackId: string, clipId: string, mouseOffsetX: number, event: MouseEvent];
+  clipDrag: [trackId: string, clipId: string, newClipStart: number, event: MouseEvent];
   clipDragEnd: [trackId: string, clipId: string, newClipStart: number];
   clipSelect: [trackId: string, clipId: string];
 }>();
+
+// Edge trim drag state
+const isTrimming = ref(false);
+const trimClipId = ref<string | null>(null);
+const trimEdge = ref<'left' | 'right' | null>(null);
+const trimStartX = ref(0);
+let trimRafId: number | null = null;
+let pendingTrimEvent: MouseEvent | null = null;
 
 const playbackStore = usePlaybackStore();
 const tracksStore = useTracksStore();
@@ -88,7 +96,16 @@ const showImportWaveform = computed(() => effectiveZoom.value >= 2);
 const importWaveformRef = ref<HTMLCanvasElement | null>(null);
 
 // Get clips for this track (supports multi-clip tracks)
-const trackClips = computed(() => tracksStore.getTrackClips(props.track.id));
+// Explicit reactive dependency on syncEpoch. getTrackClips() reads from
+// track.clips/duration/etc., but those reads happen inside a plain function
+// call, so Vue's dependency tracker can miss fine-grained changes (e.g.,
+// finalizeEdgeTrim replaces the track object and bumps syncEpoch, but
+// this computed doesn't see the internal reads). By touching syncEpoch
+// here, we guarantee re-evaluation on any rendering-relevant mutation.
+const trackClips = computed(() => {
+  void tracksStore.syncEpoch;
+  return tracksStore.getTrackClips(props.track.id);
+});
 
 // Track timemarks with pixel positions
 const trackTimemarks = computed(() => {
@@ -176,7 +193,7 @@ function handleClipDragMove(event: MouseEvent) {
     const rect = containerRef.value!.getBoundingClientRect();
     const clipScreenLeft = rect.left + clipLeftPx;
     const mouseOffsetX = clipDragStartX.value - clipScreenLeft;
-    emit('clipDragStart', props.track.id, draggingClipId.value, mouseOffsetX);
+    emit('clipDragStart', props.track.id, draggingClipId.value, mouseOffsetX, event);
   }
 
   // Throttle position updates to rAF rate
@@ -191,11 +208,12 @@ function handleClipDragMove(event: MouseEvent) {
 function flushClipDrag() {
   clipDragRafId = null;
   if (pendingClipDragEvent && isClipDragging.value && draggingClipId.value) {
-    const deltaX = pendingClipDragEvent.clientX - clipDragStartX.value;
+    const evt = pendingClipDragEvent;
+    const deltaX = evt.clientX - clipDragStartX.value;
     const deltaTime = (deltaX / containerWidth.value) * duration.value;
     const newStart = Math.max(0, clipDragOriginalStart.value + deltaTime);
     pendingClipDragEvent = null;
-    emit('clipDrag', props.track.id, draggingClipId.value, newStart);
+    emit('clipDrag', props.track.id, draggingClipId.value, newStart, evt);
   }
 }
 
@@ -233,6 +251,72 @@ function handleClipDragEnd(event: MouseEvent) {
 
   document.removeEventListener('mousemove', handleClipDragMove);
   document.removeEventListener('mouseup', handleClipDragEnd);
+}
+
+// Edge trim handlers — called from ClipRegion @trimStart
+function handleTrimStart(clipId: string, edge: 'left' | 'right', event: MouseEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  useHistoryStore().pushState('Trim clip edge');
+  isTrimming.value = true;
+  trimClipId.value = clipId;
+  trimEdge.value = edge;
+  trimStartX.value = event.clientX;
+
+  document.addEventListener('mousemove', handleTrimMove);
+  document.addEventListener('mouseup', handleTrimEnd);
+}
+
+function handleTrimMove(event: MouseEvent) {
+  if (!isTrimming.value) return;
+  pendingTrimEvent = event;
+  if (trimRafId === null) {
+    trimRafId = requestAnimationFrame(flushTrim);
+  }
+}
+
+function flushTrim() {
+  trimRafId = null;
+  if (!pendingTrimEvent || !isTrimming.value || !trimClipId.value || !trimEdge.value) return;
+  if (!containerRef.value) return;
+
+  const deltaX = pendingTrimEvent.clientX - trimStartX.value;
+  trimStartX.value = pendingTrimEvent.clientX;
+  pendingTrimEvent = null;
+
+  // Convert pixel delta to time delta
+  const deltaTime = (deltaX / containerWidth.value) * duration.value;
+
+  if (trimEdge.value === 'left') {
+    // Positive deltaX (drag right) = trim inward (positive delta)
+    // Negative deltaX (drag left) = expand outward (negative delta)
+    tracksStore.trimClipLeft(props.track.id, trimClipId.value, deltaTime);
+  } else {
+    // Positive deltaX (drag right) = expand outward (positive delta)
+    // Negative deltaX (drag left) = trim inward (negative delta)
+    tracksStore.trimClipRight(props.track.id, trimClipId.value, deltaTime);
+  }
+}
+
+function handleTrimEnd() {
+  if (trimRafId !== null) {
+    cancelAnimationFrame(trimRafId);
+    trimRafId = null;
+  }
+  pendingTrimEvent = null;
+
+  if (isTrimming.value && trimClipId.value) {
+    tracksStore.finalizeEdgeTrim(props.track.id);
+  }
+
+  isTrimming.value = false;
+  trimClipId.value = null;
+  trimEdge.value = null;
+
+  document.removeEventListener('mousemove', handleTrimMove);
+  document.removeEventListener('mouseup', handleTrimEnd);
 }
 
 // Rename handlers
@@ -359,6 +443,11 @@ onUnmounted(() => {
   if (waveformRafId !== null) {
     cancelAnimationFrame(waveformRafId);
   }
+  if (trimRafId !== null) {
+    cancelAnimationFrame(trimRafId);
+  }
+  document.removeEventListener('mousemove', handleTrimMove);
+  document.removeEventListener('mouseup', handleTrimEnd);
 });
 </script>
 
@@ -436,15 +525,15 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 text-[10px] font-bold rounded transition-colors',
-              isImporting
+              isImporting || track.solo
                 ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
                 : track.muted
                   ? 'bg-red-600 text-white'
                   : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
             ]"
             title="Mute"
-            :disabled="isImporting"
-            @click.stop="!isImporting && emit('toggleMute', track.id)"
+            :disabled="isImporting || track.solo"
+            @click.stop="!isImporting && !track.solo && emit('toggleMute', track.id)"
           >
             M
           </button>
@@ -556,6 +645,7 @@ onUnmounted(() => {
         :is-selected="clip.id === tracksStore.selectedClipId"
         :is-cross-track-drag="isCrossTrackDrag"
         @drag-start="handleClipDragStart"
+        @trim-start="handleTrimStart"
       />
 
       <!-- Volume automation envelope overlay -->

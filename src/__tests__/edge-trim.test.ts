@@ -222,16 +222,38 @@ describe('Recoverable Edge Trim', () => {
   });
 
   describe('syncEpoch', () => {
-    it('increments on edge trim', async () => {
+    it('does NOT increment during trimClipLeft/trimClipRight (deferred to finalize)', async () => {
       const { tracksStore, trackId } = await setupClippedTrack();
 
       const before = tracksStore.syncEpoch;
       tracksStore.trimClipLeft(trackId, 'c1', 1);
-      expect(tracksStore.syncEpoch).toBeGreaterThan(before);
+      expect(tracksStore.syncEpoch).toBe(before);
 
-      const before2 = tracksStore.syncEpoch;
       tracksStore.trimClipRight(trackId, 'c1', -1);
-      expect(tracksStore.syncEpoch).toBeGreaterThan(before2);
+      expect(tracksStore.syncEpoch).toBe(before);
+    });
+
+    it('DOES increment on finalizeEdgeTrim', async () => {
+      const { tracksStore, trackId } = await setupClippedTrack();
+
+      const before = tracksStore.syncEpoch;
+      tracksStore.trimClipLeft(trackId, 'c1', 1);
+      tracksStore.finalizeEdgeTrim(trackId);
+      expect(tracksStore.syncEpoch).toBeGreaterThan(before);
+    });
+
+    it('after trim + finalize, caches are invalidated (syncEpoch changed)', async () => {
+      const { tracksStore, trackId } = await setupClippedTrack();
+
+      const epochBefore = tracksStore.syncEpoch;
+      tracksStore.trimClipLeft(trackId, 'c1', 2);
+      tracksStore.trimClipRight(trackId, 'c2', -1);
+      // During drag, no epoch bump
+      expect(tracksStore.syncEpoch).toBe(epochBefore);
+
+      // Finalize bumps once
+      tracksStore.finalizeEdgeTrim(trackId);
+      expect(tracksStore.syncEpoch).toBeGreaterThan(epochBefore);
     });
   });
 

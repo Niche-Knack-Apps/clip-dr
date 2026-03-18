@@ -111,7 +111,7 @@ describe('Clean Audio Playback', () => {
     expect(isTrackPlayable(stored.importStatus)).toBe(true);
   });
 
-  it('muteAllExcept mutes all tracks except the specified one', async () => {
+  it('setTrackSolo mutes all tracks except the specified one', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();
 
@@ -120,7 +120,7 @@ describe('Clean Audio Playback', () => {
     const track2 = await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
     const track3 = await tracksStore.createTrackFromBuffer(buf, null, 'Track 3', 0);
 
-    tracksStore.muteAllExcept(track2.id);
+    tracksStore.setTrackSolo(track2.id, true);
 
     const t1 = tracksStore.tracks.find(t => t.id === track1.id)!;
     const t2 = tracksStore.tracks.find(t => t.id === track2.id)!;
@@ -128,6 +128,7 @@ describe('Clean Audio Playback', () => {
 
     expect(t1.muted).toBe(true);
     expect(t2.muted).toBe(false);
+    expect(t2.solo).toBe(true);
     expect(t3.muted).toBe(true);
   });
 
@@ -226,7 +227,7 @@ describe('Clean Audio Playback', () => {
     expect(silenceStore.cutError).toBe('No silence regions for this track');
   });
 
-  it('muteAllExcept unmutes the target track if it was muted', async () => {
+  it('setTrackSolo unmutes the target track if it was muted', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();
 
@@ -238,10 +239,11 @@ describe('Clean Audio Playback', () => {
     tracksStore.setTrackMuted(track2.id, true);
     expect(tracksStore.tracks.find(t => t.id === track2.id)!.muted).toBe(true);
 
-    tracksStore.muteAllExcept(track2.id);
+    tracksStore.setTrackSolo(track2.id, true);
 
-    // Target should now be unmuted
+    // Target should now be unmuted and solo'd
     expect(tracksStore.tracks.find(t => t.id === track2.id)!.muted).toBe(false);
+    expect(tracksStore.tracks.find(t => t.id === track2.id)!.solo).toBe(true);
     // Other should be muted
     expect(tracksStore.tracks.find(t => t.id === track1.id)!.muted).toBe(true);
   });

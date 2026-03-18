@@ -206,9 +206,10 @@ export const useCleaningStore = defineStore('cleaning', () => {
       cleanedAudioFiles.value = newMap;
       console.log('[Clean] Mapped cleaned audio to track ID:', cleanedTrack.id);
 
-      // Mute ALL other tracks so only the cleaned track plays
-      console.log('[Clean] Muting all tracks except cleaned:', cleanedTrack.id);
-      tracksStore.muteAllExcept(cleanedTrack.id);
+      // Solo the cleaned track so only it plays (auto-mutes others;
+      // un-soloing later restores user-muted state via autoMuted flag)
+      console.log('[Clean] Soloing cleaned track:', cleanedTrack.id);
+      tracksStore.setTrackSolo(cleanedTrack.id, true);
 
       // Reposition playhead to start of cleaned track
       const playbackStore = usePlaybackStore();

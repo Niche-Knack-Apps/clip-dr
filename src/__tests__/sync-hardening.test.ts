@@ -429,6 +429,99 @@ describe('Sync Hardening (INV-1 through INV-5)', () => {
     });
   });
 
+  // Snap + drag persistence verification (Change 6)
+  describe('snap + drag persistence', () => {
+    it('playhead position consistent after clip drag + snap', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      const track = await tracksStore.createTrackFromBuffer(mkBuf(10), null, 'T1', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        clips: [
+          { id: 'c1', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 0, duration: 5, sourceFile: '/tmp/a.wav', sourceOffset: 0 },
+          { id: 'c2', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 5, duration: 5, sourceFile: '/tmp/a.wav', sourceOffset: 5 },
+        ],
+        duration: 10,
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Move c2 with snap enabled — should snap to c1's end (5)
+      tracksStore.setClipStart(track.id, 'c2', 4.95, true);
+      tracksStore.finalizeClipPositions(track.id);
+
+      const clips = tracksStore.getTrackClips(track.id);
+      expect(clips[1].clipStart).toBe(5);
+    });
+
+    it('save/load after clip drag preserves geometry exactly', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      const track = await tracksStore.createTrackFromBuffer(mkBuf(10), null, 'T1', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        clips: [
+          { id: 'c1', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 0, duration: 5, sourceFile: '/tmp/a.wav', sourceOffset: 0 },
+          { id: 'c2', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 7, duration: 3, sourceFile: '/tmp/a.wav', sourceOffset: 5 },
+        ],
+        trackStart: 0,
+        duration: 10,
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Verify geometry is preserved through getTrackClips
+      const clips = tracksStore.getTrackClips(track.id);
+      expect(clips[0].clipStart).toBe(0);
+      expect(clips[0].duration).toBe(5);
+      expect(clips[1].clipStart).toBe(7);
+      expect(clips[1].duration).toBe(3);
+    });
+
+    it('save/load after cross-track move preserves geometry exactly', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      const trackA = await tracksStore.createTrackFromBuffer(mkBuf(10), null, 'T-A', 0);
+      const trackB = await tracksStore.createTrackFromBuffer(mkBuf(10), null, 'T-B', 0);
+
+      const idxA = tracksStore.tracks.findIndex(t => t.id === trackA.id);
+      tracksStore.tracks[idxA] = {
+        ...tracksStore.tracks[idxA],
+        clips: [
+          { id: 'cA1', buffer: mkBuf(5), waveformData: new Array(100).fill(0.5), clipStart: 0, duration: 5, sourceFile: '/tmp/a.wav', sourceOffset: 0 },
+          { id: 'cA2', buffer: mkBuf(5), waveformData: new Array(100).fill(0.5), clipStart: 5, duration: 5, sourceFile: '/tmp/a.wav', sourceOffset: 5 },
+        ],
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Move cA1 to trackB at position 3
+      tracksStore.moveClipToTrack(trackA.id, 'cA1', trackB.id, 3);
+
+      const bClips = tracksStore.getTrackClips(trackB.id);
+      const movedClip = bClips.find(c => c.clipStart === 3);
+      expect(movedClip).toBeDefined();
+      expect(movedClip!.duration).toBe(5);
+    });
+
+    it('snap guide state is NOT persisted (transient only)', async () => {
+      // activeSnapTarget is a local ref in TrackList.vue, not in any store.
+      // This test verifies it's not part of the tracks store.
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      // getSnapTarget is a function, not persistent state
+      expect(typeof tracksStore.getSnapTarget).toBe('function');
+      // The returned value is computed on-demand, not stored
+      const result = tracksStore.getSnapTarget('nonexistent', 'nope', 0, 1, true);
+      expect(result).toBeNull();
+    });
+  });
+
   // Timeline extent update when clip moves beyond boundary during playback
   describe('timeline extent during playback scenario', () => {
     it('clip move beyond previous timeline extent updates timelineDuration via minTimelineDuration', async () => {

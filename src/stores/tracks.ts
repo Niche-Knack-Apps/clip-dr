@@ -158,6 +158,7 @@ export const useTracksStore = defineStore('tracks', () => {
       channels: buffer.numberOfChannels,
     };
 
+    const soloActive = hasActiveSolo();
     const track: Track = {
       id: generateId(),
       name,
@@ -165,10 +166,11 @@ export const useTracksStore = defineStore('tracks', () => {
       trackStart,
       duration: buffer.duration,
       color: getNextColor(),
-      muted: false,
+      muted: soloActive,
       solo: false,
       volume: 1,
       sourcePath,
+      autoMuted: soloActive,
     };
 
     tracks.value = [...tracks.value, track];
@@ -239,40 +241,43 @@ export const useTracksStore = defineStore('tracks', () => {
     console.log('[Tracks] Selected:', trackId);
   }
 
-  function setTrackMuted(trackId: string, muted: boolean): void {
-    const idx = tracks.value.findIndex((t) => t.id === trackId);
-    if (idx !== -1) {
-      useHistoryStore().pushState('Toggle mute');
-      // Create new array + new track object so shallowRef detects the change
-      // (in-place mutation + triggerRef doesn't propagate through computed wrappers)
-      const updated = [...tracks.value];
-      updated[idx] = { ...updated[idx], muted };
-      tracks.value = updated;
-    }
+  /** Check if any track currently has solo enabled. */
+  function hasActiveSolo(): boolean {
+    return tracks.value.some(t => t.solo);
   }
 
-  function muteAllExcept(trackId: string): void {
-    useHistoryStore().pushState('Mute all except');
-    tracks.value = tracks.value.map(t =>
-      t.id === trackId
-        ? (t.muted ? { ...t, muted: false } : t)
-        : (t.muted ? t : { ...t, muted: true })
-    );
+  function setTrackMuted(trackId: string, muted: boolean): void {
+    const idx = tracks.value.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    // Don't allow muting a solo'd track — solo implies audible
+    if (tracks.value[idx].solo) return;
+    useHistoryStore().pushState('Toggle mute');
+    // Create new array + new track object so shallowRef detects the change
+    // (in-place mutation + triggerRef doesn't propagate through computed wrappers)
+    const updated = [...tracks.value];
+    updated[idx] = { ...updated[idx], muted };
+    tracks.value = updated;
   }
 
   function setTrackSolo(trackId: string, solo: boolean): void {
     useHistoryStore().pushState('Toggle solo');
-    // Exclusive solo: when enabling, mute all others visually;
-    // when disabling, unmute everything
+    // Exclusive solo: when enabling, auto-mute all others (marking autoMuted);
+    // when disabling, only unmute tracks that were auto-muted by solo — preserve
+    // tracks the user explicitly muted before solo was engaged.
     tracks.value = tracks.value.map((t) => {
       if (t.id === trackId) {
-        return { ...t, solo, muted: false };
+        return { ...t, solo, muted: false, autoMuted: false };
       }
       if (solo) {
-        return { ...t, solo: false, muted: true };
+        // Enabling solo on another track: auto-mute this one (track autoMuted
+        // only if it wasn't already user-muted)
+        return { ...t, solo: false, muted: true, autoMuted: !t.muted };
       }
-      // Un-solo: unmute everything
-      return { ...t, solo: false, muted: false };
+      // Un-solo: only unmute tracks that were auto-muted by solo
+      if (t.autoMuted) {
+        return { ...t, solo: false, muted: false, autoMuted: false };
+      }
+      return { ...t, solo: false };
     });
   }
 
@@ -1141,6 +1146,49 @@ export const useTracksStore = defineStore('tracks', () => {
   // Snap threshold in seconds (clips snap when within this distance)
   const SNAP_THRESHOLD = 0.1;
 
+  /**
+   * Find the nearest snap target across ALL tracks (for visualization).
+   * Returns the snap edge info if a clip edge is within SNAP_THRESHOLD, or null.
+   */
+  function getSnapTarget(
+    trackId: string,
+    clipId: string,
+    desiredStart: number,
+    clipDuration: number,
+    snapEnabled: boolean
+  ): { time: number; edge: 'start' | 'end' } | null {
+    if (!snapEnabled) return null;
+
+    const desiredEnd = desiredStart + clipDuration;
+    let bestDist = SNAP_THRESHOLD;
+    let best: { time: number; edge: 'start' | 'end' } | null = null;
+
+    for (const t of tracks.value) {
+      const clips = getTrackClips(t.id);
+      for (const c of clips) {
+        if (t.id === trackId && c.id === clipId) continue;
+        const cEnd = c.clipStart + c.duration;
+
+        // Our start → their end
+        const d1 = Math.abs(desiredStart - cEnd);
+        if (d1 < bestDist) { bestDist = d1; best = { time: cEnd, edge: 'start' }; }
+
+        // Our end → their start
+        const d2 = Math.abs(desiredEnd - c.clipStart);
+        if (d2 < bestDist) { bestDist = d2; best = { time: c.clipStart, edge: 'end' }; }
+
+        // Our start → their start
+        const d3 = Math.abs(desiredStart - c.clipStart);
+        if (d3 < bestDist) { bestDist = d3; best = { time: c.clipStart, edge: 'start' }; }
+
+        // Our end → their end
+        const d4 = Math.abs(desiredEnd - cEnd);
+        if (d4 < bestDist) { bestDist = d4; best = { time: cEnd, edge: 'end' }; }
+      }
+    }
+    return best;
+  }
+
   // Calculate snapped position for a clip, preventing overlap with other clips
   function getSnappedClipPosition(
     trackId: string,
@@ -1152,44 +1200,37 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = getTrackById(trackId);
     if (!track) return Math.max(0, desiredStart);
 
-    // Get all other clips in the same track
-    const allClips = getTrackClips(trackId);
-    const otherClips = allClips.filter((c) => c.id !== clipId);
-
-    if (otherClips.length === 0) {
-      return Math.max(0, desiredStart);
-    }
-
     const desiredEnd = desiredStart + clipDuration;
     let snappedStart = desiredStart;
 
-    // Sort other clips by position
-    const sortedClips = [...otherClips].sort((a, b) => a.clipStart - b.clipStart);
-
     if (snapEnabled) {
-      // Check for snap points at edges of other clips
-      for (const other of sortedClips) {
-        const otherEnd = other.clipStart + other.duration;
+      // Check snap points across ALL tracks (cross-track alignment)
+      let bestSnapDist = SNAP_THRESHOLD;
+      for (const t of tracks.value) {
+        const clips = getTrackClips(t.id);
+        for (const other of clips) {
+          if (t.id === trackId && other.id === clipId) continue;
+          const otherEnd = other.clipStart + other.duration;
 
-        // Snap to end of other clip (our start aligns with their end)
-        if (Math.abs(desiredStart - otherEnd) < SNAP_THRESHOLD) {
-          snappedStart = otherEnd;
-          break;
-        }
+          // Snap to end of other clip (our start aligns with their end)
+          const d1 = Math.abs(desiredStart - otherEnd);
+          if (d1 < bestSnapDist) { bestSnapDist = d1; snappedStart = otherEnd; }
 
-        // Snap to start of other clip (our end aligns with their start)
-        if (Math.abs(desiredEnd - other.clipStart) < SNAP_THRESHOLD) {
-          snappedStart = other.clipStart - clipDuration;
-          break;
-        }
+          // Snap to start of other clip (our end aligns with their start)
+          const d2 = Math.abs(desiredEnd - other.clipStart);
+          if (d2 < bestSnapDist) { bestSnapDist = d2; snappedStart = other.clipStart - clipDuration; }
 
-        // Snap our start to their start
-        if (Math.abs(desiredStart - other.clipStart) < SNAP_THRESHOLD) {
-          snappedStart = other.clipStart;
-          break;
+          // Snap our start to their start
+          const d3 = Math.abs(desiredStart - other.clipStart);
+          if (d3 < bestSnapDist) { bestSnapDist = d3; snappedStart = other.clipStart; }
         }
       }
     }
+
+    // Get same-track clips for overlap prevention
+    const allClips = getTrackClips(trackId);
+    const otherClips = allClips.filter((c) => c.id !== clipId);
+    const sortedClips = [...otherClips].sort((a, b) => a.clipStart - b.clipStart);
 
     // Only prevent overlap when snap is enabled
     // When snap is disabled, allow clips to overlap freely
@@ -1625,7 +1666,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: newDuration,
     };
     triggerRef(tracks);
-    bumpSyncEpoch();
+    // NOTE: no bumpSyncEpoch() here — this is called per-frame during drag (~60fps).
+    // Cache invalidation happens once on drag end via finalizeEdgeTrim → bumpSyncEpoch.
   }
 
   /**
@@ -1660,7 +1702,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: newDuration,
     };
     triggerRef(tracks);
-    bumpSyncEpoch();
+    // NOTE: no bumpSyncEpoch() here — this is called per-frame during drag (~60fps).
+    // Cache invalidation happens once on drag end via finalizeEdgeTrim → bumpSyncEpoch.
   }
 
   /**
@@ -1695,8 +1738,10 @@ export const useTracksStore = defineStore('tracks', () => {
     triggerRef(tracks);
     bumpSyncEpoch();
 
-    // Refresh waveform slices for trimmed clips
-    finalizeClipWaveforms(trackId);
+    // NOTE: do NOT call finalizeClipWaveforms here — the existing waveform data
+    // stays valid, and the visual naturally adjusts as clip width changes.
+    // Re-slicing would produce empty/mismatched data since the overview waveform
+    // doesn't cover the newly-revealed source range.
   }
 
   // Delete a specific clip from a track
@@ -2047,6 +2092,7 @@ export const useTracksStore = defineStore('tracks', () => {
   function addEmptyTrack(): void {
     useHistoryStore().pushState('Add track');
     const name = `Track ${tracks.value.length + 1}`;
+    const soloActive = hasActiveSolo();
     const track: Track = {
       id: generateId(),
       name,
@@ -2054,9 +2100,10 @@ export const useTracksStore = defineStore('tracks', () => {
       trackStart: 0,
       duration: 0,
       color: getNextColor(),
-      muted: false,
+      muted: soloActive,
       solo: false,
       volume: 1,
+      autoMuted: soloActive,
     };
     tracks.value = [...tracks.value, track];
     selectTrack(track.id);
@@ -2079,6 +2126,7 @@ export const useTracksStore = defineStore('tracks', () => {
       channels: metadata.channels,
     };
 
+    const soloActive = hasActiveSolo();
     const track: Track = {
       id: generateId(),
       name,
@@ -2086,13 +2134,14 @@ export const useTracksStore = defineStore('tracks', () => {
       trackStart,
       duration: metadata.duration,
       color: getNextColor(),
-      muted: false,
+      muted: soloActive,
       solo: false,
       volume: 1,
       sourcePath,
       importStatus: 'importing',
       importProgress: 0,
       importSessionId: sessionId,
+      autoMuted: soloActive,
     };
 
     tracks.value = [...tracks.value, track];
@@ -2828,7 +2877,6 @@ export const useTracksStore = defineStore('tracks', () => {
     selectClip,
     clearClipSelection,
     setTrackMuted,
-    muteAllExcept,
     setTrackSolo,
     setTrackVolume,
     renameTrack,
@@ -2854,6 +2902,8 @@ export const useTracksStore = defineStore('tracks', () => {
     trimClipLeft,
     trimClipRight,
     finalizeEdgeTrim,
+    getSnapTarget,
+    SNAP_THRESHOLD,
     deleteClipFromTrack,
     removeClipKeepTrack,
     splitClipAtTime,

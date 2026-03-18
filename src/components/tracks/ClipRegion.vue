@@ -13,17 +13,23 @@ interface Props {
   isDragging?: boolean;
   draggingClipId?: string | null;
   isSelected?: boolean;
+  isCrossTrackDrag?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isDragging: false,
   draggingClipId: null,
   isSelected: false,
+  isCrossTrackDrag: false,
 });
 
 const emit = defineEmits<{
   dragStart: [clipId: string, event: MouseEvent];
+  trimStart: [clipId: string, edge: 'left' | 'right', event: MouseEvent];
 }>();
+
+// Edge trim zone width in pixels
+const EDGE_ZONE_PX = 8;
 
 // Use clip position if provided, otherwise fall back to track position
 const clipId = computed(() => props.clip?.id ?? props.track.id + '-main');
@@ -56,6 +62,30 @@ const borderColor = computed(() => {
   if (props.track.muted) return 'rgb(75, 85, 99)'; // gray-600
   if (props.isSelected) return 'rgba(255, 255, 255, 0.6)';
   return props.track.color;
+});
+
+// Whether this clip supports edge trimming (only explicit clips in tracks with clips array)
+const isTrimmable = computed(() => {
+  if (!props.clip) return false;
+  // Synthetic clips (id ends with '-main') from getTrackClips don't support trimming
+  if (props.clip.id.endsWith('-main')) return false;
+  return props.clip.sourceIn !== undefined && props.clip.sourceDuration !== undefined;
+});
+
+// Edge trim: detect hidden audio beyond clip edges
+const hasHiddenLeft = computed(() => {
+  if (!isTrimmable.value || !props.clip) return false;
+  const sIn = props.clip.sourceIn!;
+  const sOff = props.clip.sourceOffset ?? 0;
+  return sOff > sIn;
+});
+
+const hasHiddenRight = computed(() => {
+  if (!isTrimmable.value || !props.clip) return false;
+  const sIn = props.clip.sourceIn!;
+  const sDur = props.clip.sourceDuration!;
+  const sOff = props.clip.sourceOffset ?? 0;
+  return (sOff + props.clip.duration) < (sIn + sDur);
 });
 
 // Waveform canvas
@@ -289,16 +319,37 @@ function handleMouseDown(event: MouseEvent) {
   event.preventDefault();
   // Stop propagation so parent track click doesn't fire (which would clear clip selection)
   event.stopPropagation();
+
+  // Edge trim detection: only for explicit clips with sourceIn/sourceDuration
+  const clipWidth = Math.max(2, width.value);
+
+  // If clip is narrower than 2× edge zone width, prioritize drag over edge trim
+  if (isTrimmable.value && clipWidth >= EDGE_ZONE_PX * 2) {
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const localX = event.clientX - rect.left;
+
+    if (localX <= EDGE_ZONE_PX) {
+      emit('trimStart', clipId.value, 'left', event);
+      return;
+    }
+    if (localX >= clipWidth - EDGE_ZONE_PX) {
+      emit('trimStart', clipId.value, 'right', event);
+      return;
+    }
+  }
+
   emit('dragStart', clipId.value, event);
 }
 </script>
 
 <template>
   <div
-    class="absolute top-1 bottom-1 rounded cursor-grab active:cursor-grabbing select-none overflow-hidden"
+    class="absolute top-1 bottom-1 rounded cursor-grab active:cursor-grabbing select-none overflow-hidden group/clip"
     :class="[
       track.solo ? 'ring-2 ring-yellow-500' : '',
-      isThisClipDragging ? 'opacity-70 ring-2 ring-cyan-400' : '',
+      isThisClipDragging && props.isCrossTrackDrag ? 'opacity-20 ring-2 ring-cyan-400' : '',
+      isThisClipDragging && !props.isCrossTrackDrag ? 'opacity-70 ring-2 ring-cyan-400' : '',
       isSelected && !isThisClipDragging && !track.solo ? 'ring-2 ring-white/60 shadow-lg shadow-white/10' : '',
     ]"
     :style="{
@@ -318,6 +369,43 @@ function handleMouseDown(event: MouseEvent) {
       class="absolute inset-0 border rounded pointer-events-none"
       :style="{ borderColor: borderColor }"
     />
+
+    <!-- Left trim handle (visible on hover when clip is wide enough and trimmable) -->
+    <div
+      v-if="isTrimmable && width >= EDGE_ZONE_PX * 2"
+      class="absolute top-0 bottom-0 left-0 flex items-center justify-center cursor-col-resize opacity-0 hover:opacity-100 transition-opacity pointer-events-none group-hover/clip:opacity-60"
+      :style="{ width: `${EDGE_ZONE_PX}px` }"
+    >
+      <div
+        class="w-0.5 h-3/5 rounded-full"
+        :style="{ backgroundColor: hasHiddenLeft ? '#fbbf24' : 'rgba(255,255,255,0.4)' }"
+      />
+    </div>
+
+    <!-- Right trim handle (visible on hover when clip is wide enough and trimmable) -->
+    <div
+      v-if="isTrimmable && width >= EDGE_ZONE_PX * 2"
+      class="absolute top-0 bottom-0 right-0 flex items-center justify-center cursor-col-resize opacity-0 hover:opacity-100 transition-opacity pointer-events-none group-hover/clip:opacity-60"
+      :style="{ width: `${EDGE_ZONE_PX}px` }"
+    >
+      <div
+        class="w-0.5 h-3/5 rounded-full"
+        :style="{ backgroundColor: hasHiddenRight ? '#fbbf24' : 'rgba(255,255,255,0.4)' }"
+      />
+    </div>
+
+    <!-- Hidden audio indicators (small chevrons at edges when trimmed audio exists) -->
+    <div
+      v-if="hasHiddenLeft"
+      class="absolute top-0 bottom-0 left-0 w-1 pointer-events-none"
+      style="background: repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(251, 191, 36, 0.3) 2px, rgba(251, 191, 36, 0.3) 4px);"
+    />
+    <div
+      v-if="hasHiddenRight"
+      class="absolute top-0 bottom-0 right-0 w-1 pointer-events-none"
+      style="background: repeating-linear-gradient(-45deg, transparent, transparent 2px, rgba(251, 191, 36, 0.3) 2px, rgba(251, 191, 36, 0.3) 4px);"
+    />
+
     <!-- Drag indicator when dragging -->
     <div
       v-if="isThisClipDragging"

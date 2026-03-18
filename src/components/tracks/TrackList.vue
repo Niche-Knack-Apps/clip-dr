@@ -61,6 +61,11 @@ const clipDraggingTrackId = ref<string | null>(null);
 const clipDraggingClipId = ref<string | null>(null);
 const clipDragTargetTrackId = ref<string | null>(null);
 const clipDragPreviewStart = ref<number>(0);
+const clipDragStartY = ref(0);
+const CROSS_TRACK_THRESHOLD = 20; // pixels of vertical movement to trigger cross-track intent
+
+// Snap visualization state
+const activeSnapTarget = ref<{ time: number } | null>(null);
 
 // Floating drag ghost state
 const dragGhostMouseX = ref(0);
@@ -126,15 +131,29 @@ watch(timelineWidth, (newW, oldW) => {
 // Zoom constants (match FullWaveform.vue exactly)
 const ZOOM_FACTOR = 0.15;
 
+// Wheel-burst coalescing for Ctrl+scroll zoom: zoom state updates synchronously
+// on every wheel event, but scrollLeft correction is coalesced to one rAF.
+let pendingZoomAnchor: { timeAtMouse: number; localX: number; newZoom: number } | null = null;
+let zoomRafId: number | null = null;
+
+function flushZoomScroll() {
+  zoomRafId = null;
+  const anchor = pendingZoomAnchor;
+  const container = scrollContainerRef.value;
+  if (!anchor || !container) return;
+  pendingZoomAnchor = null;
+  container.scrollLeft = anchor.timeAtMouse * anchor.newZoom - anchor.localX;
+}
+
 // Handle scroll wheel:
 // - Plain wheel = expand/contract zoom-view selection window (matches FullWaveform/ZoomedWaveform)
 // - Ctrl/Cmd+wheel = pixel-scale zoom (traditional DAW track zoom)
-// - Shift+wheel = horizontal pan
+// - Shift+wheel = vertical scroll
 function handleWheel(event: WheelEvent) {
-  // Shift+wheel → horizontal pan
+  // Shift+wheel → vertical scroll through tracks
   if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
     if (scrollContainerRef.value) {
-      scrollContainerRef.value.scrollLeft += event.deltaY;
+      scrollContainerRef.value.scrollTop += event.deltaY;
       event.preventDefault();
     }
     return;
@@ -161,16 +180,28 @@ function handleWheel(event: WheelEvent) {
     const oldZoom = trackZoom.value;
     const timeAtMouse = (localX + scrollX) / oldZoom;
 
-    if (event.deltaY < 0) {
-      uiStore.zoomTrackIn();
-    } else {
-      uiStore.zoomTrackOut();
-    }
+    // Compute new zoom directly (bypass setTrackZoom to avoid resetMinTimelineDuration
+    // which causes timeline width changes that fight with scroll position)
+    const factor = event.deltaY < 0 ? 1.2 : (1 / 1.2);
+    const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, oldZoom * factor));
+    if (newZoom === oldZoom) return;
 
-    // After zoom, adjust scroll so same time stays under mouse
-    const newZoom = trackZoom.value;
-    if (newZoom !== oldZoom) {
-      container.scrollLeft = timeAtMouse * newZoom - localX;
+    // Don't zoom IN when user wants to zoom OUT (at min boundary)
+    if (event.deltaY > 0 && newZoom >= oldZoom) return;
+
+    // Part A: Synchronous contentWidth — update trackZoom and contentWidth in the
+    // same reactive cycle so overlays (selection window) reposition without waiting
+    // for ResizeObserver.
+    uiStore.trackZoom = newZoom;
+    contentWidth.value = timelineWidth.value;
+
+    // Part B: Coalesce scrollLeft correction — store the anchor and schedule ONE rAF.
+    // Under rapid wheel input, each event updates zoom state immediately (so content
+    // width is always correct), but scroll correction happens exactly once per frame
+    // using the most recent anchor — no stacked corrections, no mini-oscillations.
+    pendingZoomAnchor = { timeAtMouse, localX, newZoom };
+    if (zoomRafId === null) {
+      zoomRafId = requestAnimationFrame(flushZoomScroll);
     }
     return;
   }
@@ -364,22 +395,43 @@ function handleDrop(event: DragEvent, targetTrackId: string) {
 }
 
 // Clip drag handlers (for moving clips on timeline)
-function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number) {
+function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number, event?: MouseEvent) {
   useHistoryStore().pushState('Move clip');
   clipDraggingTrackId.value = trackId;
   clipDraggingClipId.value = clipId;
   clipDragTargetTrackId.value = trackId;
   dragGhostMouseOffsetX.value = mouseOffsetX;
+  clipDragStartY.value = event?.clientY ?? 0;
 
   // Start floating ghost tracking
   dragGhostActive.value = true;
   document.addEventListener('mousemove', trackDragMouse);
 }
 
-function handleClipDrag(trackId: string, clipId: string, newClipStart: number) {
+function handleClipDrag(trackId: string, clipId: string, newClipStart: number, mouseEvent?: MouseEvent) {
   clipDragPreviewStart.value = newClipStart;
   // Update clip position in real-time for visual feedback (with snap if enabled)
   tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
+
+  // Update snap visualization
+  const clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
+  if (clip) {
+    activeSnapTarget.value = tracksStore.getSnapTarget(trackId, clipId, newClipStart, clip.duration, snapEnabled.value);
+  }
+
+  // Cross-track detection via Y-tracking (replaces mouseenter/mouseleave)
+  if (mouseEvent && clipDraggingTrackId.value) {
+    const deltaY = Math.abs(mouseEvent.clientY - clipDragStartY.value);
+    if (deltaY < CROSS_TRACK_THRESHOLD) {
+      clipDragTargetTrackId.value = clipDraggingTrackId.value;
+    } else {
+      const el = document.elementFromPoint(mouseEvent.clientX, mouseEvent.clientY);
+      const trackEl = el?.closest('[data-track-id]');
+      if (trackEl) {
+        clipDragTargetTrackId.value = trackEl.getAttribute('data-track-id');
+      }
+    }
+  }
 }
 
 async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number) {
@@ -398,6 +450,7 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
 
   // Stop floating ghost tracking
   dragGhostActive.value = false;
+  activeSnapTarget.value = null;
   document.removeEventListener('mousemove', trackDragMouse);
   if (dragGhostRafId !== null) {
     cancelAnimationFrame(dragGhostRafId);
@@ -408,19 +461,6 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
   clipDraggingTrackId.value = null;
   clipDraggingClipId.value = null;
   clipDragTargetTrackId.value = null;
-}
-
-// Track which lane the clip is being dragged over (for cross-track drop)
-function handleClipDragOverTrack(targetTrackId: string) {
-  if (clipDraggingTrackId.value) {
-    clipDragTargetTrackId.value = targetTrackId;
-  }
-}
-
-function handleClipDragLeaveTrack() {
-  if (clipDraggingTrackId.value) {
-    clipDragTargetTrackId.value = clipDraggingTrackId.value;
-  }
 }
 
 // Measure actual rendered width of the content wrapper
@@ -461,6 +501,9 @@ onUnmounted(() => {
   }
   if (dragPanRafId !== null) {
     cancelAnimationFrame(dragPanRafId);
+  }
+  if (zoomRafId !== null) {
+    cancelAnimationFrame(zoomRafId);
   }
 });
 
@@ -690,16 +733,18 @@ function handleClipSelect(trackId: string, clipId: string) {
       </div>
     </div>
 
-    <!-- Drag strip to pan zoom window (always grabbable, above tracks) -->
+    <!-- Drag strip to pan zoom window -->
     <div
-      class="h-2 flex items-center justify-center select-none shrink-0 border-b border-gray-700/60"
-      :class="isDragPanning ? 'cursor-grabbing bg-cyan-900/30' : 'cursor-grab bg-gray-800/60 hover:bg-cyan-900/20'"
+      class="h-5 flex items-center justify-between px-2 select-none shrink-0 border-b border-gray-700/60"
+      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-750/70 hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
     >
-      <div class="flex flex-col gap-px opacity-50">
+      <div class="flex flex-col gap-[2px] opacity-70">
+        <div class="w-8 h-px bg-gray-400" />
         <div class="w-8 h-px bg-gray-400" />
         <div class="w-8 h-px bg-gray-400" />
       </div>
+      <span class="text-[9px] text-gray-500 uppercase tracking-wider">Drag to pan</span>
     </div>
 
     <div
@@ -721,21 +766,55 @@ function handleClipSelect(trackId: string, clipId: string) {
           class="absolute top-0 bottom-0 z-[5] pointer-events-none"
           :style="{ left: `${panelWidth}px`, width: `${selectionWindowContainerWidth}px` }"
         >
+          <!-- Dimmed area left of selection -->
+          <div
+            class="absolute top-0 bottom-0 left-0"
+            :style="{
+              width: `${(selectionStore.selection.start / tracksStore.timelineDuration) * selectionWindowContainerWidth}px`,
+              backgroundColor: 'rgba(0, 0, 0, 0.15)',
+            }"
+          />
+          <!-- Selection window -->
           <div
             class="absolute top-0 bottom-0"
             :style="{
               left: `${(selectionStore.selection.start / tracksStore.timelineDuration) * selectionWindowContainerWidth}px`,
               width: `${((selectionStore.selection.end - selectionStore.selection.start) / tracksStore.timelineDuration) * selectionWindowContainerWidth}px`,
-              backgroundColor: 'rgba(255, 255, 255, 0.18)',
-              borderLeft: '1px solid rgba(255, 255, 255, 0.5)',
-              borderRight: '1px solid rgba(255, 255, 255, 0.5)',
+              backgroundColor: 'rgba(255, 255, 255, 0.12)',
+              border: '2px solid rgba(255, 255, 255, 0.35)',
+            }"
+          >
+            <!-- Left edge gradient handle -->
+            <div class="absolute top-0 bottom-0 left-0 w-1" style="background: linear-gradient(to right, rgba(255,255,255,0.25), transparent);" />
+            <!-- Right edge gradient handle -->
+            <div class="absolute top-0 bottom-0 right-0 w-1" style="background: linear-gradient(to left, rgba(255,255,255,0.25), transparent);" />
+          </div>
+          <!-- Dimmed area right of selection -->
+          <div
+            class="absolute top-0 bottom-0 right-0"
+            :style="{
+              width: `${((tracksStore.timelineDuration - selectionStore.selection.end) / tracksStore.timelineDuration) * selectionWindowContainerWidth}px`,
+              backgroundColor: 'rgba(0, 0, 0, 0.15)',
             }"
           />
         </div>
 
+        <!-- Snap guide line (visible during clip drag when near a snap edge) -->
+        <div
+          v-if="activeSnapTarget && tracksStore.timelineDuration > 0"
+          class="absolute top-0 bottom-0 z-[6] pointer-events-none"
+          :style="{
+            left: `${panelWidth + (activeSnapTarget.time / tracksStore.timelineDuration) * selectionWindowContainerWidth}px`,
+            width: '1px',
+            borderLeft: '1px dashed rgba(0, 212, 255, 0.6)',
+            transition: 'opacity 100ms',
+          }"
+        />
+
         <div
           v-for="track in tracks"
           :key="track.id"
+          :data-track-id="track.id"
           class="relative"
           :class="{
             'border-t-2 border-cyan-500': dragOverTrackId === track.id && draggedTrackId !== track.id,
@@ -748,8 +827,6 @@ function handleClipSelect(trackId: string, clipId: string) {
           @dragover="handleDragOver($event, track.id)"
           @dragleave="handleDragLeave"
           @drop="handleDrop($event, track.id)"
-          @mouseenter="handleClipDragOverTrack(track.id)"
-          @mouseleave="handleClipDragLeaveTrack"
         >
           <TrackLane
             :track="track"
@@ -762,8 +839,8 @@ function handleClipSelect(trackId: string, clipId: string) {
             @export="handleExport"
             @rename="handleRename"
             @set-volume="handleSetVolume"
-            @clip-drag-start="handleClipDragStart"
-            @clip-drag="handleClipDrag"
+            @clip-drag-start="(tid: string, cid: string, ox: number, ev: MouseEvent) => handleClipDragStart(tid, cid, ox, ev)"
+            @clip-drag="(tid: string, cid: string, ns: number, ev: MouseEvent) => handleClipDrag(tid, cid, ns, ev)"
             @clip-drag-end="handleClipDragEnd"
             @clip-select="handleClipSelect"
           />

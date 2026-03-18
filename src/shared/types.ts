@@ -173,6 +173,8 @@ export interface Track {
   cachedAudioPath?: string;
   /** Monotonically-incrementing epoch; bumped on every edit. Async ops abort on mismatch. */
   editEpoch?: number;
+  /** True when this track was auto-muted (e.g., by solo) rather than explicitly muted by user */
+  autoMuted?: boolean;
 }
 
 

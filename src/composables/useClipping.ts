@@ -163,13 +163,6 @@ export function useClipping() {
         };
       }
 
-      // Mute all existing tracks (within batch so undo restores mute states)
-      for (const track of tracksStore.tracks) {
-        if (!track.muted) {
-          tracksStore.setTrackMuted(track.id, true);
-        }
-      }
-
       // Insert below current selected track
       const currentTrackId = tracksStore.selectedTrackId;
       let insertIndex = tracksStore.tracks.length;
@@ -179,6 +172,10 @@ export function useClipping() {
       }
 
       tracksStore.insertTrackAtIndex(newTrack, insertIndex);
+
+      // Solo the new clip track so only it plays (auto-mutes others;
+      // un-soloing later restores user-muted state via autoMuted flag)
+      tracksStore.setTrackSolo(newTrack.id, true);
 
       // Only cache WAV for small-file clips; EDL clips use sourceFile/sourceOffset
       if (newTrack.audioData.buffer) {
