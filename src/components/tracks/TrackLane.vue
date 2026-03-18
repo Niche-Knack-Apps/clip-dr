@@ -16,10 +16,12 @@ import { linearToDb, dbToLinear, formatDb } from '@/shared/utils';
 interface Props {
   track: Track;
   isSelected?: boolean;
+  isCrossTrackDrag?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   isSelected: false,
+  isCrossTrackDrag: false,
 });
 
 const emit = defineEmits<{
@@ -30,7 +32,7 @@ const emit = defineEmits<{
   export: [trackId: string];
   rename: [trackId: string, name: string];
   setVolume: [trackId: string, volume: number, skipHistory: boolean];
-  clipDragStart: [trackId: string, clipId: string];
+  clipDragStart: [trackId: string, clipId: string, mouseOffsetX: number];
   clipDrag: [trackId: string, clipId: string, newClipStart: number];
   clipDragEnd: [trackId: string, clipId: string, newClipStart: number];
   clipSelect: [trackId: string, clipId: string];
@@ -169,7 +171,12 @@ function handleClipDragMove(event: MouseEvent) {
   // Check if we've crossed the drag threshold (synchronous - don't defer)
   if (!isClipDragging.value && Math.abs(deltaX) >= DRAG_THRESHOLD) {
     isClipDragging.value = true;
-    emit('clipDragStart', props.track.id, draggingClipId.value);
+    // Compute offset from mouse cursor to clip's left edge in screen coords
+    const clipLeftPx = (clipDragOriginalStart.value / duration.value) * containerWidth.value;
+    const rect = containerRef.value!.getBoundingClientRect();
+    const clipScreenLeft = rect.left + clipLeftPx;
+    const mouseOffsetX = clipDragStartX.value - clipScreenLeft;
+    emit('clipDragStart', props.track.id, draggingClipId.value, mouseOffsetX);
   }
 
   // Throttle position updates to rAF rate
@@ -547,6 +554,7 @@ onUnmounted(() => {
         :is-dragging="isClipDragging"
         :dragging-clip-id="draggingClipId"
         :is-selected="clip.id === tracksStore.selectedClipId"
+        :is-cross-track-drag="isCrossTrackDrag"
         @drag-start="handleClipDragStart"
       />
 

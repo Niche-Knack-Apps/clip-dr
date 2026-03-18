@@ -62,6 +62,14 @@ const clipDraggingClipId = ref<string | null>(null);
 const clipDragTargetTrackId = ref<string | null>(null);
 const clipDragPreviewStart = ref<number>(0);
 
+// Floating drag ghost state
+const dragGhostMouseX = ref(0);
+const dragGhostMouseY = ref(0);
+const dragGhostMouseOffsetX = ref(0);
+const dragGhostActive = ref(false);
+const ghostCanvasRef = ref<HTMLCanvasElement | null>(null);
+let dragGhostRafId: number | null = null;
+
 const panelWidth = computed(() => uiStore.trackPanelWidth);
 const snapEnabled = computed(() => uiStore.snapEnabled);
 const trackZoom = computed(() => uiStore.trackZoom);
@@ -300,11 +308,16 @@ function handleDrop(event: DragEvent, targetTrackId: string) {
 }
 
 // Clip drag handlers (for moving clips on timeline)
-function handleClipDragStart(trackId: string, clipId: string) {
+function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number) {
   useHistoryStore().pushState('Move clip');
   clipDraggingTrackId.value = trackId;
   clipDraggingClipId.value = clipId;
   clipDragTargetTrackId.value = trackId;
+  dragGhostMouseOffsetX.value = mouseOffsetX;
+
+  // Start floating ghost tracking
+  dragGhostActive.value = true;
+  document.addEventListener('mousemove', trackDragMouse);
 }
 
 function handleClipDrag(trackId: string, clipId: string, newClipStart: number) {
@@ -314,17 +327,25 @@ function handleClipDrag(trackId: string, clipId: string, newClipStart: number) {
 }
 
 async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: number) {
-  // Final position update (with snap if enabled)
-  tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
+  const isCrossTrack = clipDragTargetTrackId.value && clipDragTargetTrackId.value !== trackId;
 
-  // Finalize track bounds after drag completes
-  tracksStore.finalizeClipPositions(trackId);
+  if (isCrossTrack) {
+    // Cross-track drop: go straight to moveClipToTrack (skip setClipStart/finalize
+    // on source — those would commit the clip at the new position on the source track,
+    // then moveClipToTrack would duplicate it onto the target)
+    tracksStore.moveClipToTrack(trackId, clipId, clipDragTargetTrackId.value!, newClipStart);
+  } else {
+    // Same-track drag: update position and finalize bounds
+    tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
+    tracksStore.finalizeClipPositions(trackId);
+  }
 
-  // If dragged to a different track, move the audio
-  // TODO: Support moving individual clips between tracks
-  if (clipDragTargetTrackId.value && clipDragTargetTrackId.value !== trackId) {
-    const ctx = audioStore.getAudioContext();
-    await tracksStore.moveTrackToTrack(trackId, clipDragTargetTrackId.value, newClipStart, ctx);
+  // Stop floating ghost tracking
+  dragGhostActive.value = false;
+  document.removeEventListener('mousemove', trackDragMouse);
+  if (dragGhostRafId !== null) {
+    cancelAnimationFrame(dragGhostRafId);
+    dragGhostRafId = null;
   }
 
   // Reset state
@@ -376,6 +397,123 @@ onMounted(() => {
 
 onUnmounted(() => {
   contentResizeObserver?.disconnect();
+  document.removeEventListener('mousemove', trackDragMouse);
+  if (dragGhostRafId !== null) {
+    cancelAnimationFrame(dragGhostRafId);
+  }
+});
+
+// Ghost clip for cross-track drag preview
+const ghostClip = computed(() => {
+  if (!clipDraggingTrackId.value || !clipDraggingClipId.value) return null;
+  if (!clipDragTargetTrackId.value || clipDragTargetTrackId.value === clipDraggingTrackId.value) return null;
+  const clips = tracksStore.getTrackClips(clipDraggingTrackId.value);
+  return clips.find(c => c.id === clipDraggingClipId.value) ?? null;
+});
+
+// Dragging clip data (for floating ghost — always available during any clip drag)
+const draggingClipData = computed(() => {
+  if (!clipDraggingTrackId.value || !clipDraggingClipId.value) return null;
+  const clips = tracksStore.getTrackClips(clipDraggingTrackId.value);
+  return clips.find(c => c.id === clipDraggingClipId.value) ?? null;
+});
+
+// Source track for ghost color
+const draggingTrack = computed(() => {
+  if (!clipDraggingTrackId.value) return null;
+  return tracks.value.find(t => t.id === clipDraggingTrackId.value) ?? null;
+});
+
+// Whether current drag is cross-track
+const isCrossTrackDrag = computed(() =>
+  clipDragTargetTrackId.value !== null &&
+  clipDraggingTrackId.value !== null &&
+  clipDragTargetTrackId.value !== clipDraggingTrackId.value
+);
+
+// Ghost dimensions and position
+const ghostWidthPx = computed(() => {
+  const clip = draggingClipData.value;
+  if (!clip || !dragGhostActive.value) return 0;
+  const timelineAreaWidth = contentWidth.value - panelWidth.value;
+  if (timelineAreaWidth <= 0 || tracksStore.timelineDuration <= 0) return 0;
+  return (clip.duration / tracksStore.timelineDuration) * timelineAreaWidth;
+});
+
+const ghostLeft = computed(() => dragGhostMouseX.value - dragGhostMouseOffsetX.value);
+const ghostTop = computed(() => dragGhostMouseY.value - 26); // center vertically (52px / 2)
+
+const ghostBgColor = computed(() => {
+  const track = draggingTrack.value;
+  if (!track) return 'rgba(75, 85, 99, 0.5)';
+  return `${track.color}30`;
+});
+
+const ghostBorderColor = computed(() => {
+  const track = draggingTrack.value;
+  if (!track) return 'rgb(75, 85, 99)';
+  return track.color;
+});
+
+const ghostWaveformColor = computed(() => {
+  const track = draggingTrack.value;
+  if (!track) return 'rgba(75, 85, 99, 0.6)';
+  return `${track.color}80`;
+});
+
+// Mouse tracking for floating ghost
+function trackDragMouse(event: MouseEvent) {
+  if (dragGhostRafId !== null) return;
+  dragGhostRafId = requestAnimationFrame(() => {
+    dragGhostRafId = null;
+    dragGhostMouseX.value = event.clientX;
+    dragGhostMouseY.value = event.clientY;
+  });
+}
+
+function drawGhostWaveform() {
+  const canvas = ghostCanvasRef.value;
+  const clip = draggingClipData.value;
+  if (!canvas || !clip || !clip.waveformData || clip.waveformData.length < 2) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w <= 0 || h <= 0) return;
+
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const data = clip.waveformData;
+  const buckets = data.length / 2;
+  const centerY = h / 2;
+  ctx.fillStyle = ghostWaveformColor.value;
+  ctx.beginPath();
+
+  const barsToRender = Math.min(Math.floor(w), buckets);
+  const barWidth = w / barsToRender;
+  const bucketStep = buckets / barsToRender;
+
+  for (let i = 0; i < barsToRender; i++) {
+    const bIdx = Math.floor(i * bucketStep);
+    const min = data[bIdx * 2];
+    const max = data[bIdx * 2 + 1];
+    const topY = centerY - max * centerY;
+    const bottomY = centerY - min * centerY;
+    ctx.rect(i * barWidth, topY, barWidth, Math.max(1, bottomY - topY));
+  }
+  ctx.fill();
+}
+
+// Watch for ghost visibility changes to draw waveform
+watch([dragGhostActive, ghostWidthPx], () => {
+  if (dragGhostActive.value && ghostWidthPx.value > 0) {
+    nextTick(drawGhostWaveform);
+  }
 });
 
 // Clip select handler (click without drag)
@@ -484,6 +622,7 @@ function handleClipSelect(trackId: string, clipId: string) {
           <TrackLane
             :track="track"
             :is-selected="track.id === selectedTrackId"
+            :is-cross-track-drag="track.id === clipDraggingTrackId && isCrossTrackDrag"
             @select="selectTrack"
             @toggle-mute="toggleMute"
             @toggle-solo="toggleSolo"
@@ -505,6 +644,23 @@ function handleClipSelect(trackId: string, clipId: string) {
           No tracks - Import or record audio
         </div>
       </div>
+    </div>
+
+    <!-- Floating drag ghost overlay — follows mouse during clip drag -->
+    <div
+      v-if="dragGhostActive && ghostWidthPx > 0"
+      class="fixed z-50 pointer-events-none rounded overflow-hidden"
+      :style="{
+        left: `${ghostLeft}px`,
+        top: `${ghostTop}px`,
+        width: `${ghostWidthPx}px`,
+        height: '52px',
+        opacity: 0.4,
+        backgroundColor: ghostBgColor,
+        border: `1px solid ${ghostBorderColor}`,
+      }"
+    >
+      <canvas ref="ghostCanvasRef" class="w-full h-full" />
     </div>
 
     <!-- Export profile picker overlay -->
