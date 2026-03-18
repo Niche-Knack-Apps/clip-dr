@@ -144,7 +144,6 @@ const formattedDuration = computed(() => {
 });
 
 let resizeObserver: ResizeObserver | null = null;
-let resizeRafId: number | null = null;
 
 function updateWidth() {
   if (containerRef.value) {
@@ -153,11 +152,7 @@ function updateWidth() {
 }
 
 function handleResize() {
-  if (resizeRafId !== null) return;
-  resizeRafId = requestAnimationFrame(() => {
-    resizeRafId = null;
-    updateWidth();
-  });
+  updateWidth();
 }
 
 // Clip drag handlers - called from ClipRegion
@@ -434,9 +429,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
-  if (resizeRafId !== null) {
-    cancelAnimationFrame(resizeRafId);
-  }
   if (clipDragRafId !== null) {
     cancelAnimationFrame(clipDragRafId);
   }

@@ -193,11 +193,9 @@ function handleWheel(event: WheelEvent) {
     // Don't zoom IN when user wants to zoom OUT (at min boundary)
     if (event.deltaY > 0 && newZoom >= oldZoom) return;
 
-    // Part A: Synchronous contentWidth — update trackZoom and contentWidth in the
-    // same reactive cycle so overlays (selection window) reposition without waiting
-    // for ResizeObserver.
+    // Update trackZoom — ResizeObserver fires same-frame (before paint) to update
+    // contentWidth, so no manual sync needed (dual-source caused flicker).
     uiStore.trackZoom = newZoom;
-    contentWidth.value = timelineWidth.value;
 
     // Part B: Coalesce scrollLeft correction — store the anchor and schedule ONE rAF.
     // Under rapid wheel input, each event updates zoom state immediately (so content
