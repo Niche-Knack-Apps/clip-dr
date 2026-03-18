@@ -252,10 +252,25 @@ export const useTracksStore = defineStore('tracks', () => {
     // Don't allow muting a solo'd track — solo implies audible
     if (tracks.value[idx].solo) return;
     useHistoryStore().pushState('Toggle mute');
-    // Create new array + new track object so shallowRef detects the change
-    // (in-place mutation + triggerRef doesn't propagate through computed wrappers)
-    const updated = [...tracks.value];
-    updated[idx] = { ...updated[idx], muted };
+
+    // When unmuting a track while another track is solo'd, release solo
+    // but keep other tracks in their current muted state
+    const hasSolo = !muted && tracks.value.some(t => t.solo);
+
+    const updated = tracks.value.map((t, i) => {
+      if (i === idx) {
+        return { ...t, muted, autoMuted: false };
+      }
+      if (hasSolo && t.solo) {
+        // Release solo from the solo'd track, keep it unmuted
+        return { ...t, solo: false, autoMuted: false };
+      }
+      if (hasSolo && t.autoMuted) {
+        // Clear autoMuted flag but keep muted — other tracks stay muted
+        return { ...t, autoMuted: false };
+      }
+      return t;
+    });
     tracks.value = updated;
   }
 

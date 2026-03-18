@@ -354,6 +354,12 @@ function handleDragStart(event: DragEvent, trackId: string) {
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', trackId);
 
+  // Use tiny transparent drag image to avoid browser ghost artifacts
+  const ghost = document.createElement('canvas');
+  ghost.width = 1;
+  ghost.height = 1;
+  event.dataTransfer.setDragImage(ghost, 0, 0);
+
   // Add drag styling
   const target = event.target as HTMLElement;
   setTimeout(() => {
@@ -1153,6 +1159,10 @@ function handleClipSelect(trackId: string, clipId: string) {
 <style scoped>
 .track-scroll-container {
   scrollbar-width: none;
+  -webkit-user-drag: none;
+}
+.track-scroll-container * {
+  -webkit-user-drag: none;
 }
 .track-scroll-container::-webkit-scrollbar {
   width: 0;
