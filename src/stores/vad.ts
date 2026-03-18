@@ -90,10 +90,10 @@ export const useVadStore = defineStore('vad', () => {
 
   async function detectSilence(): Promise<void> {
     const selectedTrack = tracksStore.selectedTrack;
-    const trackId = selectedTrack?.id || tracksStore.tracks[0]?.id;
+    const trackId = selectedTrack?.id;
 
     if (!trackId) {
-      error.value = 'No audio file loaded. Select a track.';
+      error.value = 'Select a track to detect silence';
       return;
     }
     console.log('[VAD] Detecting silence for track:', selectedTrack?.name);

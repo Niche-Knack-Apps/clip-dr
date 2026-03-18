@@ -80,6 +80,8 @@ const showVadSettings = ref(false);
 const showCleaningPanel = ref(false);
 const showRecordingPanel = ref(false);
 const transportRef = ref<HTMLElement | null>(null);
+const cleaningRef = ref<HTMLElement | null>(null);
+const vadRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
 const searchFocused = ref(false);
 
@@ -103,7 +105,12 @@ function cancelRename() {
 
 function handleRecordClick() {
   // Toggle the recording panel (device picker when idle, controls when recording)
-  showRecordingPanel.value = !showRecordingPanel.value;
+  const opening = !showRecordingPanel.value;
+  showRecordingPanel.value = opening;
+  if (opening) {
+    showCleaningPanel.value = false;
+    showVadSettings.value = false;
+  }
 }
 
 // Close recording panel on window blur when not actively recording
@@ -114,15 +121,23 @@ function handleWindowBlur() {
   }
 }
 
-// Close recording panel on click outside the transport area
-// Recording continues in background — closing the panel doesn't stop it.
+// Close tool panels on click outside their respective containers
 function handleClickOutside(event: MouseEvent) {
-  if (!showRecordingPanel.value) return;
-  if (recordingStore.isPreparing) return;
   const target = event.target as HTMLElement;
-  if (transportRef.value?.contains(target)) return;
-  if (document.querySelector('.schedule-overlay')) return;
-  showRecordingPanel.value = false;
+  // Recording panel
+  if (showRecordingPanel.value && !recordingStore.isPreparing) {
+    if (!transportRef.value?.contains(target) && !document.querySelector('.schedule-overlay')) {
+      showRecordingPanel.value = false;
+    }
+  }
+  // Cleaning panel
+  if (showCleaningPanel.value && !cleaningRef.value?.contains(target)) {
+    showCleaningPanel.value = false;
+  }
+  // VAD settings
+  if (showVadSettings.value && !vadRef.value?.contains(target)) {
+    showVadSettings.value = false;
+  }
 }
 
 onMounted(() => {
@@ -570,7 +585,7 @@ defineExpose({ focusSearch });
       <div class="w-px h-5 bg-gray-700" />
 
       <!-- VAD / Silence Removal -->
-      <div class="flex items-center gap-1 relative">
+      <div ref="vadRef" class="flex items-center gap-1 relative">
         <Button
           v-if="!silenceStore.hasRegions"
           variant="secondary"
@@ -644,7 +659,7 @@ defineExpose({ focusSearch });
           size="sm"
           icon
           :class="{ 'bg-gray-700': showVadSettings }"
-          @click="showVadSettings = !showVadSettings"
+          @click="showVadSettings = !showVadSettings; if (showVadSettings) { showCleaningPanel = false; showRecordingPanel = false; }"
           title="VAD settings"
         >
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -762,7 +777,7 @@ defineExpose({ focusSearch });
       <div class="w-px h-5 bg-gray-700" />
 
       <!-- Audio Cleaning -->
-      <div class="flex items-center gap-1 relative">
+      <div ref="cleaningRef" class="flex items-center gap-1 relative">
         <Button
           variant="secondary"
           size="sm"
@@ -781,7 +796,7 @@ defineExpose({ focusSearch });
           size="sm"
           icon
           :class="{ 'bg-gray-700': showCleaningPanel }"
-          @click="showCleaningPanel = !showCleaningPanel"
+          @click="showCleaningPanel = !showCleaningPanel; if (showCleaningPanel) { showVadSettings = false; showRecordingPanel = false; }"
           title="Cleaning settings"
         >
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

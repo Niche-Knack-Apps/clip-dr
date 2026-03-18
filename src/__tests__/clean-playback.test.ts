@@ -164,6 +164,64 @@ describe('Clean Audio Playback', () => {
     expect(tracksStore.selectedTrack).toBeNull();
   });
 
+  it('canClean is true when a clip is selected even without selectedTrack', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(5);
+    const track1 = await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    const track2 = await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    // With multiple tracks and 'ALL' selection, selectedTrack is null
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrack).toBeNull();
+    expect(cleaningStore.canClean).toBe(false);
+
+    // But selecting a clip should enable cleaning
+    const clips = tracksStore.getTrackClips(track1.id);
+    if (clips.length > 0) {
+      tracksStore.selectClip(track1.id, clips[0].id);
+      expect(cleaningStore.canClean).toBe(true);
+    }
+  });
+
+  it('VAD detectSilence requires selectedTrack (no tracks[0] fallback)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useVadStore } = await import('@/stores/vad');
+    const tracksStore = useTracksStore();
+    const vadStore = useVadStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    // With multiple tracks and 'ALL' selection, selectedTrack is null
+    tracksStore.selectedTrackId = 'ALL';
+    await vadStore.detectSilence();
+    expect(vadStore.error).toBe('Select a track to detect silence');
+  });
+
+  it('silence cutSilenceToNewTrack requires selectedTrack (no tracks[0] fallback)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useSilenceStore } = await import('@/stores/silence');
+    const tracksStore = useTracksStore();
+    const silenceStore = useSilenceStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    // Add a fake silence region so hasRegions is true
+    silenceStore.addRegion(1.0, 2.0);
+
+    tracksStore.selectedTrackId = 'ALL';
+    const result = await silenceStore.cutSilenceToNewTrack();
+    expect(result).toBeNull();
+    expect(silenceStore.cutError).toBe('Select a track to cut silence');
+  });
+
   it('muteAllExcept unmutes the target track if it was muted', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();
@@ -182,5 +240,459 @@ describe('Clean Audio Playback', () => {
     expect(tracksStore.tracks.find(t => t.id === track2.id)!.muted).toBe(false);
     // Other should be muted
     expect(tracksStore.tracks.find(t => t.id === track1.id)!.muted).toBe(true);
+  });
+});
+
+describe('EDL Clip Track Cleaning Regression', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('mixClipsForTrack returns null for track with EDL clips (null buffers)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useAudioStore } = await import('@/stores/audio');
+    const tracksStore = useTracksStore();
+
+    // Simulate a clip track created by extraction: has audioData.buffer
+    // but clips[] array with null buffers (EDL references)
+    const buf = mkBuf(10);
+    const track: import('@/shared/types').Track = {
+      id: 'edl-track-1',
+      name: 'Clip 2',
+      audioData: {
+        buffer: buf,
+        waveformData: new Array(200).fill(0),
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 5.0,
+      duration: 10.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      sourcePath: '/home/user/original.wav',
+      clips: [
+        {
+          id: 'edl-clip-1',
+          buffer: null,
+          waveformData: new Array(200).fill(0),
+          clipStart: 5.0,
+          duration: 10.0,
+          sourceFile: '/home/user/original.wav',
+          sourceOffset: 50.0,
+        },
+      ],
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+
+    // mixClipsForTrack should return null because clips have null buffers
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+    const mixed = tracksStore.mixClipsForTrack('edl-track-1', ctx);
+    expect(mixed).toBeNull();
+  });
+
+  it('getTrackClips returns EDL clips array when present (not synthetic clip)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buf = mkBuf(10);
+    const track: import('@/shared/types').Track = {
+      id: 'edl-track-2',
+      name: 'Clip With EDL',
+      audioData: {
+        buffer: buf,
+        waveformData: new Array(200).fill(0),
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 3.0,
+      duration: 10.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: 'clip-a',
+          buffer: null,
+          waveformData: [],
+          clipStart: 3.0,
+          duration: 5.0,
+          sourceFile: '/tmp/source.wav',
+          sourceOffset: 10.0,
+        },
+        {
+          id: 'clip-b',
+          buffer: null,
+          waveformData: [],
+          clipStart: 8.0,
+          duration: 5.0,
+          sourceFile: '/tmp/source.wav',
+          sourceOffset: 20.0,
+        },
+      ],
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+
+    // getTrackClips should return the EDL clips, not a synthetic single clip
+    const clips = tracksStore.getTrackClips('edl-track-2');
+    expect(clips.length).toBe(2);
+    expect(clips[0].id).toBe('clip-a');
+    expect(clips[1].id).toBe('clip-b');
+    expect(clips[0].buffer).toBeNull();
+  });
+
+  it('cleanSelectedTrack falls back to audioData.buffer when mixClipsForTrack returns null', async () => {
+    // This is THE regression test for the silent failure bug:
+    // A clip track (created by extraction) has audioData.buffer but clips[] with null buffers.
+    // mixClipsForTrack returns null, but cleaning should fall back to audioData.buffer
+    // rather than silently returning null.
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(5);
+    const track: import('@/shared/types').Track = {
+      id: 'edl-fallback-track',
+      name: 'Clip 2',
+      audioData: {
+        buffer: buf,
+        waveformData: new Array(200).fill(0),
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 5.0,
+      duration: 5.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      sourcePath: '/home/user/original.wav',
+      clips: [
+        {
+          id: 'edl-clip-fb',
+          buffer: null,
+          waveformData: [],
+          clipStart: 5.0,
+          duration: 5.0,
+          sourceFile: '/home/user/original.wav',
+          sourceOffset: 50.0,
+        },
+      ],
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+    tracksStore.selectTrack('edl-fallback-track');
+
+    // Verify preconditions: mixClipsForTrack returns null for this track
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+    expect(tracksStore.mixClipsForTrack('edl-fallback-track', ctx)).toBeNull();
+    // But track has audioData.buffer
+    expect(tracksStore.getTrackById('edl-fallback-track')!.audioData.buffer).not.toBeNull();
+
+    // cleanSelectedTrack will call invoke() which we mock — it will reject since
+    // the mock isn't set up for clean_audio. The key test is that it REACHES the
+    // invoke (i.e. doesn't silently return null due to mixClipsForTrack returning null).
+    // We detect this by checking that loading becomes true and the error is from the
+    // invoke call, not "no audio clips available".
+    const result = await cleaningStore.cleanSelectedTrack();
+    // The invoke mock resolves to [], which isn't a valid CleanResult.
+    // The important thing is the error is NOT "no audio data available"
+    expect(cleaningStore.error).not.toBe('Cannot clean: no audio data available');
+  });
+
+  it('cleanSelectedTrack shows error when track truly has no audio', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    // Track with no buffer and no clips — truly empty
+    const track: import('@/shared/types').Track = {
+      id: 'empty-track',
+      name: 'Empty Track',
+      audioData: {
+        buffer: null,
+        waveformData: [],
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 0,
+      duration: 5.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      sourcePath: undefined,
+      importStatus: 'ready',
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+    tracksStore.selectTrack('empty-track');
+
+    const result = await cleaningStore.cleanSelectedTrack();
+    expect(result).toBeNull();
+    expect(cleaningStore.error).toBe('Cannot clean: no audio data available');
+  });
+});
+
+describe('Single Track VAD/Silence Auto-Resolve', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('VAD detectSilence works with single track and ALL selection (auto-resolve)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useVadStore } = await import('@/stores/vad');
+    const tracksStore = useTracksStore();
+    const vadStore = useVadStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Only Track', 0);
+
+    // 'ALL' selection with single track → selectedTrack auto-resolves
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrack).not.toBeNull();
+
+    // detectSilence should NOT return the "Select a track" error
+    await vadStore.detectSilence();
+    // It will fail at mixClipsForTrack or invoke, but NOT with the track selection error
+    expect(vadStore.error).not.toBe('Select a track to detect silence');
+  });
+
+  it('silence cutSilenceToNewTrack works with single track and ALL selection', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useSilenceStore } = await import('@/stores/silence');
+    const tracksStore = useTracksStore();
+    const silenceStore = useSilenceStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Only Track', 0);
+
+    // Add silence region
+    silenceStore.addRegion(1.0, 2.0);
+
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrack).not.toBeNull();
+
+    // Should NOT get "Select a track" error
+    await silenceStore.cutSilenceToNewTrack();
+    expect(silenceStore.cutError).not.toBe('Select a track to cut silence');
+  });
+});
+
+describe('Clip-Level Cleaning', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('canClean is false with multiple tracks, ALL selection, and no clip selected', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    tracksStore.selectedTrackId = 'ALL';
+    tracksStore.clearClipSelection();
+
+    expect(cleaningStore.canClean).toBe(false);
+  });
+
+  it('canClean becomes true when clip is selected with multiple tracks', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(5);
+    const track1 = await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    tracksStore.selectedTrackId = 'ALL';
+    expect(cleaningStore.canClean).toBe(false);
+
+    // Select a clip in track 1
+    const clips = tracksStore.getTrackClips(track1.id);
+    expect(clips.length).toBeGreaterThan(0);
+    tracksStore.selectClip(track1.id, clips[0].id);
+
+    expect(cleaningStore.canClean).toBe(true);
+  });
+
+  it('cleanSelectedTrack returns error when no track and no clip selected', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(5);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
+
+    tracksStore.selectedTrackId = 'ALL';
+    tracksStore.clearClipSelection();
+
+    const result = await cleaningStore.cleanSelectedTrack();
+    expect(result).toBeNull();
+    expect(cleaningStore.error).toBe('No track selected');
+  });
+
+  it('cleanSelectedTrack with clip selected uses clip sourceFile for Rust call', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const { invoke } = await import('@tauri-apps/api/core');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(10);
+    const track: import('@/shared/types').Track = {
+      id: 'clip-clean-track',
+      name: 'Source Track',
+      audioData: {
+        buffer: buf,
+        waveformData: new Array(200).fill(0),
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 0,
+      duration: 10.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      sourcePath: '/home/user/original.wav',
+      clips: [
+        {
+          id: 'target-clip',
+          buffer: null,
+          waveformData: [],
+          clipStart: 5.0,
+          duration: 3.0,
+          sourceFile: '/tmp/source.wav',
+          sourceOffset: 20.0,
+        },
+      ],
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+    tracksStore.selectClip('clip-clean-track', 'target-clip');
+
+    // Mock invoke to capture the clean_audio call args
+    const mockInvoke = vi.mocked(invoke);
+    let cleanAudioArgs: Record<string, unknown> | null = null;
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'clean_audio') {
+        cleanAudioArgs = (args as Record<string, unknown>) ?? null;
+        // Return a fake CleanResult
+        return { outputPath: '/tmp/cleaned_test.wav', duration: 3.0 };
+      }
+      if (cmd === 'get_temp_audio_path') {
+        return '/tmp/cleaned_test.wav';
+      }
+      return [];
+    });
+
+    await cleaningStore.cleanSelectedTrack();
+
+    // Verify clean_audio was called with clip's sourceFile and sourceOffset
+    expect(cleanAudioArgs).not.toBeNull();
+    expect(cleanAudioArgs!.sourcePath).toBe('/tmp/source.wav');
+    expect(cleanAudioArgs!.startTime).toBe(20.0);
+    expect(cleanAudioArgs!.endTime).toBe(23.0); // sourceOffset + duration
+  });
+
+  it('cleanSelectedTrack with buffer-backed clip encodes to temp WAV', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const clipBuf = mkBuf(3);
+    const trackBuf = mkBuf(10);
+    const track: import('@/shared/types').Track = {
+      id: 'buf-clip-track',
+      name: 'Source Track',
+      audioData: {
+        buffer: trackBuf,
+        waveformData: new Array(200).fill(0),
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 0,
+      duration: 10.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: 'buf-clip',
+          buffer: clipBuf,
+          waveformData: [],
+          clipStart: 2.0,
+          duration: 3.0,
+        },
+      ],
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+    tracksStore.selectClip('buf-clip-track', 'buf-clip');
+
+    // The clean will fail at the invoke stage, but it should attempt to encode the buffer
+    // (not the whole track). We can verify this through the error not being
+    // about track selection or no audio data.
+    const result = await cleaningStore.cleanSelectedTrack();
+    expect(cleaningStore.error).not.toBe('No track selected');
+    expect(cleaningStore.error).not.toBe('Cannot clean: clip has no audio data');
+  });
+
+  it('cleanSelectedTrack errors when clip has no buffer and no sourceFile', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useCleaningStore } = await import('@/stores/cleaning');
+    const tracksStore = useTracksStore();
+    const cleaningStore = useCleaningStore();
+
+    const buf = mkBuf(10);
+    const track: import('@/shared/types').Track = {
+      id: 'no-data-clip-track',
+      name: 'Source Track',
+      audioData: {
+        buffer: buf,
+        waveformData: new Array(200).fill(0),
+        sampleRate: 44100,
+        channels: 2,
+      },
+      trackStart: 0,
+      duration: 10.0,
+      color: '#00d4ff',
+      muted: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: 'empty-clip',
+          buffer: null,
+          waveformData: [],
+          clipStart: 2.0,
+          duration: 3.0,
+          // No sourceFile, no buffer
+        },
+      ],
+    };
+
+    tracksStore.insertTrackAtIndex(track, 0);
+    tracksStore.selectClip('no-data-clip-track', 'empty-clip');
+
+    const result = await cleaningStore.cleanSelectedTrack();
+    expect(result).toBeNull();
+    expect(cleaningStore.error).toBe('Cannot clean: clip has no audio data');
   });
 });

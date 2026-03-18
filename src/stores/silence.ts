@@ -283,10 +283,9 @@ export const useSilenceStore = defineStore('silence', () => {
       return null;
     }
 
-    // Use selected track or first track
-    const sourceTrack = tracksStore.selectedTrack || tracksStore.tracks[0];
+    const sourceTrack = tracksStore.selectedTrack;
     if (!sourceTrack) {
-      cutError.value = 'No track selected';
+      cutError.value = 'Select a track to cut silence';
       return null;
     }
 

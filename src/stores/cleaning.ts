@@ -38,7 +38,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
   const presets = computed(() => CLEANING_PRESETS);
 
   const canClean = computed(() => {
-    return tracksStore.hasAudio && tracksStore.selectedTrack !== null;
+    return tracksStore.hasAudio && (tracksStore.selectedTrack !== null || tracksStore.selectedClip !== null);
   });
 
   function setOptions(newOptions: Partial<CleaningOptions>): void {
@@ -62,7 +62,10 @@ export const useCleaningStore = defineStore('cleaning', () => {
 
 
   async function cleanSelectedTrack(): Promise<Track | null> {
-    if (!tracksStore.hasAudio || !tracksStore.selectedTrack) {
+    // Check for selected clip first (clip-level cleaning)
+    const selectedClipInfo = tracksStore.selectedClip;
+
+    if (!tracksStore.hasAudio || (!tracksStore.selectedTrack && !selectedClipInfo)) {
       error.value = 'No track selected';
       return null;
     }
@@ -74,28 +77,54 @@ export const useCleaningStore = defineStore('cleaning', () => {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Clean track');
 
-    const sourceTrack = tracksStore.selectedTrack;
+    const sourceTrack = selectedClipInfo
+      ? tracksStore.getTrackById(selectedClipInfo.trackId)!
+      : tracksStore.selectedTrack!;
+    const cleaningClip = selectedClipInfo?.clip ?? null;
 
     loading.value = true;
     error.value = null;
 
     try {
-      console.log('[Clean] Starting clean for track:', sourceTrack.name);
+      console.log('[Clean] Starting clean for', cleaningClip ? `clip in track: ${sourceTrack.name}` : `track: ${sourceTrack.name}`);
 
       let sourcePath: string;
       let cleanDuration: number;
+      let cleanStartTime = 0;
 
-      // For tracks with sourcePath but no AudioBuffer (large files),
-      // pass sourcePath directly to Rust — no need to encode to temp WAV
-      if (sourceTrack.sourcePath && !sourceTrack.audioData.buffer) {
+      if (cleaningClip) {
+        // Clip-level cleaning
+        if (cleaningClip.sourceFile) {
+          sourcePath = cleaningClip.sourceFile;
+          cleanStartTime = cleaningClip.sourceOffset ?? 0;
+          cleanDuration = cleaningClip.duration;
+          console.log('[Clean] Using clip sourceFile:', sourcePath, 'offset:', cleanStartTime);
+        } else if (cleaningClip.buffer) {
+          const wavData = await encodeWavFloat32InWorker(cleaningClip.buffer);
+          sourcePath = await writeTempFile(`clean_clip_${Date.now()}.wav`, wavData);
+          cleanDuration = cleaningClip.duration;
+          console.log('[Clean] Using clip buffer, temp file:', sourcePath);
+        } else {
+          error.value = 'Cannot clean: clip has no audio data';
+          loading.value = false;
+          return null;
+        }
+      } else if (sourceTrack.sourcePath && !sourceTrack.audioData.buffer) {
+        // For tracks with sourcePath but no AudioBuffer (large files),
+        // pass sourcePath directly to Rust — no need to encode to temp WAV
         sourcePath = sourceTrack.sourcePath;
         cleanDuration = sourceTrack.duration;
         console.log('[Clean] Using source path directly (large file):', sourcePath);
       } else {
         // Get current buffer state (clips mixed together)
-        const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext());
+        // mixClipsForTrack can return null when track has EDL clips with null buffers
+        // (e.g. clip tracks created by extraction). Fall back to audioData.buffer.
+        const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext())
+          ?? sourceTrack.audioData.buffer;
         if (!mixedBuffer) {
-          error.value = 'Cannot clean: no audio clips available';
+          error.value = 'Cannot clean: no audio data available';
+          console.log('[Clean] No audio data available for track:', sourceTrack.name);
+          useUIStore().showToast('Cannot clean: no audio data available', 'error');
           loading.value = false;
           return null;
         }
@@ -112,8 +141,8 @@ export const useCleaningStore = defineStore('cleaning', () => {
       const outputPath = await invoke<string>('get_temp_audio_path');
       console.log('[Clean] Temp output path:', outputPath);
 
-      // Collect silence segments from VAD if available
-      const silenceSegments = vadStore.silenceSegments.map((seg) => ({
+      // Collect silence segments from VAD if available (only for whole-track cleaning)
+      const silenceSegments = cleaningClip ? [] : vadStore.silenceSegments.map((seg) => ({
         start: seg.start,
         end: seg.end,
       }));
@@ -143,8 +172,8 @@ export const useCleaningStore = defineStore('cleaning', () => {
       const result = await invoke<CleanResult>('clean_audio', {
         sourcePath,
         outputPath,
-        startTime: 0,
-        endTime: cleanDuration,
+        startTime: cleanStartTime,
+        endTime: cleanStartTime + cleanDuration,
         options: backendOptions,
         silenceSegments: silenceSegments.length > 0 ? silenceSegments : null,
       });
@@ -159,12 +188,13 @@ export const useCleaningStore = defineStore('cleaning', () => {
 
       console.log('[Clean] Creating new track...');
       // Create a new track for the cleaned audio, with sourcePath so Rust playback works
-      const cleanedName = `Cleaned ${sourceTrack.name}`;
+      const cleanedName = cleaningClip ? `Cleaned Clip` : `Cleaned ${sourceTrack.name}`;
+      const trackStart = cleaningClip ? cleaningClip.clipStart : 0;
       const cleanedTrack = await tracksStore.createTrackFromBuffer(
         cleanedAudioEntry.buffer,
         cleanedAudioEntry.waveformData,
         cleanedName,
-        0,
+        trackStart,
         result.outputPath
       );
       console.log('[Clean] Created track:', cleanedTrack.id, cleanedTrack.name);
@@ -191,7 +221,8 @@ export const useCleaningStore = defineStore('cleaning', () => {
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);
       error.value = errorMsg;
-      console.error('[Clean] Cleaning error:', e);
+      console.log('[Clean] Cleaning error:', errorMsg);
+      useUIStore().showToast(`Cleaning failed: ${errorMsg}`, 'error');
       return null;
     } finally {
       loading.value = false;
