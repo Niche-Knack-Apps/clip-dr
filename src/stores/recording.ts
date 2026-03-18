@@ -1010,12 +1010,23 @@ export const useRecordingStore = defineStore('recording', () => {
     error.value = null;
     try {
       // Set recording epoch on first session start (for timeline sync)
-      // Use current playhead position so recording aligns with where the user is working,
-      // not the end of the timeline
+      // Base position respects placement setting
       if (recordingEpoch.value === null) {
         recordingEpoch.value = Date.now();
-        const playbackStore = usePlaybackStore();
-        recordingBasePosition.value = playbackStore.currentTime;
+        switch (placement.value) {
+          case 'zero':
+            recordingBasePosition.value = 0;
+            break;
+          case 'playhead': {
+            const playbackStore = usePlaybackStore();
+            recordingBasePosition.value = playbackStore.currentTime;
+            break;
+          }
+          case 'append':
+          default:
+            recordingBasePosition.value = tracksStore.timelineDuration;
+            break;
+        }
       }
 
       const outputDir = await settingsStore.getProjectFolder();
