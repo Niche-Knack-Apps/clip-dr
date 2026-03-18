@@ -754,7 +754,7 @@ onUnmounted(() => {
       <div
         v-for="mark in trackTimemarks"
         :key="mark.id"
-        class="absolute top-0 bottom-0 z-10 cursor-grab group/tm"
+        class="absolute top-0 bottom-0 z-[15] cursor-grab group/tm"
         :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
         :title="mark.label"
         @mousedown="handleTimemarkMouseDown(mark.id, $event)"
@@ -790,7 +790,7 @@ onUnmounted(() => {
       <!-- Timemark popup (delete / rename) -->
       <div
         v-if="timemarkPopup"
-        class="absolute z-30 bg-gray-800 border border-gray-600 rounded shadow-lg p-2 flex flex-col gap-1.5"
+        class="absolute z-[35] bg-gray-800 border border-gray-600 rounded shadow-lg p-2 flex flex-col gap-1.5"
         :style="{ left: `${timemarkPopup.x}px`, top: '2px', transform: 'translateX(-50%)' }"
         @mousedown.stop
         @click.stop

@@ -300,15 +300,15 @@ onUnmounted(() => {
 
     <!-- Drag strip to pan zoom window -->
     <div
-      class="h-4 flex items-center justify-center select-none bg-gray-800/50"
-      :class="isDragPanning ? 'cursor-grabbing' : 'cursor-grab'"
+      class="h-5 flex items-center justify-center select-none bg-gray-800"
+      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
       @touchstart.passive="handleDragBarTouchStart"
     >
-      <div class="flex flex-col gap-[2px] opacity-40">
-        <div class="w-6 h-px bg-gray-400" />
-        <div class="w-6 h-px bg-gray-400" />
-        <div class="w-6 h-px bg-gray-400" />
+      <div class="flex items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>
+        <div class="w-4 h-1 rounded-full bg-current" />
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7" /></svg>
       </div>
     </div>
 

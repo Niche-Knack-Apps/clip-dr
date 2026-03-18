@@ -899,15 +899,13 @@ function handleClipSelect(trackId: string, clipId: string) {
     <!-- Drag strip to pan zoom window (horizontal only) -->
     <div
       class="h-5 flex items-center justify-center select-none shrink-0 border-b border-gray-700/60"
-      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
+      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
     >
-      <div class="flex gap-1 opacity-40">
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
+      <div class="flex items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>
+        <div class="w-4 h-1 rounded-full bg-current" />
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7" /></svg>
       </div>
     </div>
 
@@ -1067,15 +1065,13 @@ function handleClipSelect(trackId: string, clipId: string) {
     <!-- Right scroll strip (vertical scroll via drag) -->
     <div
       class="w-5 flex items-center justify-center select-none shrink-0 border-l border-gray-700/60"
-      :class="isRightDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
+      :class="isRightDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ns-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleRightBarMouseDown"
     >
-      <div class="flex flex-col gap-1 opacity-40">
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
+      <div class="flex flex-col items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7" /></svg>
+        <div class="w-1 h-4 rounded-full bg-current" />
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7" /></svg>
       </div>
     </div>
     </div>
@@ -1083,15 +1079,13 @@ function handleClipSelect(trackId: string, clipId: string) {
     <!-- Bottom scroll strip (horizontal scroll via drag) -->
     <div
       class="h-5 flex items-center justify-center select-none shrink-0 border-t border-gray-700/60"
-      :class="isBottomDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
+      :class="isBottomDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleBottomBarMouseDown"
     >
-      <div class="flex gap-1 opacity-40">
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
-        <div class="w-1 h-1 rounded-full bg-gray-400" />
+      <div class="flex items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>
+        <div class="w-4 h-1 rounded-full bg-current" />
+        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7" /></svg>
       </div>
     </div>
 
