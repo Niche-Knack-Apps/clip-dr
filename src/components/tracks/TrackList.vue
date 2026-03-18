@@ -12,7 +12,7 @@ import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH, MIN_SELECTION_DURATION, TRACK_HEIGHT } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
 import type { ExportProfile } from '@/shared/types';
-import scalpelIcon from '@/assets/scalpel.svg';
+
 
 const audioStore = useAudioStore();
 const uiStore = useUIStore();
@@ -1019,7 +1019,6 @@ function handleClipSelect(trackId: string, clipId: string) {
           v-if="!tracks.length"
           class="flex flex-col items-center justify-center h-full min-h-[120px] gap-4"
         >
-          <img :src="scalpelIcon" alt="" class="invert opacity-[0.06] h-48 object-contain" />
           <div
             class="w-full px-8 text-gray-700/20"
             style="mask-image: linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%); -webkit-mask-image: linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)"

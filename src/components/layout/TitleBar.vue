@@ -20,12 +20,12 @@ function close() {
 <template>
   <div
     data-tauri-drag-region
-    class="h-9 bg-gray-900 flex items-center justify-between px-2 select-none shrink-0"
+    class="h-9 bg-gray-900 flex items-center justify-between px-2 select-none shrink-0 border-b border-gray-700/40"
   >
     <!-- Left: icon + title -->
-    <div class="flex items-center gap-0" data-tauri-drag-region>
-      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 object-contain py-1 ml-1" style="height: 36px; width: auto" />
-      <span class="font-semibold text-gray-400" style="font-size: 36px; line-height: 36px; text-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 -1px 0 rgba(0,0,0,0.7)">Clip Dr.</span>
+    <div class="flex items-end gap-0" data-tauri-drag-region>
+      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 object-contain ml-1 pt-1 pb-1" style="height: 36px; width: auto" />
+      <span class="font-semibold text-gray-400 pb-1" style="font-size: 18px; line-height: 1; text-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 -1px 0 rgba(0,0,0,0.7)">Clip Dr.</span>
     </div>
 
     <!-- Right: window controls -->
