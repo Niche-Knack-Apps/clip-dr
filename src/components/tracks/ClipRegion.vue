@@ -373,7 +373,7 @@ function handleMouseDown(event: MouseEvent) {
     <!-- Left trim handle (visible on hover when clip is wide enough and trimmable) -->
     <div
       v-if="isTrimmable && width >= EDGE_ZONE_PX * 2"
-      class="absolute top-0 bottom-0 left-0 flex items-center justify-center cursor-col-resize opacity-0 hover:opacity-100 transition-opacity pointer-events-none group-hover/clip:opacity-60"
+      class="absolute top-0 bottom-0 left-0 flex items-center justify-center cursor-ew-resize opacity-0 hover:opacity-100 transition-opacity group-hover/clip:opacity-60"
       :style="{ width: `${EDGE_ZONE_PX}px` }"
     >
       <div
@@ -385,7 +385,7 @@ function handleMouseDown(event: MouseEvent) {
     <!-- Right trim handle (visible on hover when clip is wide enough and trimmable) -->
     <div
       v-if="isTrimmable && width >= EDGE_ZONE_PX * 2"
-      class="absolute top-0 bottom-0 right-0 flex items-center justify-center cursor-col-resize opacity-0 hover:opacity-100 transition-opacity pointer-events-none group-hover/clip:opacity-60"
+      class="absolute top-0 bottom-0 right-0 flex items-center justify-center cursor-ew-resize opacity-0 hover:opacity-100 transition-opacity group-hover/clip:opacity-60"
       :style="{ width: `${EDGE_ZONE_PX}px` }"
     >
       <div

@@ -259,8 +259,29 @@ describe('Recording Store - State Management', () => {
     const { useRecordingStore } = await import('@/stores/recording');
     const store = useRecordingStore();
 
-    expect(store.placement).toBe('append');
+    expect(store.placement).toBe('zero');
     store.setPlacement('playhead');
     expect(store.placement).toBe('playhead');
+  });
+
+  it('default placement is zero', async () => {
+    const { useRecordingStore } = await import('@/stores/recording');
+    const store = useRecordingStore();
+
+    expect(store.placement).toBe('zero');
+  });
+
+  it('setPlacement cycles through all modes', async () => {
+    const { useRecordingStore } = await import('@/stores/recording');
+    const store = useRecordingStore();
+
+    store.setPlacement('append');
+    expect(store.placement).toBe('append');
+
+    store.setPlacement('playhead');
+    expect(store.placement).toBe('playhead');
+
+    store.setPlacement('zero');
+    expect(store.placement).toBe('zero');
   });
 });

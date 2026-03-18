@@ -168,7 +168,7 @@ export const useRecordingStore = defineStore('recording', () => {
   const systemAudioProbing = ref(false);
 
   // Track placement setting: where new recordings appear on timeline
-  const placement = ref<TrackPlacement>('append');
+  const placement = ref<TrackPlacement>('zero');
 
   // Scheduled recording
   const schedule = ref<ScheduledRecording | null>(null);
@@ -629,7 +629,24 @@ export const useRecordingStore = defineStore('recording', () => {
       // Adjust track start for pre-record buffer (ring buffer drained at record start)
       const preRecordOffset = result.pre_record_seconds || 0;
       const playbackStore = usePlaybackStore();
-      const baseStart = trackStart ?? playbackStore.currentTime;
+      // Resolve base start from placement mode (only when no explicit trackStart passed)
+      let baseStart: number;
+      if (trackStart !== undefined) {
+        baseStart = trackStart;
+      } else {
+        switch (placement.value) {
+          case 'zero':
+            baseStart = 0;
+            break;
+          case 'playhead':
+            baseStart = playbackStore.currentTime;
+            break;
+          case 'append':
+          default:
+            baseStart = tracksStore.timelineDuration;
+            break;
+        }
+      }
       const effectiveStart = Math.max(0, baseStart - preRecordOffset);
       if (preRecordOffset > 0) {
         console.log(`[Recording] Pre-record buffer: ${preRecordOffset.toFixed(2)}s, ` +

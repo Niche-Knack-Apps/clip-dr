@@ -9,7 +9,7 @@ import { useExportStore } from '@/stores/export';
 import { useSettingsStore } from '@/stores/settings';
 import { useSelectionStore } from '@/stores/selection';
 import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
-import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH, MIN_SELECTION_DURATION } from '@/shared/constants';
+import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH, MIN_SELECTION_DURATION, TRACK_HEIGHT } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
 import type { ExportProfile } from '@/shared/types';
 
@@ -63,6 +63,9 @@ const clipDragTargetTrackId = ref<string | null>(null);
 const clipDragPreviewStart = ref<number>(0);
 const clipDragStartY = ref(0);
 const CROSS_TRACK_THRESHOLD = 20; // pixels of vertical movement to trigger cross-track intent
+
+// Cached scroll container rect for ghost positioning (captured at drag start)
+const dragScrollContainerRect = ref<DOMRect | null>(null);
 
 // Snap visualization state
 const activeSnapTarget = ref<{ time: number } | null>(null);
@@ -153,7 +156,8 @@ function handleWheel(event: WheelEvent) {
   // Shift+wheel → vertical scroll through tracks
   if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
     if (scrollContainerRef.value) {
-      scrollContainerRef.value.scrollTop += event.deltaY;
+      const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+      scrollContainerRef.value.scrollTop += delta;
       event.preventDefault();
     }
     return;
@@ -403,6 +407,9 @@ function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: numb
   dragGhostMouseOffsetX.value = mouseOffsetX;
   clipDragStartY.value = event?.clientY ?? 0;
 
+  // Cache scroll container rect for ghost lane snapping
+  dragScrollContainerRect.value = scrollContainerRef.value?.getBoundingClientRect() ?? null;
+
   // Start floating ghost tracking
   dragGhostActive.value = true;
   document.addEventListener('mousemove', trackDragMouse);
@@ -461,6 +468,7 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
   clipDraggingTrackId.value = null;
   clipDraggingClipId.value = null;
   clipDragTargetTrackId.value = null;
+  dragScrollContainerRect.value = null;
 }
 
 // Measure actual rendered width of the content wrapper
@@ -545,7 +553,19 @@ const ghostWidthPx = computed(() => {
 });
 
 const ghostLeft = computed(() => dragGhostMouseX.value - dragGhostMouseOffsetX.value);
-const ghostTop = computed(() => dragGhostMouseY.value - 26); // center vertically (52px / 2)
+const ghostTop = computed(() => {
+  const targetId = clipDragTargetTrackId.value ?? clipDraggingTrackId.value;
+  const containerRect = dragScrollContainerRect.value;
+  if (targetId && containerRect && scrollContainerRef.value) {
+    const trackIndex = tracks.value.findIndex(t => t.id === targetId);
+    if (trackIndex >= 0) {
+      const scrollTop = scrollContainerRef.value.scrollTop;
+      // Track Y in viewport = container top + (index * height) - scroll offset + 1px inset
+      return containerRect.top + (trackIndex * TRACK_HEIGHT) - scrollTop + 1;
+    }
+  }
+  return dragGhostMouseY.value - (TRACK_HEIGHT / 2); // fallback
+});
 
 const ghostBgColor = computed(() => {
   const track = draggingTrack.value;
@@ -735,8 +755,8 @@ function handleClipSelect(trackId: string, clipId: string) {
 
     <!-- Drag strip to pan zoom window -->
     <div
-      class="h-5 flex items-center justify-between px-2 select-none shrink-0 border-b border-gray-700/60"
-      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-750/70 hover:bg-cyan-900/30'"
+      class="h-6 flex items-center justify-between px-2 select-none shrink-0 border-b border-gray-700/60 border-t border-t-gray-600/40"
+      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/50 hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
     >
       <div class="flex flex-col gap-[2px] opacity-70">
@@ -868,7 +888,7 @@ function handleClipSelect(trackId: string, clipId: string) {
         left: `${ghostLeft}px`,
         top: `${ghostTop}px`,
         width: `${ghostWidthPx}px`,
-        height: '52px',
+        height: `${TRACK_HEIGHT - 2}px`,
         opacity: 0.4,
         backgroundColor: ghostBgColor,
         border: `1px solid ${ghostBorderColor}`,
