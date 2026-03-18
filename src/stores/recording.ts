@@ -1126,7 +1126,9 @@ export const useRecordingStore = defineStore('recording', () => {
       await new Promise(r => setTimeout(r, 200));
 
       // Compute timeline position: base + offset from epoch
-      const offsetSeconds = (epochVal !== null)
+      // For 'zero' placement, skip the epoch offset — the user wants t=0 regardless
+      // of backend startup latency. The offset only matters for multi-source sync.
+      const offsetSeconds = (epochVal !== null && placement.value !== 'zero')
         ? (sessionStartTime - epochVal) / 1000
         : 0;
       const trackStart = (basePos ?? tracksStore.timelineDuration) + offsetSeconds;
