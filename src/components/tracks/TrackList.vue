@@ -453,9 +453,10 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
     tracksStore.finalizeClipPositions(trackId);
   }
 
-  // Stop floating ghost tracking
+  // Stop floating ghost tracking and auto-scroll
   dragGhostActive.value = false;
   activeSnapTarget.value = null;
+  stopAutoScroll();
   document.removeEventListener('mousemove', trackDragMouse);
   if (dragGhostRafId !== null) {
     cancelAnimationFrame(dragGhostRafId);
@@ -516,6 +517,7 @@ onUnmounted(() => {
   if (zoomRafId !== null) {
     cancelAnimationFrame(zoomRafId);
   }
+  stopAutoScroll();
 });
 
 // Ghost clip for cross-track drag preview
@@ -588,8 +590,51 @@ const ghostWaveformColor = computed(() => {
   return `${track.color}80`;
 });
 
+// Auto-scroll during clip drag when mouse is near top/bottom edge of scroll container
+const AUTO_SCROLL_ZONE = 40; // px from edge
+const AUTO_SCROLL_SPEED = 6; // px per frame
+let autoScrollRafId: number | null = null;
+let autoScrollMouseY = 0;
+
+function startAutoScroll() {
+  if (autoScrollRafId !== null) return;
+  autoScrollRafId = requestAnimationFrame(autoScrollTick);
+}
+
+function autoScrollTick() {
+  autoScrollRafId = null;
+  const container = scrollContainerRef.value;
+  if (!container || !dragGhostActive.value) return;
+
+  const rect = container.getBoundingClientRect();
+  let scrolled = false;
+
+  if (autoScrollMouseY < rect.top + AUTO_SCROLL_ZONE && container.scrollTop > 0) {
+    container.scrollTop -= AUTO_SCROLL_SPEED;
+    scrolled = true;
+  } else if (autoScrollMouseY > rect.bottom - AUTO_SCROLL_ZONE &&
+             container.scrollTop < container.scrollHeight - container.clientHeight) {
+    container.scrollTop += AUTO_SCROLL_SPEED;
+    scrolled = true;
+  }
+
+  if (scrolled) {
+    autoScrollRafId = requestAnimationFrame(autoScrollTick);
+  }
+}
+
+function stopAutoScroll() {
+  if (autoScrollRafId !== null) {
+    cancelAnimationFrame(autoScrollRafId);
+    autoScrollRafId = null;
+  }
+}
+
 // Mouse tracking for floating ghost
 function trackDragMouse(event: MouseEvent) {
+  autoScrollMouseY = event.clientY;
+  startAutoScroll();
+
   if (dragGhostRafId !== null) return;
   dragGhostRafId = requestAnimationFrame(() => {
     dragGhostRafId = null;
@@ -930,9 +975,48 @@ function handleClipSelect(trackId: string, clipId: string) {
 
         <div
           v-if="!tracks.length"
-          class="flex items-center justify-center h-16 text-xs text-gray-600"
+          class="flex flex-col items-center justify-center h-full min-h-[120px] gap-3"
         >
-          No tracks - Import or record audio
+          <svg class="w-56 h-14 text-gray-700/30" viewBox="0 0 224 56" fill="currentColor">
+            <rect x="2" y="24" width="3" height="8" rx="1" />
+            <rect x="8" y="20" width="3" height="16" rx="1" />
+            <rect x="14" y="16" width="3" height="24" rx="1" />
+            <rect x="20" y="12" width="3" height="32" rx="1" />
+            <rect x="26" y="18" width="3" height="20" rx="1" />
+            <rect x="32" y="8" width="3" height="40" rx="1" />
+            <rect x="38" y="14" width="3" height="28" rx="1" />
+            <rect x="44" y="4" width="3" height="48" rx="1" />
+            <rect x="50" y="10" width="3" height="36" rx="1" />
+            <rect x="56" y="16" width="3" height="24" rx="1" />
+            <rect x="62" y="6" width="3" height="44" rx="1" />
+            <rect x="68" y="12" width="3" height="32" rx="1" />
+            <rect x="74" y="2" width="3" height="52" rx="1" />
+            <rect x="80" y="8" width="3" height="40" rx="1" />
+            <rect x="86" y="14" width="3" height="28" rx="1" />
+            <rect x="92" y="6" width="3" height="44" rx="1" />
+            <rect x="98" y="10" width="3" height="36" rx="1" />
+            <rect x="104" y="4" width="3" height="48" rx="1" />
+            <rect x="110" y="12" width="3" height="32" rx="1" />
+            <rect x="116" y="2" width="3" height="52" rx="1" />
+            <rect x="122" y="8" width="3" height="40" rx="1" />
+            <rect x="128" y="14" width="3" height="28" rx="1" />
+            <rect x="134" y="6" width="3" height="44" rx="1" />
+            <rect x="140" y="10" width="3" height="36" rx="1" />
+            <rect x="146" y="4" width="3" height="48" rx="1" />
+            <rect x="152" y="12" width="3" height="32" rx="1" />
+            <rect x="158" y="8" width="3" height="40" rx="1" />
+            <rect x="164" y="16" width="3" height="24" rx="1" />
+            <rect x="170" y="10" width="3" height="36" rx="1" />
+            <rect x="176" y="14" width="3" height="28" rx="1" />
+            <rect x="182" y="18" width="3" height="20" rx="1" />
+            <rect x="188" y="12" width="3" height="32" rx="1" />
+            <rect x="194" y="16" width="3" height="24" rx="1" />
+            <rect x="200" y="20" width="3" height="16" rx="1" />
+            <rect x="206" y="22" width="3" height="12" rx="1" />
+            <rect x="212" y="24" width="3" height="8" rx="1" />
+            <rect x="218" y="25" width="3" height="6" rx="1" />
+          </svg>
+          <span class="text-xs text-gray-600">Import or record audio</span>
         </div>
       </div>
     </div>
