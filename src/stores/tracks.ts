@@ -1623,6 +1623,36 @@ export const useTracksStore = defineStore('tracks', () => {
     minTimelineDuration.value = 0;
   }
 
+  /**
+   * Promote a single-buffer track to use explicit clips array.
+   * Returns the new clip ID, or null if promotion failed.
+   * If already promoted (track.clips exists), returns the first clip ID.
+   */
+  function promoteToExplicitClips(trackId: string): string | null {
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return null;
+    const track = tracks.value[trackIndex];
+    if (track.clips && track.clips.length > 0) return track.clips[0].id;
+
+    const clipId = generateId();
+    const clip: TrackClip = {
+      id: clipId,
+      buffer: track.audioData.buffer,
+      waveformData: track.audioData.waveformData,
+      clipStart: track.trackStart,
+      duration: track.duration,
+      sourceFile: track.cachedAudioPath || track.sourcePath,
+      sourceOffset: 0,
+      sourceIn: 0,
+      sourceDuration: track.audioData.sourceDuration ?? track.duration,
+    };
+
+    tracks.value[trackIndex] = { ...track, clips: [clip] };
+    triggerRef(tracks);
+    bumpSyncEpoch();
+    return clipId;
+  }
+
   // Minimum clip duration for edge trimming (prevents clips from collapsing to zero)
   const MIN_CLIP_DURATION = 0.01;
 
@@ -2899,6 +2929,7 @@ export const useTracksStore = defineStore('tracks', () => {
     extractRegionFromAllTracks,
     extractRegionViaRust,
     finalizeClipPositions,
+    promoteToExplicitClips,
     trimClipLeft,
     trimClipRight,
     finalizeEdgeTrim,

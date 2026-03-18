@@ -254,9 +254,17 @@ function handleTrimStart(clipId: string, edge: 'left' | 'right', event: MouseEve
   event.preventDefault();
   event.stopPropagation();
 
+  // Promote single-buffer track to explicit clips if needed
+  let effectiveClipId = clipId;
+  if (clipId.endsWith('-main')) {
+    const newClipId = tracksStore.promoteToExplicitClips(props.track.id);
+    if (!newClipId) return;
+    effectiveClipId = newClipId;
+  }
+
   useHistoryStore().pushState('Trim clip edge');
   isTrimming.value = true;
-  trimClipId.value = clipId;
+  trimClipId.value = effectiveClipId;
   trimEdge.value = edge;
   trimStartX.value = event.clientX;
 

@@ -64,11 +64,9 @@ const borderColor = computed(() => {
   return props.track.color;
 });
 
-// Whether this clip supports edge trimming (only explicit clips in tracks with clips array)
+// Whether this clip supports edge trimming (explicit clips with source bounds)
 const isTrimmable = computed(() => {
   if (!props.clip) return false;
-  // Synthetic clips (id ends with '-main') from getTrackClips don't support trimming
-  if (props.clip.id.endsWith('-main')) return false;
   return props.clip.sourceIn !== undefined && props.clip.sourceDuration !== undefined;
 });
 
