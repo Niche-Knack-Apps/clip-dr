@@ -754,15 +754,16 @@ onUnmounted(() => {
       <div
         v-for="mark in trackTimemarks"
         :key="mark.id"
-        class="absolute top-0 bottom-0 z-[15] cursor-grab group/tm"
-        :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
+        class="absolute top-0 z-[15] cursor-grab group/tm"
+        :style="{ left: `${mark.pixelLeft - 8}px`, width: '17px', height: '50%' }"
         :title="mark.label"
-        @mousedown="handleTimemarkMouseDown(mark.id, $event)"
+        @mousedown.stop.prevent="handleTimemarkMouseDown(mark.id, $event)"
         @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
+        @click.stop
       >
         <!-- Triangle flag at top (glows on hover) -->
         <div
-          class="absolute top-0 left-0 transition-[filter] duration-150 tm-flag"
+          class="absolute top-0 left-[4px] transition-[filter] duration-150 tm-flag"
           :style="{
             width: 0,
             height: 0,
@@ -774,9 +775,9 @@ onUnmounted(() => {
         />
         <!-- Vertical line hanging into the clip (brightens on hover) -->
         <div
-          class="absolute left-[4px] top-[8px] w-px transition-all duration-150 tm-line"
+          class="absolute left-[8px] top-[8px] w-px transition-all duration-150 tm-line"
           :style="{
-            height: '60%',
+            height: '80%',
             backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
             opacity: 0.5,
             '--tm-glow': mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
@@ -843,7 +844,7 @@ onUnmounted(() => {
 .group\/tm:hover .tm-line {
   opacity: 0.9 !important;
   width: 2px;
-  left: 3.5px;
+  left: 7.5px;
   box-shadow: 0 0 6px var(--tm-glow);
 }
 </style>
