@@ -23,7 +23,7 @@ function close() {
     class="h-9 bg-gray-900 flex items-center justify-between px-2 select-none shrink-0"
   >
     <!-- Left: icon + title -->
-    <div class="flex items-center gap-2" data-tauri-drag-region>
+    <div class="flex items-center gap-0" data-tauri-drag-region>
       <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 object-contain" style="width: 50px; padding-top: 4px; margin-top: 2px" />
       <span class="text-xl font-semibold text-gray-400" style="text-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 -1px 0 rgba(0,0,0,0.7)">Clip Dr.</span>
     </div>
