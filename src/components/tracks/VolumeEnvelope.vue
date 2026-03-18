@@ -64,6 +64,17 @@ function xToTime(x: number): number {
   return Math.max(0, timelineTime - props.track.trackStart);
 }
 
+// Clip regions in pixel coordinates — used to mask envelope to clip bounds only
+const clipRects = computed(() => {
+  const clips = tracksStore.getTrackClips(props.track.id);
+  return clips.map(clip => {
+    const trackRelativeStart = clip.clipStart - props.track.trackStart;
+    const x = timeToX(trackRelativeStart);
+    const w = timeToX(trackRelativeStart + clip.duration) - x;
+    return { x, w };
+  });
+});
+
 // The Y position for 0dB reference line
 const unityY = computed(() => valueToY(1.0));
 
@@ -207,6 +218,21 @@ onUnmounted(() => {
     :height="svgHeight"
     style="pointer-events: none"
   >
+    <!-- Clip-path to mask envelope to clip regions only -->
+    <defs>
+      <clipPath :id="`envelope-clip-${track.id}`">
+        <rect
+          v-for="(cr, idx) in clipRects"
+          :key="idx"
+          :x="cr.x"
+          y="0"
+          :width="cr.w"
+          :height="svgHeight"
+        />
+      </clipPath>
+    </defs>
+
+    <g :clip-path="`url(#envelope-clip-${track.id})`">
     <!-- Semi-transparent fill below the curve -->
     <polygon
       v-if="polygonPoints"
@@ -286,5 +312,6 @@ onUnmounted(() => {
       font-family="monospace"
       style="pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,0.8)"
     >{{ dragTooltipText }}</text>
+    </g>
   </svg>
 </template>
