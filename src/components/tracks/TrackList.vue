@@ -502,11 +502,16 @@ onUnmounted(() => {
   document.removeEventListener('mousemove', trackDragMouse);
   document.removeEventListener('mousemove', handleDragBarMouseMove);
   document.removeEventListener('mouseup', handleDragBarMouseUp);
+  document.removeEventListener('mousemove', handleBottomBarMouseMove);
+  document.removeEventListener('mouseup', handleBottomBarMouseUp);
   if (dragGhostRafId !== null) {
     cancelAnimationFrame(dragGhostRafId);
   }
   if (dragPanRafId !== null) {
     cancelAnimationFrame(dragPanRafId);
+  }
+  if (bottomDragRafId !== null) {
+    cancelAnimationFrame(bottomDragRafId);
   }
   if (zoomRafId !== null) {
     cancelAnimationFrame(zoomRafId);
@@ -638,9 +643,10 @@ watch([dragGhostActive, ghostWidthPx], () => {
   }
 });
 
-// Drag-to-pan state (for the grip bar above the tracks — pans zoom window)
+// Drag-to-pan state (for the grip bar above the tracks — pans zoom window + vertical scroll)
 const isDragPanning = ref(false);
 let dragLastX = 0;
+let dragLastY = 0;
 let dragPanRafId: number | null = null;
 let pendingDragPanEvent: MouseEvent | null = null;
 
@@ -648,6 +654,7 @@ function handleDragBarMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   isDragPanning.value = true;
   dragLastX = event.clientX;
+  dragLastY = event.clientY;
   document.addEventListener('mousemove', handleDragBarMouseMove);
   document.addEventListener('mouseup', handleDragBarMouseUp);
 }
@@ -666,12 +673,22 @@ function flushDragPanMove() {
   pendingDragPanEvent = null;
 
   const deltaX = event.clientX - dragLastX;
+  const deltaY = event.clientY - dragLastY;
   dragLastX = event.clientX;
+  dragLastY = event.clientY;
+
+  // Horizontal: pan selection window
   const dur = tracksStore.timelineDuration;
   const timelineAreaWidth = contentWidth.value - panelWidth.value;
-  if (dur <= 0 || timelineAreaWidth <= 0) return;
-  const deltaTime = deltaX / (timelineAreaWidth / dur);
-  selectionStore.moveSelection(deltaTime);
+  if (dur > 0 && timelineAreaWidth > 0) {
+    const deltaTime = deltaX / (timelineAreaWidth / dur);
+    selectionStore.moveSelection(deltaTime);
+  }
+
+  // Vertical: scroll tracks
+  if (scrollContainerRef.value && deltaY !== 0) {
+    scrollContainerRef.value.scrollTop += deltaY;
+  }
 }
 
 function handleDragBarMouseUp() {
@@ -683,6 +700,47 @@ function handleDragBarMouseUp() {
   isDragPanning.value = false;
   document.removeEventListener('mousemove', handleDragBarMouseMove);
   document.removeEventListener('mouseup', handleDragBarMouseUp);
+}
+
+// Bottom scroll strip state (horizontal scroll via drag)
+const isBottomDragging = ref(false);
+let bottomDragLastX = 0;
+let bottomDragRafId: number | null = null;
+let pendingBottomDragEvent: MouseEvent | null = null;
+
+function handleBottomBarMouseDown(event: MouseEvent) {
+  if (event.button !== 0) return;
+  isBottomDragging.value = true;
+  bottomDragLastX = event.clientX;
+  document.addEventListener('mousemove', handleBottomBarMouseMove);
+  document.addEventListener('mouseup', handleBottomBarMouseUp);
+}
+
+function handleBottomBarMouseMove(event: MouseEvent) {
+  pendingBottomDragEvent = event;
+  if (bottomDragRafId === null) {
+    bottomDragRafId = requestAnimationFrame(flushBottomDragMove);
+  }
+}
+
+function flushBottomDragMove() {
+  bottomDragRafId = null;
+  const event = pendingBottomDragEvent;
+  if (!event || !scrollContainerRef.value) return;
+  pendingBottomDragEvent = null;
+  const deltaX = event.clientX - bottomDragLastX;
+  bottomDragLastX = event.clientX;
+  scrollContainerRef.value.scrollLeft += deltaX;
+}
+
+function handleBottomBarMouseUp() {
+  isBottomDragging.value = false;
+  document.removeEventListener('mousemove', handleBottomBarMouseMove);
+  document.removeEventListener('mouseup', handleBottomBarMouseUp);
+  if (bottomDragRafId !== null) {
+    cancelAnimationFrame(bottomDragRafId);
+    bottomDragRafId = null;
+  }
 }
 
 // Selection window container width — timeline area excluding panel
@@ -751,18 +809,19 @@ function handleClipSelect(trackId: string, clipId: string) {
       </div>
     </div>
 
-    <!-- Drag strip to pan zoom window -->
+    <!-- Drag strip to pan zoom window (bidirectional: X = selection pan, Y = track scroll) -->
     <div
-      class="h-6 flex items-center justify-between px-2 select-none shrink-0 border-b border-gray-700/60 border-t border-t-gray-600/40"
-      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/50 hover:bg-cyan-900/30'"
+      class="h-5 flex items-center justify-center select-none shrink-0 border-b border-gray-700/60"
+      :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
     >
-      <div class="flex flex-col gap-[2px] opacity-70">
-        <div class="w-8 h-px bg-gray-400" />
-        <div class="w-8 h-px bg-gray-400" />
-        <div class="w-8 h-px bg-gray-400" />
+      <div class="flex gap-1 opacity-40">
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
       </div>
-      <span class="text-[9px] text-gray-500 uppercase tracking-wider">Drag to pan</span>
     </div>
 
     <div
@@ -878,6 +937,21 @@ function handleClipSelect(trackId: string, clipId: string) {
       </div>
     </div>
 
+    <!-- Bottom scroll strip (horizontal scroll via drag) -->
+    <div
+      class="h-5 flex items-center justify-center select-none shrink-0 border-t border-gray-700/60"
+      :class="isBottomDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
+      @mousedown="handleBottomBarMouseDown"
+    >
+      <div class="flex gap-1 opacity-40">
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+      </div>
+    </div>
+
     <!-- Floating drag ghost overlay — follows mouse during clip drag -->
     <div
       v-if="dragGhostActive && ghostWidthPx > 0"
@@ -940,18 +1014,11 @@ function handleClipSelect(trackId: string, clipId: string) {
 </template>
 
 <style scoped>
+.track-scroll-container {
+  scrollbar-width: none;
+}
 .track-scroll-container::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.track-scroll-container::-webkit-scrollbar-track {
-  background: transparent;
-}
-.track-scroll-container::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 3px;
-}
-.track-scroll-container::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  width: 0;
+  height: 0;
 }
 </style>
