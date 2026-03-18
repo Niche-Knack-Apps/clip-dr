@@ -166,6 +166,9 @@ export const DEFAULT_CLEANING_OPTIONS: CleaningOptions = {
   expanderEnabled: true,
   expanderThresholdDb: -40,
   expanderRatio: 2,
+  dynamicsEnabled: true,
+  dynamicsThresholdDb: -25,
+  dynamicsRatio: 2,
 };
 
 export const CLEANING_PRESETS: CleaningPreset[] = [
@@ -186,6 +189,9 @@ export const CLEANING_PRESETS: CleaningPreset[] = [
       expanderEnabled: true,
       expanderThresholdDb: -35,
       expanderRatio: 2.5,
+      dynamicsEnabled: true,
+      dynamicsThresholdDb: -25,
+      dynamicsRatio: 2.5,
     },
   },
   {
@@ -205,6 +211,9 @@ export const CLEANING_PRESETS: CleaningPreset[] = [
       expanderEnabled: true,
       expanderThresholdDb: -45,
       expanderRatio: 1.5,
+      dynamicsEnabled: true,
+      dynamicsThresholdDb: -30,
+      dynamicsRatio: 1.8,
     },
   },
   {
@@ -224,6 +233,9 @@ export const CLEANING_PRESETS: CleaningPreset[] = [
       expanderEnabled: true,
       expanderThresholdDb: -30,
       expanderRatio: 3,
+      dynamicsEnabled: true,
+      dynamicsThresholdDb: -20,
+      dynamicsRatio: 3.0,
     },
   },
   {
@@ -238,6 +250,7 @@ export const CLEANING_PRESETS: CleaningPreset[] = [
       spectralEnabled: false,
       neuralEnabled: false,
       expanderEnabled: false,
+      dynamicsEnabled: false,
     },
   },
 ];

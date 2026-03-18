@@ -134,6 +134,9 @@ export const useCleaningStore = defineStore('cleaning', () => {
         expanderEnabled: options.value.expanderEnabled,
         expanderThresholdDb: options.value.expanderThresholdDb,
         expanderRatio: options.value.expanderRatio,
+        dynamicsEnabled: options.value.dynamicsEnabled,
+        dynamicsThresholdDb: options.value.dynamicsThresholdDb,
+        dynamicsRatio: options.value.dynamicsRatio,
       };
 
       console.log('[Clean] Calling backend clean_audio...');

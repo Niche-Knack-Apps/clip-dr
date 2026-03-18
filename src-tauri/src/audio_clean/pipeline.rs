@@ -8,6 +8,7 @@ use super::filters::{BandLimiter, HumRemover, detect_mains_frequency};
 use super::spectral::SpectralDenoiser;
 use super::neural::NeuralDenoiser;
 use super::expander::DownwardExpander;
+use super::dynamics;
 
 /// Cleaning options that control each pipeline stage
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +47,21 @@ pub struct CleaningOptions {
     pub expander_threshold_db: f32,
     /// Expander ratio (1.5-4)
     pub expander_ratio: f32,
+
+    /// Enable post-clean dynamics (upward compression + makeup gain + peak limiter)
+    #[serde(default = "default_true")]
+    pub dynamics_enabled: bool,
+    /// Upward compressor threshold (-40 to -10 dB)
+    #[serde(default = "default_dynamics_threshold")]
+    pub dynamics_threshold_db: f32,
+    /// Upward compressor ratio (1.5-4)
+    #[serde(default = "default_dynamics_ratio")]
+    pub dynamics_ratio: f32,
 }
+
+fn default_true() -> bool { true }
+fn default_dynamics_threshold() -> f32 { -25.0 }
+fn default_dynamics_ratio() -> f32 { 2.0 }
 
 /// Mains frequency detection mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -74,6 +89,9 @@ impl Default for CleaningOptions {
             expander_enabled: true,
             expander_threshold_db: -40.0,
             expander_ratio: 2.0,
+            dynamics_enabled: true,
+            dynamics_threshold_db: -25.0,
+            dynamics_ratio: 2.0,
         }
     }
 }
@@ -165,6 +183,13 @@ fn process_chunk(
     options: &CleaningOptions,
     silence_segments: Option<&[SilenceSegment]>,
 ) -> Result<(), String> {
+    // Measure pre-clean RMS for dynamics makeup gain (before any processing)
+    let pre_clean_rms = if options.dynamics_enabled {
+        dynamics::measure_rms(samples)
+    } else {
+        0.0
+    };
+
     // Stage 1: Band-limiting filters (IIR - very fast)
     if options.highpass_enabled || options.lowpass_enabled {
         let highpass = if options.highpass_enabled {
@@ -229,6 +254,17 @@ fn process_chunk(
         expander.process(samples);
     }
 
+    // Stage 6: Post-clean dynamics (upward compression + makeup gain + peak limiter)
+    if options.dynamics_enabled {
+        dynamics::apply_dynamics(
+            samples,
+            sample_rate,
+            pre_clean_rms,
+            options.dynamics_threshold_db,
+            options.dynamics_ratio,
+        );
+    }
+
     Ok(())
 }
 
@@ -245,6 +281,9 @@ mod tests {
         assert!(options.spectral_enabled);
         assert!(options.neural_enabled);
         assert!(options.expander_enabled);
+        assert!(options.dynamics_enabled);
+        assert!((options.dynamics_threshold_db - (-25.0)).abs() < 0.01);
+        assert!((options.dynamics_ratio - 2.0).abs() < 0.01);
     }
 
     #[test]
@@ -292,6 +331,7 @@ mod tests {
             spectral_enabled: false,
             neural_enabled: false,
             expander_enabled: false,
+            dynamics_enabled: false,
             ..CleaningOptions::default()
         };
 

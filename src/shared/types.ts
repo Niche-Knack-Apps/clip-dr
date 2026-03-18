@@ -367,6 +367,9 @@ export interface CleaningOptions {
   expanderEnabled: boolean;
   expanderThresholdDb: number;    // -60 to -20, default -40
   expanderRatio: number;          // 1.5-4, default 2
+  dynamicsEnabled: boolean;
+  dynamicsThresholdDb: number;    // -40 to -10, default -25
+  dynamicsRatio: number;          // 1.5-4, default 2
 }
 
 export interface CleaningPreset {

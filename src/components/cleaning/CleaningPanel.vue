@@ -260,6 +260,46 @@ function formatRatio(value: number): string {
           </div>
         </div>
       </div>
+
+      <!-- Dynamics Section -->
+      <div class="border-t border-gray-700 pt-3">
+        <div class="flex items-center mb-2">
+          <Toggle
+            :model-value="cleaningStore.options.dynamicsEnabled"
+            @update:model-value="(v) => cleaningStore.setOptions({ dynamicsEnabled: v })"
+          />
+          <span class="ml-2 text-sm text-gray-300">Dynamics</span>
+          <span class="ml-1 text-xs text-gray-500">(loudness restore)</span>
+        </div>
+
+        <div v-if="cleaningStore.options.dynamicsEnabled" class="ml-6 space-y-2">
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">Threshold</label>
+            <Slider
+              :model-value="cleaningStore.options.dynamicsThresholdDb"
+              :min="-40"
+              :max="-10"
+              :step="1"
+              show-value
+              :format-value="formatDb"
+              @update:model-value="(v) => cleaningStore.setOptions({ dynamicsThresholdDb: v })"
+            />
+          </div>
+
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">Ratio</label>
+            <Slider
+              :model-value="cleaningStore.options.dynamicsRatio"
+              :min="1.5"
+              :max="4"
+              :step="0.1"
+              show-value
+              :format-value="formatRatio"
+              @update:model-value="(v) => cleaningStore.setOptions({ dynamicsRatio: v })"
+            />
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Error Display -->
