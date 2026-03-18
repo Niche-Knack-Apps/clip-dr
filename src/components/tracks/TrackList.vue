@@ -693,10 +693,9 @@ watch([dragGhostActive, ghostWidthPx], () => {
   }
 });
 
-// Drag-to-pan state (for the grip bar above the tracks — pans zoom window + vertical scroll)
+// Drag-to-pan state (for the grip bar above the tracks — pans zoom window horizontally)
 const isDragPanning = ref(false);
 let dragLastX = 0;
-let dragLastY = 0;
 let dragPanRafId: number | null = null;
 let pendingDragPanEvent: MouseEvent | null = null;
 
@@ -704,7 +703,6 @@ function handleDragBarMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   isDragPanning.value = true;
   dragLastX = event.clientX;
-  dragLastY = event.clientY;
   document.addEventListener('mousemove', handleDragBarMouseMove);
   document.addEventListener('mouseup', handleDragBarMouseUp);
 }
@@ -723,21 +721,13 @@ function flushDragPanMove() {
   pendingDragPanEvent = null;
 
   const deltaX = event.clientX - dragLastX;
-  const deltaY = event.clientY - dragLastY;
   dragLastX = event.clientX;
-  dragLastY = event.clientY;
 
-  // Horizontal: pan selection window
   const dur = tracksStore.timelineDuration;
   const timelineAreaWidth = contentWidth.value - panelWidth.value;
   if (dur > 0 && timelineAreaWidth > 0) {
     const deltaTime = deltaX / (timelineAreaWidth / dur);
     selectionStore.moveSelection(deltaTime);
-  }
-
-  // Vertical: scroll tracks
-  if (scrollContainerRef.value && deltaY !== 0) {
-    scrollContainerRef.value.scrollTop += deltaY;
   }
 }
 
@@ -900,7 +890,7 @@ function handleClipSelect(trackId: string, clipId: string) {
       </div>
     </div>
 
-    <!-- Drag strip to pan zoom window (bidirectional: X = selection pan, Y = track scroll) -->
+    <!-- Drag strip to pan zoom window (horizontal only) -->
     <div
       class="h-5 flex items-center justify-center select-none shrink-0 border-b border-gray-700/60"
       :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
