@@ -647,6 +647,7 @@ export const useRecordingStore = defineStore('recording', () => {
             break;
         }
       }
+      console.log(`[Recording] Placement: ${placement.value}, baseStart=${baseStart.toFixed(2)}s`);
       const effectiveStart = Math.max(0, baseStart - preRecordOffset);
       if (preRecordOffset > 0) {
         console.log(`[Recording] Pre-record buffer: ${preRecordOffset.toFixed(2)}s, ` +
