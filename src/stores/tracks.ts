@@ -2448,10 +2448,14 @@ export const useTracksStore = defineStore('tracks', () => {
     const historyStore = useHistoryStore();
     historyStore.pushState('Add marker');
 
+    // Convert absolute timeline time to track-relative time
+    // (timemarks are stored relative to track start, like word timestamps)
+    const relativeTime = time - track.trackStart;
+
     if (!track.timemarks) track.timemarks = [];
     track.timemarks.push({
       id: generateId(),
-      time,
+      time: relativeTime,
       label,
       source,
       color: source === 'manual' ? '#00d4ff' : '#fbbf24',

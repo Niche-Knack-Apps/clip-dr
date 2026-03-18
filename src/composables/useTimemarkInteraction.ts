@@ -44,7 +44,8 @@ export function useTimemarkInteraction(
     const relativeTime = time - targetTrack.trackStart;
     if (relativeTime < 0 || relativeTime > targetTrack.duration) return;
 
-    tracksStore.addTimemark(targetTrack.id, relativeTime, 'Manual mark');
+    // addTimemark expects absolute timeline time, converts internally
+    tracksStore.addTimemark(targetTrack.id, time, 'Manual mark');
   }
 
   function handleTimemarkContextMenu(event: MouseEvent, trackId: string, markId: string) {

@@ -677,6 +677,15 @@ onUnmounted(() => {
             borderTop: `8px solid ${mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24')}`,
           }"
         />
+        <!-- Vertical line hanging into the clip -->
+        <div
+          class="absolute left-[4px] top-[8px] w-px"
+          :style="{
+            height: '60%',
+            backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
+            opacity: 0.5,
+          }"
+        />
         <!-- Tooltip on hover -->
         <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20">
           {{ mark.label }}
