@@ -216,8 +216,12 @@ function handleTimemarkDelete(markId: string) {
 
 function handleTimemarkRename() {
   if (!timemarkPopup.value) return;
-  const mark = props.track.timemarks?.find(m => m.id === timemarkPopup.value!.markId);
+  const trackIdx = tracksStore.tracks.findIndex(t => t.id === props.track.id);
+  if (trackIdx === -1) { timemarkPopup.value = null; return; }
+  const track = tracksStore.tracks[trackIdx];
+  const mark = track.timemarks?.find(m => m.id === timemarkPopup.value!.markId);
   if (mark && timemarkEditLabel.value.trim()) {
+    useHistoryStore().pushState('Rename marker');
     mark.label = timemarkEditLabel.value.trim();
     tracksStore.tracks = [...tracksStore.tracks]; // trigger reactivity
   }
@@ -756,7 +760,6 @@ onUnmounted(() => {
         :key="mark.id"
         class="absolute top-0 z-[15] cursor-grab group/tm"
         :style="{ left: `${mark.pixelLeft - 8}px`, width: '17px', height: '50%' }"
-        :title="mark.label"
         @mousedown.stop.prevent="handleTimemarkMouseDown(mark.id, $event)"
         @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
         @click.stop
@@ -783,10 +786,16 @@ onUnmounted(() => {
             '--tm-glow': mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
           }"
         />
-        <!-- Tooltip on hover -->
-        <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20">
+        <!-- Label shown on hover -->
+        <div
+          class="absolute left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-[9px] font-medium whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20"
+          :style="{
+            top: '-18px',
+            backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
+            color: '#111',
+          }"
+        >
           {{ mark.label }}
-          <span class="text-gray-500 ml-1">(drag to move · click for options)</span>
         </div>
       </div>
 
