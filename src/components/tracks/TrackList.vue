@@ -505,6 +505,8 @@ onUnmounted(() => {
   document.removeEventListener('mouseup', handleDragBarMouseUp);
   document.removeEventListener('mousemove', handleBottomBarMouseMove);
   document.removeEventListener('mouseup', handleBottomBarMouseUp);
+  document.removeEventListener('mousemove', handleRightBarMouseMove);
+  document.removeEventListener('mouseup', handleRightBarMouseUp);
   if (dragGhostRafId !== null) {
     cancelAnimationFrame(dragGhostRafId);
   }
@@ -513,6 +515,9 @@ onUnmounted(() => {
   }
   if (bottomDragRafId !== null) {
     cancelAnimationFrame(bottomDragRafId);
+  }
+  if (rightDragRafId !== null) {
+    cancelAnimationFrame(rightDragRafId);
   }
   if (zoomRafId !== null) {
     cancelAnimationFrame(zoomRafId);
@@ -747,6 +752,47 @@ function handleDragBarMouseUp() {
   document.removeEventListener('mouseup', handleDragBarMouseUp);
 }
 
+// Right scroll strip state (vertical scroll via drag)
+const isRightDragging = ref(false);
+let rightDragLastY = 0;
+let rightDragRafId: number | null = null;
+let pendingRightDragEvent: MouseEvent | null = null;
+
+function handleRightBarMouseDown(event: MouseEvent) {
+  if (event.button !== 0) return;
+  isRightDragging.value = true;
+  rightDragLastY = event.clientY;
+  document.addEventListener('mousemove', handleRightBarMouseMove);
+  document.addEventListener('mouseup', handleRightBarMouseUp);
+}
+
+function handleRightBarMouseMove(event: MouseEvent) {
+  pendingRightDragEvent = event;
+  if (rightDragRafId === null) {
+    rightDragRafId = requestAnimationFrame(flushRightDragMove);
+  }
+}
+
+function flushRightDragMove() {
+  rightDragRafId = null;
+  const event = pendingRightDragEvent;
+  if (!event || !scrollContainerRef.value) return;
+  pendingRightDragEvent = null;
+  const deltaY = event.clientY - rightDragLastY;
+  rightDragLastY = event.clientY;
+  scrollContainerRef.value.scrollTop += deltaY;
+}
+
+function handleRightBarMouseUp() {
+  isRightDragging.value = false;
+  document.removeEventListener('mousemove', handleRightBarMouseMove);
+  document.removeEventListener('mouseup', handleRightBarMouseUp);
+  if (rightDragRafId !== null) {
+    cancelAnimationFrame(rightDragRafId);
+    rightDragRafId = null;
+  }
+}
+
 // Bottom scroll strip state (horizontal scroll via drag)
 const isBottomDragging = ref(false);
 let bottomDragLastX = 0;
@@ -869,6 +915,7 @@ function handleClipSelect(trackId: string, clipId: string) {
       </div>
     </div>
 
+    <div class="flex-1 min-h-0 flex flex-row">
     <div
       ref="scrollContainerRef"
       data-track-scroll
@@ -1019,6 +1066,22 @@ function handleClipSelect(trackId: string, clipId: string) {
           <span class="text-xs text-gray-600">Import or record audio</span>
         </div>
       </div>
+    </div>
+
+    <!-- Right scroll strip (vertical scroll via drag) -->
+    <div
+      class="w-5 flex items-center justify-center select-none shrink-0 border-l border-gray-700/60"
+      :class="isRightDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-grab bg-gray-700/40 hover:bg-cyan-900/30'"
+      @mousedown="handleRightBarMouseDown"
+    >
+      <div class="flex flex-col gap-1 opacity-40">
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+        <div class="w-1 h-1 rounded-full bg-gray-400" />
+      </div>
+    </div>
     </div>
 
     <!-- Bottom scroll strip (horizontal scroll via drag) -->
