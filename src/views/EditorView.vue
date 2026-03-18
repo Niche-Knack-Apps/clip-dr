@@ -302,12 +302,17 @@ useKeyboardShortcuts({
     if (recordingStore.isRecording) {
       recordingStore.addTimemark();
     } else {
-      // Add marker at playhead on selected (or first) track
-      const trackId = tracksStore.selectedTrackId && tracksStore.selectedTrackId !== 'ALL'
-        ? tracksStore.selectedTrackId
-        : tracksStore.tracks[0]?.id;
-      if (trackId) {
-        tracksStore.addTimemark(trackId, playbackStore.currentTime, 'Marker');
+      const time = playbackStore.currentTime;
+      if (tracksStore.selectedTrackId && tracksStore.selectedTrackId !== 'ALL') {
+        // Specific track selected — add marker to that track only
+        tracksStore.addTimemark(tracksStore.selectedTrackId, time, 'Marker');
+      } else {
+        // No specific track / ALL selected — add marker to every track the playhead crosses
+        for (const track of tracksStore.tracks) {
+          if (time >= track.trackStart && time <= track.trackStart + track.duration) {
+            tracksStore.addTimemark(track.id, time, 'Marker');
+          }
+        }
       }
     }
   },
