@@ -213,13 +213,17 @@ describe('Clean Audio Playback', () => {
     await tracksStore.createTrackFromBuffer(buf, null, 'Track 1', 0);
     await tracksStore.createTrackFromBuffer(buf, null, 'Track 2', 0);
 
+    const trackId = tracksStore.tracks[0].id;
     // Add a fake silence region so hasRegions is true
-    silenceStore.addRegion(1.0, 2.0);
+    silenceStore.addRegion(trackId, 1.0, 2.0);
 
     tracksStore.selectedTrackId = 'ALL';
-    const result = await silenceStore.cutSilenceToNewTrack();
+    // With per-track silence, cutSilenceToNewTrack requires explicit trackId
+    // Passing a track that has no regions → error
+    const noRegionTrackId = tracksStore.tracks[1].id;
+    const result = await silenceStore.cutSilenceToNewTrack(noRegionTrackId);
     expect(result).toBeNull();
-    expect(silenceStore.cutError).toBe('Select a track to cut silence');
+    expect(silenceStore.cutError).toBe('No silence regions for this track');
   });
 
   it('muteAllExcept unmutes the target track if it was muted', async () => {
@@ -499,15 +503,16 @@ describe('Single Track VAD/Silence Auto-Resolve', () => {
     const buf = mkBuf(5);
     await tracksStore.createTrackFromBuffer(buf, null, 'Only Track', 0);
 
+    const onlyTrackId = tracksStore.tracks[0].id;
     // Add silence region
-    silenceStore.addRegion(1.0, 2.0);
+    silenceStore.addRegion(onlyTrackId, 1.0, 2.0);
 
     tracksStore.selectedTrackId = 'ALL';
     expect(tracksStore.selectedTrack).not.toBeNull();
 
-    // Should NOT get "Select a track" error
-    await silenceStore.cutSilenceToNewTrack();
-    expect(silenceStore.cutError).not.toBe('Select a track to cut silence');
+    // Should NOT get "Select a track" error — auto-resolves single track
+    await silenceStore.cutSilenceToNewTrack(onlyTrackId);
+    expect(silenceStore.cutError).not.toBe('No silence regions for this track');
   });
 });
 

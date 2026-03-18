@@ -67,6 +67,10 @@ export interface TrackClip {
   sourceFile?: string;
   /** EDL: offset in seconds within the source file where this clip's audio begins */
   sourceOffset?: number;
+  /** Original sourceOffset when clip was created (immutable). Defines left extent of recoverable audio. */
+  sourceIn?: number;
+  /** Total available duration from sourceIn in source file (immutable). Defines full recoverable range. */
+  sourceDuration?: number;
 }
 
 /** A keyframe point on a volume automation envelope */
@@ -409,7 +413,7 @@ export interface SilenceRegion {
   enabled: boolean;   // If false, this region is "restored" (not cut)
 }
 
-/** A clip as serialized in a v2 .clipdr project file */
+/** A clip as serialized in a v2+ .clipdr project file */
 export interface ProjectTrackClip {
   id: string;
   clipStart: number;
@@ -419,6 +423,10 @@ export interface ProjectTrackClip {
   sourceOffset: number;
   /** 'original' = user-granted import path, 'managed-cache' = app cache, 'temp' = volatile */
   source_kind: 'original' | 'managed-cache' | 'temp';
+  /** Original sourceOffset when clip was created (v3+). Defines left extent of recoverable audio. */
+  sourceIn?: number;
+  /** Total available duration from sourceIn (v3+). Defines full recoverable range. */
+  sourceDuration?: number;
 }
 
 /** A track as serialized in a .clipdr project file */
@@ -442,13 +450,14 @@ export interface ProjectTrack {
 
 /** .clipdr project file format */
 export interface ProjectFile {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   name: string;
   createdAt: string;
   modifiedAt: string;
   tracks: ProjectTrack[];
   selection: { inPoint: number | null; outPoint: number | null };
-  silenceRegions: SilenceRegion[];
+  /** v1-v2: flat array; v3: per-track Record<trackId, SilenceRegion[]> */
+  silenceRegions: SilenceRegion[] | Record<string, SilenceRegion[]>;
 }
 
 export interface ExportEDL {

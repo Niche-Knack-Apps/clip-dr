@@ -26,12 +26,16 @@ interface CutAudioEntry extends CutAudioData {
   cutRegions: Array<{ start: number; end: number }>;
 }
 
+/** Special key for legacy silence regions from v2 multitrack projects that need reassignment */
+export const UNASSIGNED_TRACK_KEY = '_unassigned';
+
 export const useSilenceStore = defineStore('silence', () => {
   const vadStore = useVadStore();
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
 
-  const silenceRegions = ref<SilenceRegion[]>([]);
+  // Per-track silence regions: Map<trackId, SilenceRegion[]>
+  const silenceRegions = ref<Map<string, SilenceRegion[]>>(new Map());
   const compressionEnabled = ref(false);
   const cutting = ref(false);
   const cutError = ref<string | null>(null);
@@ -42,52 +46,81 @@ export const useSilenceStore = defineStore('silence', () => {
   // Minimum region duration in seconds
   const MIN_REGION_DURATION = 0.05;
 
-  // Get only enabled (active) silence regions
-  const activeSilenceRegions = computed(() =>
-    silenceRegions.value.filter(r => r.enabled)
-  );
+  // Get regions for a specific track
+  function getRegionsForTrack(trackId: string): SilenceRegion[] {
+    return silenceRegions.value.get(trackId) ?? [];
+  }
 
-  // Calculate compressed duration (total duration minus active silence)
-  const compressedDuration = computed(() => {
-    const total = tracksStore.timelineDuration;
-    const silenceTotal = activeSilenceRegions.value.reduce(
-      (sum, r) => sum + (r.end - r.start),
-      0
+  // Get only enabled (active) silence regions for a track
+  function getActiveRegionsForTrack(trackId: string): SilenceRegion[] {
+    return getRegionsForTrack(trackId).filter(r => r.enabled);
+  }
+
+  // Backward-compat computed: get active regions for the current track
+  // (used by playback and other stores that need single-track context)
+  const activeSilenceRegions = computed(() => {
+    const trackId = tracksStore.selectedTrack?.id;
+    if (!trackId) return [];
+    return getActiveRegionsForTrack(trackId);
+  });
+
+  // Calculate compressed duration for a specific track
+  function compressedDurationForTrack(trackId: string): number {
+    const track = tracksStore.getTrackById(trackId);
+    if (!track) return 0;
+    const total = track.duration;
+    const silenceTotal = getActiveRegionsForTrack(trackId).reduce(
+      (sum, r) => sum + (r.end - r.start), 0
     );
     return Math.max(0, total - silenceTotal);
-  });
+  }
 
-  // Calculate how much silence is being removed
-  const savedDuration = computed(() => {
-    return activeSilenceRegions.value.reduce(
-      (sum, r) => sum + (r.end - r.start),
-      0
+  // Calculate how much silence is being removed for a track
+  function savedDurationForTrack(trackId: string): number {
+    return getActiveRegionsForTrack(trackId).reduce(
+      (sum, r) => sum + (r.end - r.start), 0
     );
+  }
+
+  // Backward-compat computed: uses selected track
+  const compressedDuration = computed(() => {
+    const trackId = tracksStore.selectedTrack?.id;
+    if (!trackId) return tracksStore.timelineDuration;
+    return compressedDurationForTrack(trackId);
   });
 
-  // Initialize silence regions from VAD results
-  function initFromVad(): void {
+  const savedDuration = computed(() => {
+    const trackId = tracksStore.selectedTrack?.id;
+    if (!trackId) return 0;
+    return savedDurationForTrack(trackId);
+  });
+
+  // Initialize silence regions from VAD results for a specific track
+  function initFromVad(trackId: string): void {
     if (!vadStore.result) return;
 
-    silenceRegions.value = vadStore.silenceSegments.map(seg => ({
+    const regions = vadStore.silenceSegments.map(seg => ({
       id: generateId(),
       start: seg.start,
       end: seg.end,
       enabled: true,
     }));
 
-    console.log(`Created ${silenceRegions.value.length} silence regions from VAD`);
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, regions);
+    silenceRegions.value = newMap;
+
+    console.log(`Created ${regions.length} silence regions for track ${trackId} from VAD`);
   }
 
-  // Add a new silence region manually
-  function addRegion(start: number, end: number): SilenceRegion | null {
+  // Add a new silence region manually for a specific track
+  function addRegion(trackId: string, start: number, end: number): SilenceRegion | null {
     useHistoryStore().pushState('Add silence region');
-    // Ensure valid range
-    const duration = tracksStore.timelineDuration;
+    const track = tracksStore.getTrackById(trackId);
+    const duration = track ? track.trackStart + track.duration : tracksStore.timelineDuration;
     const regionStart = Math.max(0, Math.min(start, end));
     const regionEnd = Math.min(duration, Math.max(start, end));
 
-    // Check minimum duration
     if (regionEnd - regionStart < MIN_REGION_DURATION) {
       console.warn('Region too small');
       return null;
@@ -100,30 +133,35 @@ export const useSilenceStore = defineStore('silence', () => {
       enabled: true,
     };
 
-    // Insert in sorted order by start time
-    const insertIndex = silenceRegions.value.findIndex(r => r.start > regionStart);
+    const regions = [...getRegionsForTrack(trackId)];
+    const insertIndex = regions.findIndex(r => r.start > regionStart);
     if (insertIndex === -1) {
-      silenceRegions.value.push(newRegion);
+      regions.push(newRegion);
     } else {
-      silenceRegions.value.splice(insertIndex, 0, newRegion);
+      regions.splice(insertIndex, 0, newRegion);
     }
 
-    // Merge overlapping regions
-    mergeOverlapping();
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, regions);
+    silenceRegions.value = newMap;
 
+    mergeOverlapping(trackId);
     return newRegion;
   }
 
-  // Update a region's boundaries
+  // Update a region's boundaries for a specific track
   function updateRegion(
+    trackId: string,
     id: string,
     updates: { start?: number; end?: number }
   ): void {
-    const region = silenceRegions.value.find(r => r.id === id);
+    const regions = getRegionsForTrack(trackId);
+    const region = regions.find(r => r.id === id);
     if (!region) return;
     useHistoryStore().pushState('Update silence region');
 
-    const duration = tracksStore.timelineDuration;
+    const track = tracksStore.getTrackById(trackId);
+    const duration = track ? track.trackStart + track.duration : tracksStore.timelineDuration;
     const oldStart = region.start;
     const oldEnd = region.end;
 
@@ -135,31 +173,35 @@ export const useSilenceStore = defineStore('silence', () => {
       region.end = Math.min(duration, Math.max(updates.end, region.start + MIN_REGION_DURATION));
     }
 
-    // Ensure minimum duration
     if (region.end - region.start < MIN_REGION_DURATION) {
       region.end = region.start + MIN_REGION_DURATION;
     }
 
     console.log('[Silence] Updated region:', id, `${oldStart.toFixed(2)}-${oldEnd.toFixed(2)} → ${region.start.toFixed(2)}-${region.end.toFixed(2)}`);
 
-    // Re-sort and merge if needed
-    silenceRegions.value.sort((a, b) => a.start - b.start);
-    mergeOverlapping();
+    // Trigger reactivity
+    const newMap = new Map(silenceRegions.value);
+    const updatedRegions = [...regions];
+    updatedRegions.sort((a, b) => a.start - b.start);
+    newMap.set(trackId, updatedRegions);
+    silenceRegions.value = newMap;
+    mergeOverlapping(trackId);
   }
 
   // Move a region by delta (preserving duration)
-  function moveRegion(id: string, delta: number): void {
-    const region = silenceRegions.value.find(r => r.id === id);
+  function moveRegion(trackId: string, id: string, delta: number): void {
+    const regions = getRegionsForTrack(trackId);
+    const region = regions.find(r => r.id === id);
     if (!region) return;
     useHistoryStore().pushState('Move silence region');
 
-    const duration = tracksStore.timelineDuration;
+    const track = tracksStore.getTrackById(trackId);
+    const duration = track ? track.trackStart + track.duration : tracksStore.timelineDuration;
     const regionDuration = region.end - region.start;
 
     let newStart = region.start + delta;
     let newEnd = region.end + delta;
 
-    // Clamp to audio bounds
     if (newStart < 0) {
       newStart = 0;
       newEnd = regionDuration;
@@ -172,37 +214,49 @@ export const useSilenceStore = defineStore('silence', () => {
     region.start = newStart;
     region.end = newEnd;
 
-    // Re-sort and merge
-    silenceRegions.value.sort((a, b) => a.start - b.start);
-    mergeOverlapping();
+    const newMap = new Map(silenceRegions.value);
+    const updatedRegions = [...regions];
+    updatedRegions.sort((a, b) => a.start - b.start);
+    newMap.set(trackId, updatedRegions);
+    silenceRegions.value = newMap;
+    mergeOverlapping(trackId);
   }
 
   // Delete a region (restore that audio)
-  function deleteRegion(id: string): void {
-    const region = silenceRegions.value.find(r => r.id === id);
+  function deleteRegion(trackId: string, id: string): void {
+    const regions = getRegionsForTrack(trackId);
+    const region = regions.find(r => r.id === id);
     if (region) {
       useHistoryStore().pushState('Delete silence region');
       region.enabled = false;
+      // Trigger reactivity
+      const newMap = new Map(silenceRegions.value);
+      newMap.set(trackId, [...regions]);
+      silenceRegions.value = newMap;
       console.log('[Silence] Disabled region:', id, `${region.start.toFixed(2)}-${region.end.toFixed(2)}`);
-      console.log('[Silence] Active regions now:', activeSilenceRegions.value.length);
     }
   }
 
   // Permanently remove a region from the list
-  function removeRegion(id: string): void {
+  function removeRegion(trackId: string, id: string): void {
     useHistoryStore().pushState('Remove silence region');
-    const index = silenceRegions.value.findIndex(r => r.id === id);
-    if (index !== -1) {
-      silenceRegions.value.splice(index, 1);
-    }
+    const regions = getRegionsForTrack(trackId);
+    const filtered = regions.filter(r => r.id !== id);
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, filtered);
+    silenceRegions.value = newMap;
   }
 
   // Restore a previously deleted region
-  function restoreRegion(id: string): void {
-    const region = silenceRegions.value.find(r => r.id === id);
+  function restoreRegion(trackId: string, id: string): void {
+    const regions = getRegionsForTrack(trackId);
+    const region = regions.find(r => r.id === id);
     if (region) {
       useHistoryStore().pushState('Restore silence region');
       region.enabled = true;
+      const newMap = new Map(silenceRegions.value);
+      newMap.set(trackId, [...regions]);
+      silenceRegions.value = newMap;
     }
   }
 
@@ -212,10 +266,10 @@ export const useSilenceStore = defineStore('silence', () => {
     compressionEnabled.value = enabled ?? !compressionEnabled.value;
   }
 
-  // Check if a time falls within an active silence region (O(log n) binary search)
-  function isInSilence(time: number): SilenceRegion | null {
+  // Check if a time falls within an active silence region for a track (O(log n) binary search)
+  function isInSilence(trackId: string, time: number): SilenceRegion | null {
     if (!compressionEnabled.value) return null;
-    const regions = activeSilenceRegions.value;
+    const regions = getActiveRegionsForTrack(trackId);
     if (regions.length === 0) return null;
 
     let lo = 0, hi = regions.length - 1;
@@ -230,35 +284,30 @@ export const useSilenceStore = defineStore('silence', () => {
   }
 
   // Get the end time of silence region at given time (for skipping forward)
-  function getNextSpeechTime(time: number): number {
-    const region = isInSilence(time);
+  function getNextSpeechTime(trackId: string, time: number): number {
+    const region = isInSilence(trackId, time);
     return region ? region.end : time;
   }
 
   // Get the start time of silence region at given time (for skipping backward)
-  function getPrevSpeechTime(time: number): number {
-    const region = isInSilence(time);
+  function getPrevSpeechTime(trackId: string, time: number): number {
+    const region = isInSilence(trackId, time);
     return region ? region.start : time;
   }
 
-  // Merge overlapping regions
-  function mergeOverlapping(): void {
-    if (silenceRegions.value.length < 2) return;
+  // Merge overlapping regions for a specific track
+  function mergeOverlapping(trackId: string): void {
+    const regions = getRegionsForTrack(trackId);
+    if (regions.length < 2) return;
 
-    // Sort by start time
-    silenceRegions.value.sort((a, b) => a.start - b.start);
-
+    const sorted = [...regions].sort((a, b) => a.start - b.start);
     const merged: SilenceRegion[] = [];
-    let current = { ...silenceRegions.value[0] };
+    let current = { ...sorted[0] };
 
-    for (let i = 1; i < silenceRegions.value.length; i++) {
-      const next = silenceRegions.value[i];
-
-      // Check if regions overlap or touch
+    for (let i = 1; i < sorted.length; i++) {
+      const next = sorted[i];
       if (next.start <= current.end) {
-        // Merge: extend current to cover next
         current.end = Math.max(current.end, next.end);
-        // Keep enabled if either is enabled
         current.enabled = current.enabled || next.enabled;
       } else {
         merged.push(current);
@@ -267,25 +316,33 @@ export const useSilenceStore = defineStore('silence', () => {
     }
     merged.push(current);
 
-    silenceRegions.value = merged;
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, merged);
+    silenceRegions.value = newMap;
   }
 
-
   // Cut silence and create a new track (non-destructive)
-  async function cutSilenceToNewTrack(): Promise<Track | null> {
+  async function cutSilenceToNewTrack(trackId: string): Promise<Track | null> {
+    // Reject _unassigned — must be explicitly reassigned first
+    if (trackId === UNASSIGNED_TRACK_KEY) {
+      cutError.value = 'Legacy silence regions need reassignment. Run silence detection on the target track.';
+      return null;
+    }
+
     if (!tracksStore.hasAudio) {
       cutError.value = 'No audio loaded';
       return null;
     }
 
-    if (!hasRegions.value) {
-      cutError.value = 'No silence regions defined';
+    const trackRegions = getActiveRegionsForTrack(trackId);
+    if (trackRegions.length === 0) {
+      cutError.value = 'No silence regions for this track';
       return null;
     }
 
-    const sourceTrack = tracksStore.selectedTrack;
+    const sourceTrack = tracksStore.getTrackById(trackId);
     if (!sourceTrack) {
-      cutError.value = 'Select a track to cut silence';
+      cutError.value = 'Track not found';
       return null;
     }
 
@@ -315,9 +372,9 @@ export const useSilenceStore = defineStore('silence', () => {
 
       // Build speech segments from gaps between active (enabled) silence regions
       const duration = mixedBuffer.duration;
-      const sorted = [...activeSilenceRegions.value].sort((a, b) => a.start - b.start);
+      const sorted = [...trackRegions].sort((a, b) => a.start - b.start);
 
-      console.log('[CutSilence] Total silence regions:', silenceRegions.value.length);
+      console.log('[CutSilence] Total silence regions:', getRegionsForTrack(trackId).length);
       console.log('[CutSilence] Active (enabled) silence regions:', sorted.length);
       console.log(`[CutSilence] Active regions: ${sorted.length} (first: ${sorted[0]?.start.toFixed(2)}-${sorted[0]?.end.toFixed(2)}, last: ${sorted[sorted.length - 1]?.start.toFixed(2)}-${sorted[sorted.length - 1]?.end.toFixed(2)})`);
 
@@ -348,7 +405,6 @@ export const useSilenceStore = defineStore('silence', () => {
       console.log('[CutSilence] Speech segments:', speechSegments.length);
       console.log(`[CutSilence] Speech segments (KEEPING): ${speechSegments.length}`);
 
-      // Log what's being removed (for debugging)
       const totalSpeechDuration = speechSegments.reduce((sum, s) => sum + (s.end - s.start), 0);
       console.log('[CutSilence] Original duration:', duration.toFixed(2), 'New duration:', totalSpeechDuration.toFixed(2), 'Removing:', (duration - totalSpeechDuration).toFixed(2));
 
@@ -378,8 +434,6 @@ export const useSilenceStore = defineStore('silence', () => {
       console.log('[CutSilence] Created track:', cutTrack.id, cutTrack.name);
 
       // Store the cut audio data mapped to the new track's ID
-      // Include the silence regions that were cut for time mapping
-      // Create a new Map to trigger Vue reactivity
       const newMap = new Map(cutAudioFiles.value);
       newMap.set(cutTrack.id, {
         ...cutAudioEntry,
@@ -443,31 +497,23 @@ export const useSilenceStore = defineStore('silence', () => {
   }
 
   // Map cut-audio playback time to original timeline time
-  // This makes the playhead visually skip over the cut silence regions
   function mapCutTimeToOriginal(trackId: string, cutTime: number): number {
     const cutRegions = getCutRegions(trackId);
     if (!cutRegions || cutRegions.length === 0) {
       return cutTime;
     }
 
-    // Sort regions by start time
     const sorted = [...cutRegions].sort((a, b) => a.start - b.start);
-
-    // Walk through regions, accumulating offset as we pass cut points
     let offset = 0;
     let remainingCutTime = cutTime;
 
     for (const region of sorted) {
       const regionDuration = region.end - region.start;
-      // Position in original timeline (before this region's cut)
       const originalPosBeforeRegion = remainingCutTime + offset;
 
       if (originalPosBeforeRegion < region.start) {
-        // We haven't reached this cut region yet
         break;
       }
-
-      // We've passed this cut point, add its duration to offset
       offset += regionDuration;
     }
 
@@ -486,12 +532,9 @@ export const useSilenceStore = defineStore('silence', () => {
 
     for (const region of sorted) {
       if (originalTime > region.end) {
-        // Past this region, subtract its duration
         cutTime -= (region.end - region.start);
       } else if (originalTime >= region.start) {
-        // Inside a cut region - snap to the start
         cutTime = region.start;
-        // Subtract all previous regions
         for (const prev of sorted) {
           if (prev.start < region.start) {
             cutTime -= (prev.end - prev.start);
@@ -507,19 +550,46 @@ export const useSilenceStore = defineStore('silence', () => {
   // Clear all silence regions
   function clear(): void {
     useHistoryStore().pushState('Clear silence regions');
-    silenceRegions.value = [];
+    silenceRegions.value = new Map();
     compressionEnabled.value = false;
   }
 
   // Clear without pushing history (for project load)
   function clearWithoutHistory(): void {
-    silenceRegions.value = [];
+    silenceRegions.value = new Map();
     compressionEnabled.value = false;
   }
 
-  // Set silence regions directly (for project load)
-  function setSilenceRegions(regions: SilenceRegion[]): void {
-    silenceRegions.value = regions;
+  // Set silence regions for a specific track (for project load)
+  function setSilenceRegions(regions: SilenceRegion[], trackId?: string): void {
+    if (trackId) {
+      const newMap = new Map(silenceRegions.value);
+      newMap.set(trackId, regions);
+      silenceRegions.value = newMap;
+    } else {
+      // Legacy: single-track auto-migration is handled by project.ts
+      // This path should no longer be called for new code
+      const tracks = tracksStore.tracks;
+      if (tracks.length === 1) {
+        const newMap = new Map(silenceRegions.value);
+        newMap.set(tracks[0].id, regions);
+        silenceRegions.value = newMap;
+      } else if (tracks.length > 1) {
+        // Multiple tracks: load into _unassigned
+        const newMap = new Map(silenceRegions.value);
+        newMap.set(UNASSIGNED_TRACK_KEY, regions);
+        silenceRegions.value = newMap;
+      }
+    }
+  }
+
+  // Set per-track silence regions from a Record (v3 project load)
+  function setPerTrackSilenceRegions(perTrack: Record<string, SilenceRegion[]>): void {
+    const newMap = new Map<string, SilenceRegion[]>();
+    for (const [trackId, regions] of Object.entries(perTrack)) {
+      newMap.set(trackId, regions);
+    }
+    silenceRegions.value = newMap;
   }
 
   // Clear cut audio data
@@ -527,15 +597,25 @@ export const useSilenceStore = defineStore('silence', () => {
     cutAudioFiles.value.clear();
   }
 
-  // Get regions visible in a time range
-  function getRegionsInRange(start: number, end: number): SilenceRegion[] {
-    return silenceRegions.value.filter(
+  // Get regions visible in a time range for a track
+  function getRegionsInRange(trackId: string, start: number, end: number): SilenceRegion[] {
+    return getRegionsForTrack(trackId).filter(
       r => r.end > start && r.start < end
     );
   }
 
-  // Check if silence regions have been created
-  const hasRegions = computed(() => silenceRegions.value.length > 0);
+  // Check if any track has silence regions
+  const hasRegions = computed(() => {
+    for (const regions of silenceRegions.value.values()) {
+      if (regions.length > 0) return true;
+    }
+    return false;
+  });
+
+  // Check if a specific track has silence regions
+  function hasRegionsForTrack(trackId: string): boolean {
+    return (silenceRegions.value.get(trackId)?.length ?? 0) > 0;
+  }
 
   return {
     silenceRegions,
@@ -547,6 +627,11 @@ export const useSilenceStore = defineStore('silence', () => {
     compressedDuration,
     savedDuration,
     hasRegions,
+    hasRegionsForTrack,
+    getRegionsForTrack,
+    getActiveRegionsForTrack,
+    compressedDurationForTrack,
+    savedDurationForTrack,
     initFromVad,
     addRegion,
     updateRegion,
@@ -569,6 +654,7 @@ export const useSilenceStore = defineStore('silence', () => {
     clear,
     clearWithoutHistory,
     setSilenceRegions,
+    setPerTrackSilenceRegions,
     clearCutAudio,
   };
 });

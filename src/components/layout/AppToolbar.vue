@@ -24,6 +24,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import { useTracksStore } from '@/stores/tracks';
 import { useRecordingStore } from '@/stores/recording';
 import { useProjectStore } from '@/stores/project';
+import { useUIStore } from '@/stores/ui';
 import MasterMeter from '@/components/tracks/MasterMeter.vue';
 import { formatTime } from '@/shared/utils';
 import { SUPPORTED_FORMATS, TOOLBAR_ROW_HEIGHT, TOOLBAR_HEIGHT, LOOP_MODES } from '@/shared/constants';
@@ -75,6 +76,7 @@ const transcriptionStore = useTranscriptionStore();
 const tracksStore = useTracksStore();
 const recordingStore = useRecordingStore();
 const projectStore = useProjectStore();
+const uiStore = useUIStore();
 const searchBarRef = ref<InstanceType<typeof SearchBar> | null>(null);
 const showVadSettings = ref(false);
 const showCleaningPanel = ref(false);
@@ -178,15 +180,22 @@ function handleTranscribe() {
 }
 
 async function handleDetectSilence() {
+  const sel = tracksStore.selectedTrack;
+  if (!sel) {
+    uiStore.showToast('Select a specific track to detect silence', 'warn');
+    return;
+  }
   await vadStore.detectSilence();
-  // Automatically create silence overlays from detection results
-  silenceStore.initFromVad();
+  // Automatically create silence overlays from detection results for the selected track
+  silenceStore.initFromVad(sel.id);
 }
 
 function handleAddSilenceRegion() {
+  const sel = tracksStore.selectedTrack;
+  if (!sel) return;
   // Add silence region from in/out points
   if (inPoint.value !== null && outPoint.value !== null) {
-    silenceStore.addRegion(inPoint.value, outPoint.value);
+    silenceStore.addRegion(sel.id, inPoint.value, outPoint.value);
   }
 }
 
@@ -196,7 +205,12 @@ function handleClearSilenceRegions() {
 }
 
 async function handleCutSilence() {
-  await silenceStore.cutSilenceToNewTrack();
+  const sel = tracksStore.selectedTrack;
+  if (!sel) {
+    uiStore.showToast('Select a specific track to cut silence', 'warn');
+    return;
+  }
+  await silenceStore.cutSilenceToNewTrack(sel.id);
 }
 
 async function handleImport() {

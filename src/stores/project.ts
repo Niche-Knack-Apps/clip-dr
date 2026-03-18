@@ -103,7 +103,7 @@ export const useProjectStore = defineStore('project', () => {
         volumeEnvelope: t.volumeEnvelope,
         cachedAudioPath: t.cachedAudioPath ? toRelativePath(t.cachedAudioPath, baseDir) : null,
       };
-      // Persist EDL clip state (v2+)
+      // Persist EDL clip state (v2+) with sourceIn/sourceDuration (v3)
       if (t.clips && t.clips.length > 0) {
         base.clips = t.clips.map(c => ({
           id: c.id,
@@ -112,14 +112,24 @@ export const useProjectStore = defineStore('project', () => {
           sourceFile: stableSourcePath(c, t),
           sourceOffset: c.sourceOffset ?? 0,
           source_kind: sourceKind(c, t),
+          sourceIn: c.sourceIn,
+          sourceDuration: c.sourceDuration,
         }));
       }
       return base;
     });
 
+    // Serialize per-track silence regions as Record<trackId, SilenceRegion[]>
+    const silenceMap: Record<string, import('@/shared/types').SilenceRegion[]> = {};
+    for (const [trackId, regions] of silenceStore.silenceRegions.entries()) {
+      if (regions.length > 0) {
+        silenceMap[trackId] = regions;
+      }
+    }
+
     const now = new Date().toISOString();
     return {
-      version: 2,
+      version: 3,
       name: projectName.value,
       createdAt: createdAt ?? now,
       modifiedAt: now,
@@ -128,7 +138,7 @@ export const useProjectStore = defineStore('project', () => {
         inPoint: selectionStore.inOutPoints.inPoint,
         outPoint: selectionStore.inOutPoints.outPoint,
       },
-      silenceRegions: silenceStore.silenceRegions,
+      silenceRegions: silenceMap,
     };
   }
 
@@ -191,8 +201,8 @@ export const useProjectStore = defineStore('project', () => {
       const json = await invoke<string>('load_project', { path });
       const project: ProjectFile = JSON.parse(json);
 
-      // Validate version (1 = original, 2 = adds clip EDL state)
-      if (project.version !== 1 && project.version !== 2) {
+      // Validate version (1 = original, 2 = adds clip EDL, 3 = adds sourceIn/sourceDuration + per-track silence)
+      if (project.version !== 1 && project.version !== 2 && project.version !== 3) {
         throw new Error(`Unsupported project version: ${project.version}`);
       }
 
@@ -261,8 +271,8 @@ export const useProjectStore = defineStore('project', () => {
             lastTrack.duration = pt.duration;
             lastTrack.trackStart = pt.trackStart;
 
-            // v2: restore EDL clip state
-            if (project.version === 2 && pt.clips && pt.clips.length > 0) {
+            // v2+: restore EDL clip state
+            if ((project.version === 2 || project.version === 3) && pt.clips && pt.clips.length > 0) {
               // Surface any temp-path clips as errors (source stability policy)
               const tempClips = pt.clips.filter(c => c.source_kind === 'temp');
               if (tempClips.length > 0) {
@@ -279,6 +289,9 @@ export const useProjectStore = defineStore('project', () => {
                 duration: c.duration,
                 sourceFile: c.sourceFile,
                 sourceOffset: c.sourceOffset,
+                // v3: restore sourceIn/sourceDuration; v2 compat: default to current values
+                sourceIn: c.sourceIn ?? c.sourceOffset,
+                sourceDuration: c.sourceDuration ?? c.duration,
               }));
               tracksStore.setTrackClips(lastTrack.id, reconstructed);
             }
@@ -297,9 +310,25 @@ export const useProjectStore = defineStore('project', () => {
         selectionStore.setOutPoint(project.selection.outPoint);
       }
 
-      // Restore silence regions
-      if (project.silenceRegions && project.silenceRegions.length > 0) {
-        silenceStore.setSilenceRegions(project.silenceRegions);
+      // Restore silence regions (v3: per-track Record, v1-v2: flat array)
+      if (project.silenceRegions) {
+        if (Array.isArray(project.silenceRegions)) {
+          // Legacy flat array (v1-v2)
+          if (project.silenceRegions.length > 0) {
+            silenceStore.setSilenceRegions(project.silenceRegions);
+            // If multitrack with _unassigned regions, show toast
+            if (tracksStore.tracks.length > 1) {
+              const { useUIStore } = await import('./ui');
+              useUIStore().showToast(
+                'Silence regions from older project need reassignment to a specific track.',
+                'warn'
+              );
+            }
+          }
+        } else {
+          // v3 per-track Record
+          silenceStore.setPerTrackSilenceRegions(project.silenceRegions);
+        }
       }
 
       // Auto-load transcription sidecars for each track (fire-and-forget)

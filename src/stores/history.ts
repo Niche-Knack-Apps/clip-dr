@@ -34,7 +34,7 @@ interface Snapshot {
     inOutPoints: InOutPoints;
   };
   silence: {
-    silenceRegions: SilenceRegion[];
+    silenceRegions: Map<string, SilenceRegion[]>;
     compressionEnabled: boolean;
   };
 }
@@ -43,6 +43,15 @@ interface Snapshot {
 function cloneClip(clip: TrackClip): TrackClip {
   // Spread preserves future fields automatically; explicit overrides document intentional sharing.
   return { ...clip, buffer: clip.buffer, waveformData: clip.waveformData };
+}
+
+/** Deep-clone the per-track silence regions Map for history snapshots. */
+function cloneSilenceMap(map: Map<string, SilenceRegion[]>): Map<string, SilenceRegion[]> {
+  const clone = new Map<string, SilenceRegion[]>();
+  for (const [trackId, regions] of map.entries()) {
+    clone.set(trackId, regions.map(r => ({ ...r })));
+  }
+  return clone;
 }
 
 /**
@@ -105,8 +114,10 @@ function estimateSnapshotBytes(snapshot: Snapshot): number {
     bytes += entry.wordOffsets.size * 60; // ~60 bytes per offset entry
   }
 
-  // Silence regions
-  bytes += snapshot.silence.silenceRegions.length * 24;
+  // Silence regions (per-track Map)
+  for (const regions of snapshot.silence.silenceRegions.values()) {
+    bytes += regions.length * 24;
+  }
 
   return bytes;
 }
@@ -149,7 +160,7 @@ export const useHistoryStore = defineStore('history', () => {
         inOutPoints: { ...selectionStore.inOutPoints },
       },
       silence: {
-        silenceRegions: silenceStore.silenceRegions.map((r: SilenceRegion) => ({ ...r })),
+        silenceRegions: cloneSilenceMap(silenceStore.silenceRegions),
         compressionEnabled: silenceStore.compressionEnabled,
       },
     };
@@ -181,7 +192,7 @@ export const useHistoryStore = defineStore('history', () => {
       selectionStore.inOutPoints = { ...snapshot.selection.inOutPoints };
 
       // Silence
-      silenceStore.silenceRegions = snapshot.silence.silenceRegions.map((r: SilenceRegion) => ({ ...r }));
+      silenceStore.silenceRegions = cloneSilenceMap(snapshot.silence.silenceRegions);
       silenceStore.compressionEnabled = snapshot.silence.compressionEnabled;
     } finally {
       isRestoring.value = false;

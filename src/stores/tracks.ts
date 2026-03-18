@@ -262,15 +262,17 @@ export const useTracksStore = defineStore('tracks', () => {
 
   function setTrackSolo(trackId: string, solo: boolean): void {
     useHistoryStore().pushState('Toggle solo');
-    // Exclusive solo - de-solo all other tracks when enabling
+    // Exclusive solo: when enabling, mute all others visually;
+    // when disabling, unmute everything
     tracks.value = tracks.value.map((t) => {
       if (t.id === trackId) {
-        return { ...t, solo };
+        return { ...t, solo, muted: false };
       }
-      if (solo && t.solo) {
-        return { ...t, solo: false };
+      if (solo) {
+        return { ...t, solo: false, muted: true };
       }
-      return t;
+      // Un-solo: unmute everything
+      return { ...t, solo: false, muted: false };
     });
   }
 
@@ -493,6 +495,93 @@ export const useTracksStore = defineStore('tracks', () => {
       }
 
       return success;
+    } finally {
+      historyStore.endBatch();
+    }
+  }
+
+  // Move a single clip from one track to another
+  function moveClipToTrack(
+    sourceTrackId: string,
+    clipId: string,
+    targetTrackId: string,
+    newClipStart: number
+  ): boolean {
+    if (sourceTrackId === targetTrackId) return true;
+
+    const sourceTrack = getTrackById(sourceTrackId);
+    const targetTrack = getTrackById(targetTrackId);
+    if (!sourceTrack || !targetTrack) return false;
+
+    // Resolve the clip being moved
+    const sourceClips = getTrackClips(sourceTrackId);
+    const movingClip = sourceClips.find(c => c.id === clipId);
+    if (!movingClip) return false;
+
+    const historyStore = useHistoryStore();
+    historyStore.beginBatch('Move clip to track');
+    try {
+      // Build the clip for the target (propagate sourceIn/sourceDuration for edge trim recovery)
+      const newClip: TrackClip = {
+        id: generateId(),
+        buffer: movingClip.buffer,
+        waveformData: [...movingClip.waveformData],
+        clipStart: newClipStart,
+        duration: movingClip.duration,
+        sourceFile: movingClip.sourceFile,
+        sourceOffset: movingClip.sourceOffset,
+        sourceIn: movingClip.sourceIn,
+        sourceDuration: movingClip.sourceDuration,
+      };
+
+      // Add clip to target track's clips array
+      const targetIdx = tracks.value.findIndex(t => t.id === targetTrackId);
+      const existingTargetClips = targetTrack.clips && targetTrack.clips.length > 0
+        ? [...targetTrack.clips]
+        : [];
+
+      // If target is a single-buffer track, convert its audio to a clip first
+      if (existingTargetClips.length === 0 && targetTrack.audioData.buffer) {
+        existingTargetClips.push({
+          id: targetTrack.id + '-converted',
+          buffer: targetTrack.audioData.buffer,
+          waveformData: [...targetTrack.audioData.waveformData],
+          clipStart: targetTrack.trackStart,
+          duration: targetTrack.duration,
+          sourceFile: targetTrack.cachedAudioPath || targetTrack.sourcePath,
+          sourceOffset: 0,
+        });
+      }
+
+      existingTargetClips.push(newClip);
+
+      // Recalculate target bounds
+      const tFirst = Math.min(...existingTargetClips.map(c => c.clipStart));
+      const tLast = Math.max(...existingTargetClips.map(c => c.clipStart + c.duration));
+
+      tracks.value[targetIdx] = {
+        ...targetTrack,
+        clips: existingTargetClips,
+        // Clear single-buffer audioData when converting to multi-clip
+        // (data now lives in clips; leaving it creates duplicate synthetic clips)
+        audioData: { ...targetTrack.audioData, buffer: null },
+        trackStart: tFirst,
+        duration: tLast - tFirst,
+      };
+
+      // Clear activeDrag if it was for the source track (drag is done)
+      if (activeDrag.value?.trackId === sourceTrackId) {
+        activeDrag.value = null;
+      }
+
+      // Remove clip from source
+      deleteClipFromTrack(sourceTrackId, clipId);
+
+      triggerRef(tracks);
+      bumpSyncEpoch();
+
+      console.log(`[Tracks] Moved clip ${clipId} from ${sourceTrack.name} to ${targetTrack.name}`);
+      return true;
     } finally {
       historyStore.endBatch();
     }
@@ -840,6 +929,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: cutStartInClip,
             sourceFile: clip.sourceFile,
             sourceOffset: clipSourceOffset,
+            sourceIn: clip.sourceIn ?? clipSourceOffset,
+            sourceDuration: clip.sourceDuration ?? clip.duration,
           });
         }
 
@@ -853,6 +944,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: clip.duration - cutEndInClip,
             sourceFile: clip.sourceFile,
             sourceOffset: clipSourceOffset + cutEndInClip,
+            sourceIn: clip.sourceIn ?? clipSourceOffset,
+            sourceDuration: clip.sourceDuration ?? clip.duration,
           });
         }
       } else if (clip.buffer) {
@@ -895,6 +988,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: beforeBuf.duration,
             sourceFile: clip.sourceFile,
             sourceOffset: clip.sourceOffset,
+            sourceIn: clip.sourceIn ?? clip.sourceOffset ?? 0,
+            sourceDuration: clip.sourceDuration ?? clip.duration,
           });
         }
 
@@ -917,6 +1012,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: afterBuf.duration,
             sourceFile: clip.sourceFile,
             sourceOffset: (clip.sourceOffset ?? 0) + relOverlapEnd,
+            sourceIn: clip.sourceIn ?? clip.sourceOffset ?? 0,
+            sourceDuration: clip.sourceDuration ?? clip.duration,
           });
         }
       }
@@ -1030,6 +1127,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: track.duration,
       sourceFile: track.cachedAudioPath || track.sourcePath,
       sourceOffset: 0,
+      sourceIn: 0,
+      sourceDuration: track.audioData.sourceDuration ?? track.duration,
     }];
   }
 
@@ -1413,6 +1512,32 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Finalize clip positions and recalculate track bounds after drag ends
+  /** Shift and clamp envelope points when track bounds change (e.g. after drag or clip delete). */
+  function adjustEnvelopeForBoundsChange(
+    trackIndex: number,
+    oldTrackStart: number,
+    newTrackStart: number,
+    newDuration: number
+  ): void {
+    const track = tracks.value[trackIndex];
+    if (!track.volumeEnvelope || track.volumeEnvelope.length === 0) return;
+
+    const timeShift = oldTrackStart - newTrackStart;
+    const adjusted: VolumeAutomationPoint[] = [];
+
+    for (const p of track.volumeEnvelope) {
+      const shifted = p.time + timeShift;
+      // Filter out points that fell outside the new bounds
+      if (shifted < -0.001 || shifted > newDuration + 0.001) continue;
+      adjusted.push({ ...p, time: Math.max(0, Math.min(newDuration, shifted)) });
+    }
+
+    tracks.value[trackIndex] = {
+      ...tracks.value[trackIndex],
+      volumeEnvelope: adjusted.length > 0 ? adjusted : undefined,
+    };
+  }
+
   function finalizeClipPositions(trackId: string): void {
     const trackIndex = tracks.value.findIndex((t) => t.id === trackId);
     if (trackIndex === -1) return;
@@ -1435,14 +1560,19 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     // Recalculate track bounds based on all clips
+    const oldTrackStart = track.trackStart;
     const firstClipStart = Math.min(...track.clips.map(c => c.clipStart));
     const lastClipEnd = Math.max(...track.clips.map(c => c.clipStart + c.duration));
+    const newDuration = lastClipEnd - firstClipStart;
 
     tracks.value[trackIndex] = {
       ...track,
       trackStart: firstClipStart,
-      duration: lastClipEnd - firstClipStart,
+      duration: newDuration,
     };
+
+    // Shift envelope points to match new track bounds
+    adjustEnvelopeForBoundsChange(trackIndex, oldTrackStart, firstClipStart, newDuration);
 
     // Trigger reactivity
     triggerRef(tracks);
@@ -1450,6 +1580,123 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Reset the timeline duration floor now that drag is complete.
     minTimelineDuration.value = 0;
+  }
+
+  // Minimum clip duration for edge trimming (prevents clips from collapsing to zero)
+  const MIN_CLIP_DURATION = 0.01;
+
+  /**
+   * Trim the left edge of a clip (non-destructive).
+   * Positive delta = trim inward (remove from left), negative = expand outward (recover hidden audio).
+   */
+  function trimClipLeft(trackId: string, clipId: string, delta: number): void {
+    const track = getTrackById(trackId);
+    if (!track?.clips) return;
+    const clipIndex = track.clips.findIndex(c => c.id === clipId);
+    if (clipIndex === -1) return;
+
+    const clip = track.clips[clipIndex];
+    const srcIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
+    const currentOffset = clip.sourceOffset ?? 0;
+
+    let newOffset = currentOffset + delta;
+    let newClipStart = clip.clipStart + delta;
+    let newDuration = clip.duration - delta;
+
+    // Clamp: cannot trim past original source start
+    if (newOffset < srcIn) {
+      const excess = srcIn - newOffset;
+      newOffset = srcIn;
+      newClipStart += excess;
+      newDuration -= excess;
+    }
+    // Clamp: minimum duration
+    if (newDuration < MIN_CLIP_DURATION) {
+      const shortfall = MIN_CLIP_DURATION - newDuration;
+      newDuration = MIN_CLIP_DURATION;
+      newOffset -= shortfall;
+      newClipStart -= shortfall;
+    }
+
+    track.clips[clipIndex] = {
+      ...clip,
+      sourceOffset: newOffset,
+      clipStart: newClipStart,
+      duration: newDuration,
+    };
+    triggerRef(tracks);
+    bumpSyncEpoch();
+  }
+
+  /**
+   * Trim the right edge of a clip (non-destructive).
+   * Positive delta = expand outward (recover hidden audio), negative = trim inward (remove from right).
+   */
+  function trimClipRight(trackId: string, clipId: string, delta: number): void {
+    const track = getTrackById(trackId);
+    if (!track?.clips) return;
+    const clipIndex = track.clips.findIndex(c => c.id === clipId);
+    if (clipIndex === -1) return;
+
+    const clip = track.clips[clipIndex];
+    const srcIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
+    const srcDur = clip.sourceDuration ?? clip.duration;
+    const currentOffset = clip.sourceOffset ?? 0;
+
+    let newDuration = clip.duration + delta;
+
+    // Clamp: cannot extend past end of source audio
+    const maxDuration = (srcIn + srcDur) - currentOffset;
+    if (newDuration > maxDuration) {
+      newDuration = maxDuration;
+    }
+    // Clamp: minimum duration
+    if (newDuration < MIN_CLIP_DURATION) {
+      newDuration = MIN_CLIP_DURATION;
+    }
+
+    track.clips[clipIndex] = {
+      ...clip,
+      duration: newDuration,
+    };
+    triggerRef(tracks);
+    bumpSyncEpoch();
+  }
+
+  /**
+   * Finalize an edge trim operation. Guarantees:
+   * 1. Recomputes visible track extent from clips (trackStart, duration)
+   * 2. Preserves source recoverability bounds (never mutates sourceIn/sourceDuration)
+   * 3. Invalidates derived waveform caches via finalizeClipWaveforms
+   * 4. Triggers playback resync (bump syncEpoch)
+   * 5. Never mutates unrelated clips' source geometry
+   * 6. Pushes history state
+   */
+  function finalizeEdgeTrim(trackId: string): void {
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex === -1) return;
+    const track = tracks.value[trackIndex];
+    if (!track.clips || track.clips.length === 0) return;
+
+    useHistoryStore().pushState('Edge trim');
+
+    const oldTrackStart = track.trackStart;
+    const firstClipStart = Math.min(...track.clips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...track.clips.map(c => c.clipStart + c.duration));
+    const newDuration = lastClipEnd - firstClipStart;
+
+    tracks.value[trackIndex] = {
+      ...track,
+      trackStart: firstClipStart,
+      duration: newDuration,
+    };
+
+    adjustEnvelopeForBoundsChange(trackIndex, oldTrackStart, firstClipStart, newDuration);
+    triggerRef(tracks);
+    bumpSyncEpoch();
+
+    // Refresh waveform slices for trimmed clips
+    finalizeClipWaveforms(trackId);
   }
 
   // Delete a specific clip from a track
@@ -1480,15 +1727,21 @@ export const useTracksStore = defineStore('tracks', () => {
       }
 
       // Recalculate track bounds
+      const oldTrackStart = track.trackStart;
       const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
       const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+      const newDuration = lastClipEnd - firstClipStart;
 
       tracks.value[trackIndex] = {
         ...track,
         clips: newClips,
         trackStart: firstClipStart,
-        duration: lastClipEnd - firstClipStart,
+        duration: newDuration,
       };
+
+      // Shift envelope points to match new track bounds
+      adjustEnvelopeForBoundsChange(trackIndex, oldTrackStart, firstClipStart, newDuration);
+
       triggerRef(tracks);
       bumpSyncEpoch();
 
@@ -1589,6 +1842,8 @@ export const useTracksStore = defineStore('tracks', () => {
     if (!buffer) {
       const fraction = relSplit / clip.duration;
       const splitBucket = Math.floor(fraction * (clip.waveformData.length / 2));
+      const parentSourceIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
+      const parentSourceDuration = clip.sourceDuration ?? clip.duration;
       return {
         before: {
           id: generateId(),
@@ -1598,6 +1853,8 @@ export const useTracksStore = defineStore('tracks', () => {
           duration: relSplit,
           sourceFile: clip.sourceFile,
           sourceOffset: clip.sourceOffset,
+          sourceIn: parentSourceIn,
+          sourceDuration: parentSourceDuration,
         },
         after: {
           id: generateId(),
@@ -1607,6 +1864,8 @@ export const useTracksStore = defineStore('tracks', () => {
           duration: clip.duration - relSplit,
           sourceFile: clip.sourceFile,
           sourceOffset: (clip.sourceOffset ?? 0) + relSplit,
+          sourceIn: parentSourceIn,
+          sourceDuration: parentSourceDuration,
         },
       };
     }
@@ -1634,6 +1893,9 @@ export const useTracksStore = defineStore('tracks', () => {
     const beforeWf = await generateWaveformFromBuffer(beforeBuffer);
     const afterWf = await generateWaveformFromBuffer(afterBuffer);
 
+    const parentSourceIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
+    const parentSourceDuration = clip.sourceDuration ?? clip.duration;
+
     const beforeClip: TrackClip = {
       id: generateId(),
       buffer: beforeBuffer,
@@ -1642,6 +1904,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: beforeBuffer.duration,
       sourceFile: clip.sourceFile,
       sourceOffset: clip.sourceOffset,
+      sourceIn: parentSourceIn,
+      sourceDuration: parentSourceDuration,
     };
 
     const afterClip: TrackClip = {
@@ -1652,6 +1916,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: afterBuffer.duration,
       sourceFile: clip.sourceFile,
       sourceOffset: clip.sourceOffset != null ? clip.sourceOffset + relSplit : undefined,
+      sourceIn: parentSourceIn,
+      sourceDuration: parentSourceDuration,
     };
 
     return { before: beforeClip, after: afterClip };
@@ -1718,6 +1984,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Insert the new clip at the playhead position
     // Satisfy C2: sourceFile/sourceOffset must be set immediately (cacheClipsForPlayback may update later)
+    // Pasted clips start with no hidden audio (recovery range = current extent)
     const newClip: TrackClip = {
       id: generateId(),
       buffer,
@@ -1726,6 +1993,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: pasteDuration,
       sourceFile,
       sourceOffset,
+      sourceIn: sourceOffset,
+      sourceDuration: pasteDuration,
     };
     currentClips.push(newClip);
 
@@ -1964,26 +2233,46 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // Set the AudioBuffer after browser decode completes
+  // INV-5: import finalization must not overwrite edited clip/timeline geometry
   function setImportBuffer(trackId: string, buffer: AudioBuffer): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
     const track = tracks.value[idx];
+    const hasClips = track.clips && track.clips.length > 0;
 
-    console.log(`[Tracks] setImportBuffer: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${buffer.duration.toFixed(2)}, oldStatus=${track.importStatus}, newStatus=ready`);
+    console.log(`[Tracks] setImportBuffer: track=${track.name}, oldDuration=${track.duration.toFixed(2)}, newDuration=${buffer.duration.toFixed(2)}, hasClips=${hasClips}, oldStatus=${track.importStatus}, newStatus=ready`);
     const updated = [...tracks.value];
-    updated[idx] = {
-      ...track,
-      audioData: {
-        ...track.audioData,
-        buffer,
-        sampleRate: buffer.sampleRate,
-        channels: buffer.numberOfChannels,
-      },
-      duration: buffer.duration,
-      importStatus: 'ready' as ImportStatus,
-      importProgress: undefined,
-      importDecodeProgress: undefined,
-    };
+    if (hasClips) {
+      // Track already edited into clips — update buffer and source metadata only.
+      // Do NOT overwrite track.duration or track.trackStart (clips define timeline extent).
+      updated[idx] = {
+        ...track,
+        audioData: {
+          ...track.audioData,
+          buffer,
+          sampleRate: buffer.sampleRate,
+          channels: buffer.numberOfChannels,
+          sourceDuration: buffer.duration,
+        },
+        importStatus: 'ready' as ImportStatus,
+        importProgress: undefined,
+        importDecodeProgress: undefined,
+      };
+    } else {
+      updated[idx] = {
+        ...track,
+        audioData: {
+          ...track.audioData,
+          buffer,
+          sampleRate: buffer.sampleRate,
+          channels: buffer.numberOfChannels,
+        },
+        duration: buffer.duration,
+        importStatus: 'ready' as ImportStatus,
+        importProgress: undefined,
+        importDecodeProgress: undefined,
+      };
+    }
     tracks.value = updated;
   }
 
@@ -2552,6 +2841,7 @@ export const useTracksStore = defineStore('tracks', () => {
     generateWaveformFromBuffer,
     appendAudioToTrack,
     moveTrackToTrack,
+    moveClipToTrack,
     cutRegionFromTrack,
     getTrackClips,
     mixClipsForTrack,
@@ -2561,6 +2851,9 @@ export const useTracksStore = defineStore('tracks', () => {
     extractRegionFromAllTracks,
     extractRegionViaRust,
     finalizeClipPositions,
+    trimClipLeft,
+    trimClipRight,
+    finalizeEdgeTrim,
     deleteClipFromTrack,
     removeClipKeepTrack,
     splitClipAtTime,

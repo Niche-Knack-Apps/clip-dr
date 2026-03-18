@@ -75,9 +75,14 @@ const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 const followPlayhead = computed(() => uiStore.followPlayhead);
 
+// Resolved trackId for silence operations
+const silenceTrackId = computed(() =>
+  tracksStore.selectedTrack?.id ?? tracksStore.tracks[0]?.id ?? ''
+);
+
 // Get silence regions visible in the current zoom range
 const visibleSilenceRegions = computed(() =>
-  silenceStore.getRegionsInRange(selection.value.start, selection.value.end)
+  silenceStore.getRegionsInRange(silenceTrackId.value, selection.value.start, selection.value.end)
 );
 
 // Timemarks visible in the current zoomed range
@@ -382,19 +387,19 @@ function handleOutMarkerMouseDown(event: MouseEvent) {
 
 // Silence overlay handlers
 function handleSilenceResize(id: string, updates: { start?: number; end?: number }) {
-  silenceStore.updateRegion(id, updates);
+  silenceStore.updateRegion(silenceTrackId.value, id, updates);
 }
 
 function handleSilenceMove(id: string, delta: number) {
-  silenceStore.moveRegion(id, delta);
+  silenceStore.moveRegion(silenceTrackId.value, id, delta);
 }
 
 function handleSilenceDelete(id: string) {
-  silenceStore.deleteRegion(id);
+  silenceStore.deleteRegion(silenceTrackId.value, id);
 }
 
 function handleSilenceRestore(id: string) {
-  silenceStore.restoreRegion(id);
+  silenceStore.restoreRegion(silenceTrackId.value, id);
 }
 
 onMounted(() => {

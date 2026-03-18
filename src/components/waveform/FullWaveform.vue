@@ -246,20 +246,25 @@ function handleResizeEnd(newEnd: number) {
   selectionStore.resizeSelectionEnd(newEnd);
 }
 
+// Resolved trackId for silence overlay operations
+function silenceTrackId(): string {
+  return tracksStore.selectedTrack?.id ?? tracksStore.tracks[0]?.id ?? '';
+}
+
 function handleSilenceResize(id: string, updates: { start?: number; end?: number }) {
-  silenceStore.updateRegion(id, updates);
+  silenceStore.updateRegion(silenceTrackId(), id, updates);
 }
 
 function handleSilenceMove(id: string, delta: number) {
-  silenceStore.moveRegion(id, delta);
+  silenceStore.moveRegion(silenceTrackId(), id, delta);
 }
 
 function handleSilenceDelete(id: string) {
-  silenceStore.deleteRegion(id);
+  silenceStore.deleteRegion(silenceTrackId(), id);
 }
 
 function handleSilenceRestore(id: string) {
-  silenceStore.restoreRegion(id);
+  silenceStore.restoreRegion(silenceTrackId(), id);
 }
 
 onMounted(() => {
@@ -324,7 +329,7 @@ onUnmounted(() => {
 
       <!-- Silence region overlays (z-10 to stay above waveform but below selection) -->
       <SilenceOverlay
-        v-for="region in silenceStore.silenceRegions"
+        v-for="region in silenceStore.getRegionsForTrack(silenceTrackId())"
         :key="region.id"
         :region="region"
         :container-width="containerWidth"

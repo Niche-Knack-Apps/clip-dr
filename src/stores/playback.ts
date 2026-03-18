@@ -206,11 +206,12 @@ export const usePlaybackStore = defineStore('playback', () => {
       try {
         let pos = await invoke<number>('playback_get_position');
 
-        // Silence skipping
+        // Silence skipping (per-track: uses selected track or first track)
         if (silenceStore.compressionEnabled) {
+          const silenceTrackId = tracksStore.selectedTrack?.id ?? tracksStore.tracks[0]?.id;
           const skipFn = playbackSpeed.value > 0
-            ? silenceStore.getNextSpeechTime
-            : silenceStore.getPrevSpeechTime;
+            ? (t: number) => silenceStore.getNextSpeechTime(silenceTrackId ?? '', t)
+            : (t: number) => silenceStore.getPrevSpeechTime(silenceTrackId ?? '', t);
           const skipTo = skipFn(pos);
           if (skipTo !== pos) {
             await invoke('playback_seek', { position: skipTo });
@@ -325,7 +326,8 @@ export const usePlaybackStore = defineStore('playback', () => {
 
     // If skip-silence is enabled and seeking into silence, snap forward
     if (silenceStore.compressionEnabled) {
-      seekTime = silenceStore.getNextSpeechTime(seekTime);
+      const silenceTrackId = tracksStore.selectedTrack?.id ?? tracksStore.tracks[0]?.id ?? '';
+      seekTime = silenceStore.getNextSpeechTime(silenceTrackId, seekTime);
     }
 
     currentTime.value = seekTime;
