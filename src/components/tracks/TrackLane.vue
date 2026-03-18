@@ -120,6 +120,7 @@ const trackTimemarks = computed(() => {
 function handleTimelineClick(event: MouseEvent) {
   if (event.button !== 0) return;
   if (isClipDragging.value || clipDragPending.value) return;
+  timemarkPopup.value = null;
   const rect = containerRef.value?.getBoundingClientRect();
   if (!rect || duration.value <= 0) return;
   const time = ((event.clientX - rect.left) / rect.width) * duration.value;
@@ -127,12 +128,100 @@ function handleTimelineClick(event: MouseEvent) {
   console.log('[TrackLane] seek via timeline click:', time.toFixed(3));
 }
 
-function handleTimemarkClick(time: number) {
-  playbackStore.seek(props.track.trackStart + time);
+// Timemark drag state
+const isTimemarkDragging = ref(false);
+const timemarkDragId = ref<string | null>(null);
+let timemarkDragStartX = 0;
+let timemarkDragMoved = false;
+let timemarkDragRafId: number | null = null;
+let pendingTimemarkDragEvent: MouseEvent | null = null;
+
+// Timemark context popup state
+const timemarkPopup = ref<{ markId: string; x: number; y: number; label: string } | null>(null);
+const timemarkEditLabel = ref('');
+
+function handleTimemarkMouseDown(markId: string, event: MouseEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  useHistoryStore().pushState('Move marker');
+  isTimemarkDragging.value = true;
+  timemarkDragId.value = markId;
+  timemarkDragStartX = event.clientX;
+  timemarkDragMoved = false;
+
+  document.addEventListener('mousemove', handleTimemarkDragMove);
+  document.addEventListener('mouseup', handleTimemarkDragEnd);
+}
+
+function handleTimemarkDragMove(event: MouseEvent) {
+  if (!isTimemarkDragging.value) return;
+  const dx = Math.abs(event.clientX - timemarkDragStartX);
+  if (dx > 3) timemarkDragMoved = true;
+
+  pendingTimemarkDragEvent = event;
+  if (timemarkDragRafId === null) {
+    timemarkDragRafId = requestAnimationFrame(flushTimemarkDrag);
+  }
+}
+
+function flushTimemarkDrag() {
+  timemarkDragRafId = null;
+  if (!pendingTimemarkDragEvent || !timemarkDragId.value || !containerRef.value) return;
+  const event = pendingTimemarkDragEvent;
+  pendingTimemarkDragEvent = null;
+
+  const rect = containerRef.value.getBoundingClientRect();
+  const relX = event.clientX - rect.left;
+  const newTime = (relX / rect.width) * duration.value;
+  // Convert to track-relative: newTime is absolute, subtract trackStart
+  const trackRelative = newTime - props.track.trackStart;
+  const clamped = Math.max(0, Math.min(props.track.duration, trackRelative));
+  tracksStore.updateTimemarkTime(props.track.id, timemarkDragId.value, clamped);
+}
+
+function handleTimemarkDragEnd() {
+  if (timemarkDragRafId !== null) {
+    cancelAnimationFrame(timemarkDragRafId);
+    timemarkDragRafId = null;
+  }
+  pendingTimemarkDragEvent = null;
+
+  if (!timemarkDragMoved && timemarkDragId.value) {
+    // Click (no drag) — show popup for delete/rename
+    const mark = props.track.timemarks?.find(m => m.id === timemarkDragId.value);
+    if (mark && containerRef.value) {
+      const rect = containerRef.value.getBoundingClientRect();
+      timemarkPopup.value = {
+        markId: timemarkDragId.value,
+        x: timemarkDragStartX - rect.left,
+        y: 0,
+        label: mark.label,
+      };
+      timemarkEditLabel.value = mark.label;
+    }
+  }
+
+  isTimemarkDragging.value = false;
+  timemarkDragId.value = null;
+  document.removeEventListener('mousemove', handleTimemarkDragMove);
+  document.removeEventListener('mouseup', handleTimemarkDragEnd);
 }
 
 function handleTimemarkDelete(markId: string) {
   tracksStore.removeTrackTimemark(props.track.id, markId);
+  timemarkPopup.value = null;
+}
+
+function handleTimemarkRename() {
+  if (!timemarkPopup.value) return;
+  const mark = props.track.timemarks?.find(m => m.id === timemarkPopup.value!.markId);
+  if (mark && timemarkEditLabel.value.trim()) {
+    mark.label = timemarkEditLabel.value.trim();
+    tracksStore.tracks = [...tracksStore.tracks]; // trigger reactivity
+  }
+  timemarkPopup.value = null;
 }
 
 // Format track duration
@@ -446,8 +535,13 @@ onUnmounted(() => {
   if (trimRafId !== null) {
     cancelAnimationFrame(trimRafId);
   }
+  if (timemarkDragRafId !== null) {
+    cancelAnimationFrame(timemarkDragRafId);
+  }
   document.removeEventListener('mousemove', handleTrimMove);
   document.removeEventListener('mouseup', handleTrimEnd);
+  document.removeEventListener('mousemove', handleTimemarkDragMove);
+  document.removeEventListener('mouseup', handleTimemarkDragEnd);
 });
 </script>
 
@@ -660,10 +754,10 @@ onUnmounted(() => {
       <div
         v-for="mark in trackTimemarks"
         :key="mark.id"
-        class="absolute top-0 bottom-0 z-10 cursor-pointer group/tm"
+        class="absolute top-0 bottom-0 z-10 cursor-grab group/tm"
         :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
         :title="mark.label"
-        @click.stop="handleTimemarkClick(mark.time)"
+        @mousedown="handleTimemarkMouseDown(mark.id, $event)"
         @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
       >
         <!-- Triangle flag at top -->
@@ -689,7 +783,38 @@ onUnmounted(() => {
         <!-- Tooltip on hover -->
         <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20">
           {{ mark.label }}
-          <span class="text-gray-500 ml-1">(right-click to delete)</span>
+          <span class="text-gray-500 ml-1">(drag to move · click for options)</span>
+        </div>
+      </div>
+
+      <!-- Timemark popup (delete / rename) -->
+      <div
+        v-if="timemarkPopup"
+        class="absolute z-30 bg-gray-800 border border-gray-600 rounded shadow-lg p-2 flex flex-col gap-1.5"
+        :style="{ left: `${timemarkPopup.x}px`, top: '2px', transform: 'translateX(-50%)' }"
+        @mousedown.stop
+        @click.stop
+      >
+        <input
+          v-model="timemarkEditLabel"
+          type="text"
+          class="text-xs bg-gray-700 text-gray-200 border border-gray-600 rounded px-1.5 py-0.5 outline-none focus:border-cyan-500 w-28"
+          @keydown.enter="handleTimemarkRename"
+          @keydown.escape="timemarkPopup = null"
+        />
+        <div class="flex gap-1">
+          <button
+            class="flex-1 text-[10px] px-1.5 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white"
+            @click="handleTimemarkRename"
+          >
+            Save
+          </button>
+          <button
+            class="flex-1 text-[10px] px-1.5 py-0.5 rounded bg-red-700 hover:bg-red-600 text-white"
+            @click="handleTimemarkDelete(timemarkPopup.markId)"
+          >
+            Delete
+          </button>
         </div>
       </div>
 
