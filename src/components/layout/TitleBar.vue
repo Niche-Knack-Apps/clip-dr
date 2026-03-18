@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import scalpelIcon from '@/assets/scalpel.svg';
 
 const appWindow = getCurrentWindow();
 
@@ -23,10 +24,7 @@ function close() {
   >
     <!-- Left: icon + title -->
     <div class="flex items-center gap-2">
-      <svg class="text-cyan-400" style="width: 30px; height: 30px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M4 20L14.5 9.5C15.5 8.5 17 8 18.5 8.5L20 4L15.5 5.5C15 7 14.5 8.5 13.5 9.5L3 20" />
-        <path d="M4 20C4 20 6 18 7 17" stroke-linecap="round" />
-      </svg>
+      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70" style="width: 30px; height: 30px" />
       <span class="text-sm font-medium text-gray-400">Clip Dr.</span>
     </div>
 
