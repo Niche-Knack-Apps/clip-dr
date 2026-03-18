@@ -1020,6 +1020,63 @@ function handleClipSelect(trackId: string, clipId: string) {
           class="flex flex-col items-center justify-center h-full min-h-[120px] gap-4"
         >
           <img :src="scalpelIcon" alt="" class="invert opacity-[0.06] h-48 object-contain" />
+          <div
+            class="w-full px-8 text-gray-700/20"
+            style="mask-image: linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%); -webkit-mask-image: linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)"
+          >
+            <svg class="w-full h-20" viewBox="0 0 1000 80" preserveAspectRatio="none" fill="currentColor">
+              <rect x="5" y="34" width="7" height="12" rx="1" /><rect x="15" y="30" width="7" height="20" rx="1" />
+              <rect x="25" y="26" width="7" height="28" rx="1" /><rect x="35" y="22" width="7" height="36" rx="1" />
+              <rect x="45" y="28" width="7" height="24" rx="1" /><rect x="55" y="18" width="7" height="44" rx="1" />
+              <rect x="65" y="24" width="7" height="32" rx="1" /><rect x="75" y="14" width="7" height="52" rx="1" />
+              <rect x="85" y="20" width="7" height="40" rx="1" /><rect x="95" y="26" width="7" height="28" rx="1" />
+              <rect x="105" y="16" width="7" height="48" rx="1" /><rect x="115" y="22" width="7" height="36" rx="1" />
+              <rect x="125" y="10" width="7" height="60" rx="1" /><rect x="135" y="18" width="7" height="44" rx="1" />
+              <rect x="145" y="24" width="7" height="32" rx="1" /><rect x="155" y="12" width="7" height="56" rx="1" />
+              <rect x="165" y="20" width="7" height="40" rx="1" /><rect x="175" y="8" width="7" height="64" rx="1" />
+              <rect x="185" y="16" width="7" height="48" rx="1" /><rect x="195" y="22" width="7" height="36" rx="1" />
+              <rect x="205" y="6" width="7" height="68" rx="1" /><rect x="215" y="14" width="7" height="52" rx="1" />
+              <rect x="225" y="20" width="7" height="40" rx="1" /><rect x="235" y="10" width="7" height="60" rx="1" />
+              <rect x="245" y="18" width="7" height="44" rx="1" /><rect x="255" y="4" width="7" height="72" rx="1" />
+              <rect x="265" y="12" width="7" height="56" rx="1" /><rect x="275" y="22" width="7" height="36" rx="1" />
+              <rect x="285" y="8" width="7" height="64" rx="1" /><rect x="295" y="16" width="7" height="48" rx="1" />
+              <rect x="305" y="2" width="7" height="76" rx="1" /><rect x="315" y="10" width="7" height="60" rx="1" />
+              <rect x="325" y="18" width="7" height="44" rx="1" /><rect x="335" y="6" width="7" height="68" rx="1" />
+              <rect x="345" y="14" width="7" height="52" rx="1" /><rect x="355" y="22" width="7" height="36" rx="1" />
+              <rect x="365" y="8" width="7" height="64" rx="1" /><rect x="375" y="16" width="7" height="48" rx="1" />
+              <rect x="385" y="4" width="7" height="72" rx="1" /><rect x="395" y="12" width="7" height="56" rx="1" />
+              <rect x="405" y="20" width="7" height="40" rx="1" /><rect x="415" y="6" width="7" height="68" rx="1" />
+              <rect x="425" y="14" width="7" height="52" rx="1" /><rect x="435" y="2" width="7" height="76" rx="1" />
+              <rect x="445" y="10" width="7" height="60" rx="1" /><rect x="455" y="18" width="7" height="44" rx="1" />
+              <rect x="465" y="8" width="7" height="64" rx="1" /><rect x="475" y="16" width="7" height="48" rx="1" />
+              <rect x="485" y="4" width="7" height="72" rx="1" /><rect x="495" y="12" width="7" height="56" rx="1" />
+              <rect x="505" y="20" width="7" height="40" rx="1" /><rect x="515" y="6" width="7" height="68" rx="1" />
+              <rect x="525" y="14" width="7" height="52" rx="1" /><rect x="535" y="2" width="7" height="76" rx="1" />
+              <rect x="545" y="10" width="7" height="60" rx="1" /><rect x="555" y="18" width="7" height="44" rx="1" />
+              <rect x="565" y="8" width="7" height="64" rx="1" /><rect x="575" y="22" width="7" height="36" rx="1" />
+              <rect x="585" y="4" width="7" height="72" rx="1" /><rect x="595" y="14" width="7" height="52" rx="1" />
+              <rect x="605" y="6" width="7" height="68" rx="1" /><rect x="615" y="16" width="7" height="48" rx="1" />
+              <rect x="625" y="2" width="7" height="76" rx="1" /><rect x="635" y="12" width="7" height="56" rx="1" />
+              <rect x="645" y="20" width="7" height="40" rx="1" /><rect x="655" y="8" width="7" height="64" rx="1" />
+              <rect x="665" y="16" width="7" height="48" rx="1" /><rect x="675" y="4" width="7" height="72" rx="1" />
+              <rect x="685" y="10" width="7" height="60" rx="1" /><rect x="695" y="22" width="7" height="36" rx="1" />
+              <rect x="705" y="6" width="7" height="68" rx="1" /><rect x="715" y="14" width="7" height="52" rx="1" />
+              <rect x="725" y="8" width="7" height="64" rx="1" /><rect x="735" y="18" width="7" height="44" rx="1" />
+              <rect x="745" y="10" width="7" height="60" rx="1" /><rect x="755" y="16" width="7" height="48" rx="1" />
+              <rect x="765" y="6" width="7" height="68" rx="1" /><rect x="775" y="12" width="7" height="56" rx="1" />
+              <rect x="785" y="20" width="7" height="40" rx="1" /><rect x="795" y="14" width="7" height="52" rx="1" />
+              <rect x="805" y="8" width="7" height="64" rx="1" /><rect x="815" y="18" width="7" height="44" rx="1" />
+              <rect x="825" y="22" width="7" height="36" rx="1" /><rect x="835" y="12" width="7" height="56" rx="1" />
+              <rect x="845" y="16" width="7" height="48" rx="1" /><rect x="855" y="10" width="7" height="60" rx="1" />
+              <rect x="865" y="20" width="7" height="40" rx="1" /><rect x="875" y="14" width="7" height="52" rx="1" />
+              <rect x="885" y="24" width="7" height="32" rx="1" /><rect x="895" y="18" width="7" height="44" rx="1" />
+              <rect x="905" y="22" width="7" height="36" rx="1" /><rect x="915" y="26" width="7" height="28" rx="1" />
+              <rect x="925" y="20" width="7" height="40" rx="1" /><rect x="935" y="28" width="7" height="24" rx="1" />
+              <rect x="945" y="24" width="7" height="32" rx="1" /><rect x="955" y="30" width="7" height="20" rx="1" />
+              <rect x="965" y="26" width="7" height="28" rx="1" /><rect x="975" y="32" width="7" height="16" rx="1" />
+              <rect x="985" y="34" width="7" height="12" rx="1" />
+            </svg>
+          </div>
           <span class="text-xs text-gray-600">Import or record audio</span>
         </div>
       </div>
