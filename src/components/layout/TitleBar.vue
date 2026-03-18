@@ -24,7 +24,7 @@ function close() {
   >
     <!-- Left: icon + title -->
     <div class="flex items-center gap-2" data-tauri-drag-region>
-      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 h-full object-contain" style="width: 128px" />
+      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 h-full object-contain" style="width: 50px" />
       <span class="text-sm font-medium text-gray-400">Clip Dr.</span>
     </div>
 
