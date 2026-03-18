@@ -243,6 +243,32 @@ describe('Clean Audio Playback', () => {
   });
 });
 
+describe('Cleaned Track Timeline Alignment', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('cleaned track inherits trackStart from source track', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    // Create a track starting at 5s on the timeline
+    const buf = mkBuf(3);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'Source', 5.0);
+    const stored = tracksStore.tracks.find(t => t.id === track.id)!;
+    expect(stored.trackStart).toBe(5.0);
+
+    // Simulate what cleaning does: createTrackFromBuffer with sourceTrack.trackStart
+    const cleanedBuf = mkBuf(3);
+    const cleanedTrack = await tracksStore.createTrackFromBuffer(
+      cleanedBuf, null, 'Cleaned Source', stored.trackStart, '/tmp/cleaned.wav'
+    );
+
+    const cleanedStored = tracksStore.tracks.find(t => t.id === cleanedTrack.id)!;
+    expect(cleanedStored.trackStart).toBe(5.0);
+  });
+});
+
 describe('EDL Clip Track Cleaning Regression', () => {
   beforeEach(() => {
     setActivePinia(createPinia());

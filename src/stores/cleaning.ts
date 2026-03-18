@@ -189,7 +189,7 @@ export const useCleaningStore = defineStore('cleaning', () => {
       console.log('[Clean] Creating new track...');
       // Create a new track for the cleaned audio, with sourcePath so Rust playback works
       const cleanedName = cleaningClip ? `Cleaned Clip` : `Cleaned ${sourceTrack.name}`;
-      const trackStart = cleaningClip ? cleaningClip.clipStart : 0;
+      const trackStart = cleaningClip ? cleaningClip.clipStart : sourceTrack.trackStart;
       const cleanedTrack = await tracksStore.createTrackFromBuffer(
         cleanedAudioEntry.buffer,
         cleanedAudioEntry.waveformData,
