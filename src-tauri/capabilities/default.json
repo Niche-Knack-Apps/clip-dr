@@ -21,6 +21,10 @@
     "fs:allow-appdata-write-recursive",
     "fs:write-files",
     "core:event:default",
-    "core:window:allow-destroy"
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
   ]
 }

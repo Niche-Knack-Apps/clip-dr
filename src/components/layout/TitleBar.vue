@@ -19,17 +19,17 @@ function close() {
 
 <template>
   <div
+    data-tauri-drag-region
     class="h-9 bg-gray-900 flex items-center justify-between px-2 select-none shrink-0"
-    style="-webkit-app-region: drag"
   >
     <!-- Left: icon + title -->
-    <div class="flex items-center gap-2">
-      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70" style="width: 30px; height: 30px" />
+    <div class="flex items-center gap-2" data-tauri-drag-region>
+      <img :src="scalpelIcon" alt="Clip Dr." class="invert opacity-70 h-full object-contain" style="width: 128px" />
       <span class="text-sm font-medium text-gray-400">Clip Dr.</span>
     </div>
 
     <!-- Right: window controls -->
-    <div class="flex items-center" style="-webkit-app-region: no-drag">
+    <div class="flex items-center">
       <button
         class="w-8 h-8 flex items-center justify-center text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors rounded-sm"
         title="Minimize"
