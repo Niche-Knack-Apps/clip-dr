@@ -84,7 +84,12 @@ const showRecordingPanel = ref(false);
 const transportRef = ref<HTMLElement | null>(null);
 const cleaningRef = ref<HTMLElement | null>(null);
 const vadRef = ref<HTMLElement | null>(null);
+const vadPopoverRef = ref<HTMLElement | null>(null);
+const cleaningPopoverRef = ref<HTMLElement | null>(null);
+const row2ScrollRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
+const vadPopoverStyle = ref<Record<string, string>>({});
+const cleaningPopoverStyle = ref<Record<string, string>>({});
 const searchFocused = ref(false);
 
 // Inline project rename
@@ -133,11 +138,11 @@ function handleClickOutside(event: MouseEvent) {
     }
   }
   // Cleaning panel
-  if (showCleaningPanel.value && !cleaningRef.value?.contains(target)) {
+  if (showCleaningPanel.value && !cleaningRef.value?.contains(target) && !cleaningPopoverRef.value?.contains(target)) {
     showCleaningPanel.value = false;
   }
   // VAD settings
-  if (showVadSettings.value && !vadRef.value?.contains(target)) {
+  if (showVadSettings.value && !vadRef.value?.contains(target) && !vadPopoverRef.value?.contains(target)) {
     showVadSettings.value = false;
   }
 }
@@ -166,11 +171,32 @@ watch(showRecordingPanel, (show) => {
   }
 });
 
+// Position popovers beneath their trigger buttons (outside scroll container)
+function computePopoverLeft(triggerRef: { value: HTMLElement | null }): Record<string, string> {
+  if (!triggerRef.value || !row2ScrollRef.value) return {};
+  const triggerRect = triggerRef.value.getBoundingClientRect();
+  const outerRect = row2ScrollRef.value.parentElement?.getBoundingClientRect();
+  if (!outerRect) return {};
+  return { left: `${triggerRect.left - outerRect.left}px` };
+}
+
+watch(showVadSettings, (show) => {
+  if (show) nextTick(() => { vadPopoverStyle.value = computePopoverLeft(vadRef); });
+});
+
+watch(showCleaningPanel, (show) => {
+  if (show) nextTick(() => { cleaningPopoverStyle.value = computePopoverLeft(cleaningRef); });
+});
+
 // Check for model on load
 transcriptionStore.checkModel();
 
 function handleTranscribe() {
-  // Auto-resolve: 'ALL' with exactly 1 track → use that track
+  // Explicit targeting rules:
+  // - Exactly one track selected → transcribe that track
+  // - 'ALL' with exactly 1 track → auto-resolve to that track
+  // - 'ALL' with multiple tracks → refuse with toast
+  // - No tracks → silently return
   const sel = tracksStore.selectedTrack;
   if (!sel) {
     if (tracksStore.tracks.length > 1) {
@@ -192,8 +218,14 @@ async function handleDetectSilence() {
     return;
   }
   await vadStore.detectSilence();
+  if (vadStore.error) {
+    uiStore.showToast(vadStore.error, 'error');
+    return;
+  }
   // Automatically create silence overlays from detection results for the selected track
   silenceStore.initFromVad(sel.id);
+  const count = silenceStore.getRegionsForTrack(sel.id).length;
+  uiStore.showToast(`Found ${count} silence region${count !== 1 ? 's' : ''}`, 'info');
 }
 
 function handleAddSilenceRegion() {
@@ -562,397 +594,415 @@ defineExpose({ focusSearch });
     </div>
 
     <!-- Row 2: Clip, Detect Silence, Clean, Export -->
+    <!-- Outer container: relative positioning for popovers, no overflow -->
     <div
-      class="flex items-center gap-3 px-3 border-t border-gray-800"
+      class="relative border-t border-gray-800"
       :style="{ height: `${TOOLBAR_ROW_HEIGHT}px` }"
     >
-      <!-- In/Out controls -->
-      <div class="flex items-center gap-1">
-        <Button
-          variant="ghost"
-          size="sm"
-          :disabled="!hasFile"
-          @click="setInPoint"
-        >
-          <span class="text-green-500 font-bold mr-1 text-xs">I</span>
-          <span v-if="inPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(inPoint, settingsStore.settings.timeFormat) }}</span>
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="sm"
-          :disabled="!hasFile"
-          @click="setOutPoint"
-        >
-          <span class="text-red-500 font-bold mr-1 text-xs">O</span>
-          <span v-if="outPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(outPoint, settingsStore.settings.timeFormat) }}</span>
-        </Button>
-      </div>
-
-      <!-- Clip button -->
-      <Button
-        variant="primary"
-        size="sm"
-        :disabled="!canCreateClip"
-        @click="createClip"
-      >
-        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-        </svg>
-        Clip
-      </Button>
-
-      <div class="w-px h-5 bg-gray-700" />
-
-      <!-- VAD / Silence Removal -->
-      <div ref="vadRef" class="flex items-center gap-1 relative">
-        <Button
-          v-if="!silenceStore.hasRegions"
-          variant="secondary"
-          size="sm"
-          :disabled="!hasFile"
-          :loading="vadStore.loading"
-          @click="handleDetectSilence"
-        >
-          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-          </svg>
-          Detect Silence
-        </Button>
-
-        <template v-else-if="silenceStore.hasRegions">
-          <!-- Silence percentage -->
-          <span class="text-[10px] text-gray-400">
-            {{ silenceStore.activeSilenceRegions.length }} regions
-          </span>
-          <!-- Skip Silence toggle -->
-          <Toggle
-            :model-value="silenceStore.compressionEnabled"
-            label="Skip"
-            @update:model-value="silenceStore.toggleCompression"
-          />
-          <!-- Saved duration -->
-          <span class="text-[10px] text-green-400 font-mono">
-            -{{ formatTime(silenceStore.savedDuration) }}
-          </span>
-          <!-- Cut Silence - creates new track -->
-          <Button
-            variant="primary"
-            size="sm"
-            :loading="silenceStore.cutting"
-            title="Cut silence and create new track (non-destructive)"
-            @click="handleCutSilence"
-          >
-            <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" />
-            </svg>
-            Cut
-          </Button>
-          <!-- Add manual silence region -->
+      <!-- Inner scrollable button strip -->
+      <div ref="row2ScrollRef" class="flex items-center gap-3 px-3 h-full overflow-x-auto overflow-y-hidden toolbar-row2">
+        <!-- In/Out controls -->
+        <div class="flex items-center gap-1 shrink-0">
           <Button
             variant="ghost"
             size="sm"
-            :disabled="inPoint === null || outPoint === null"
-            title="Add silence region from In/Out points"
-            @click="handleAddSilenceRegion"
+            :disabled="!hasFile"
+            @click="setInPoint"
           >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-            </svg>
+            <span class="text-green-500 font-bold mr-1 text-xs">I</span>
+            <span v-if="inPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(inPoint, settingsStore.settings.timeFormat) }}</span>
           </Button>
-          <!-- Clear all -->
+
+          <Button
+            variant="ghost"
+            size="sm"
+            :disabled="!hasFile"
+            @click="setOutPoint"
+          >
+            <span class="text-red-500 font-bold mr-1 text-xs">O</span>
+            <span v-if="outPoint !== null" class="text-[10px] text-gray-500">{{ formatTime(outPoint, settingsStore.settings.timeFormat) }}</span>
+          </Button>
+        </div>
+
+        <!-- Clip button -->
+        <Button
+          variant="primary"
+          size="sm"
+          class="shrink-0"
+          :disabled="!canCreateClip"
+          @click="createClip"
+        >
+          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+          </svg>
+          Clip
+        </Button>
+
+        <div class="w-px h-5 bg-gray-700 shrink-0" />
+
+        <!-- VAD / Silence Removal -->
+        <div ref="vadRef" class="flex items-center gap-1 shrink-0">
+          <Button
+            v-if="!silenceStore.hasRegions"
+            variant="secondary"
+            size="sm"
+            :disabled="!hasFile"
+            :loading="vadStore.loading"
+            @click="handleDetectSilence"
+          >
+            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+            </svg>
+            Detect Silence
+          </Button>
+
+          <template v-else-if="silenceStore.hasRegions">
+            <!-- Silence percentage -->
+            <span class="text-[10px] text-gray-400">
+              {{ silenceStore.activeSilenceRegions.length }} regions
+            </span>
+            <!-- Skip Silence toggle -->
+            <Toggle
+              :model-value="silenceStore.compressionEnabled"
+              label="Skip"
+              @update:model-value="silenceStore.toggleCompression"
+            />
+            <!-- Saved duration -->
+            <span class="text-[10px] text-green-400 font-mono">
+              -{{ formatTime(silenceStore.savedDuration) }}
+            </span>
+            <!-- Cut Silence - creates new track -->
+            <Button
+              variant="primary"
+              size="sm"
+              :loading="silenceStore.cutting"
+              title="Cut silence and create new track (non-destructive)"
+              @click="handleCutSilence"
+            >
+              <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" />
+              </svg>
+              Cut
+            </Button>
+            <!-- Add manual silence region -->
+            <Button
+              variant="ghost"
+              size="sm"
+              :disabled="inPoint === null || outPoint === null"
+              title="Add silence region from In/Out points"
+              @click="handleAddSilenceRegion"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+              </svg>
+            </Button>
+            <!-- Clear all -->
+            <Button
+              variant="ghost"
+              size="sm"
+              icon
+              @click="handleClearSilenceRegions"
+              title="Clear all silence regions"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </Button>
+          </template>
+
           <Button
             variant="ghost"
             size="sm"
             icon
-            @click="handleClearSilenceRegions"
-            title="Clear all silence regions"
+            :class="{ 'bg-gray-700': showVadSettings }"
+            @click="showVadSettings = !showVadSettings; if (showVadSettings) { showCleaningPanel = false; showRecordingPanel = false; }"
+            title="VAD settings"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
             </svg>
           </Button>
-        </template>
+        </div>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          icon
-          :class="{ 'bg-gray-700': showVadSettings }"
-          @click="showVadSettings = !showVadSettings; if (showVadSettings) { showCleaningPanel = false; showRecordingPanel = false; }"
-          title="VAD settings"
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-          </svg>
-        </Button>
+        <div class="w-px h-5 bg-gray-700 shrink-0" />
 
-        <!-- VAD Settings Popover -->
-        <div
-          v-if="showVadSettings"
-          class="absolute top-full left-0 mt-2 p-3 bg-gray-800 rounded-lg shadow-xl border border-gray-700 z-50 min-w-[240px]"
-        >
-          <div class="text-xs text-gray-400 mb-2 font-medium">Silence Detection</div>
-          <div class="space-y-3">
-            <!-- Preset selector -->
-            <div>
-              <label class="text-[10px] text-gray-500 block mb-1">Preset</label>
-              <div class="flex gap-1">
-                <button
-                  v-for="preset in VAD_PRESETS"
-                  :key="preset.name"
-                  type="button"
-                  :class="[
-                    'px-2 py-1 text-[10px] rounded transition-colors',
-                    vadStore.activePreset === preset.name
-                      ? 'bg-cyan-600 text-white'
-                      : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
-                  ]"
-                  :title="preset.description"
-                  @click="vadStore.setPreset(preset.name as VadPresetName)"
-                >
-                  {{ preset.label }}
-                </button>
-              </div>
-            </div>
-            <div>
-              <label class="text-[10px] text-gray-500 block mb-1">
-                Sensitivity: {{ (vadStore.options.energyThreshold * 100).toFixed(0) }}%
-              </label>
-              <Slider
-                :model-value="vadStore.options.energyThreshold"
-                :min="0.01"
-                :max="0.5"
-                :step="0.01"
-                @update:model-value="(v: number) => vadStore.setOptions({ energyThreshold: v })"
-              />
-            </div>
-            <div>
-              <label class="text-[10px] text-gray-500 block mb-1">
-                Padding: {{ (vadStore.options.padding * 1000).toFixed(0) }}ms
-              </label>
-              <Slider
-                :model-value="vadStore.options.padding"
-                :min="0"
-                :max="0.5"
-                :step="0.01"
-                @update:model-value="(v: number) => vadStore.setOptions({ padding: v })"
-              />
-            </div>
-            <div>
-              <label class="text-[10px] text-gray-500 block mb-1">
-                Min Silence: {{ (vadStore.options.minSilenceDuration * 1000).toFixed(0) }}ms
-              </label>
-              <Slider
-                :model-value="vadStore.options.minSilenceDuration"
-                :min="0.1"
-                :max="2.0"
-                :step="0.05"
-                @update:model-value="(v: number) => vadStore.setOptions({ minSilenceDuration: v })"
-              />
-            </div>
-            <div>
-              <label class="text-[10px] text-gray-500 block mb-1">
-                Frame Size: {{ vadStore.options.frameSizeMs }}ms
-              </label>
-              <div class="flex gap-1">
-                <button
-                  v-for="fs in [10, 20, 30]"
-                  :key="fs"
-                  type="button"
-                  :class="[
-                    'px-2 py-0.5 text-[10px] rounded transition-colors',
-                    vadStore.options.frameSizeMs === fs
-                      ? 'bg-cyan-600 text-white'
-                      : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
-                  ]"
-                  @click="vadStore.setOptions({ frameSizeMs: fs })"
-                >
-                  {{ fs }}ms
-                </button>
-              </div>
-            </div>
-            <!-- Detection stats -->
-            <div v-if="vadStore.hasResult" class="text-[10px] text-gray-500 pt-1 border-t border-gray-700">
-              Speech: {{ vadStore.totalSpeechDuration.toFixed(1) }}s
-              | Silence: {{ vadStore.totalSilenceDuration.toFixed(1) }}s
-              ({{ vadStore.silencePercentage.toFixed(0) }}%)
-            </div>
-          </div>
-          <div class="mt-3 pt-2 border-t border-gray-700">
-            <Button
-              variant="secondary"
-              size="sm"
-              class="w-full"
-              :disabled="!hasFile"
-              :loading="vadStore.loading"
-              @click="handleDetectSilence"
+        <!-- Audio Cleaning -->
+        <div ref="cleaningRef" class="flex items-center gap-1 shrink-0">
+          <Button
+            variant="secondary"
+            size="sm"
+            :disabled="!hasFile || !cleaningStore.canClean"
+            :loading="cleaningStore.loading"
+            @click="showCleaningPanel = false; cleaningStore.cleanSelectedTrack()"
+          >
+            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+            </svg>
+            Clean
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
+            :class="{ 'bg-gray-700': showCleaningPanel }"
+            @click="showCleaningPanel = !showCleaningPanel; if (showCleaningPanel) { showVadSettings = false; showRecordingPanel = false; }"
+            title="Cleaning settings"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+            </svg>
+          </Button>
+        </div>
+
+        <div class="w-px h-5 bg-gray-700 shrink-0" />
+
+        <!-- Transcription -->
+        <div class="flex items-center gap-1 relative shrink-0">
+          <Button
+            variant="secondary"
+            size="sm"
+            :disabled="!hasFile || !transcriptionStore.hasModel"
+            :loading="transcriptionStore.loading"
+            :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : transcriptionStore.hasTranscription ? 'Re-run transcription' : 'Transcribe audio'"
+            @click="handleTranscribe"
+          >
+            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+            </svg>
+            {{ transcriptionStore.hasTranscription ? 'Re-transcribe' : 'Transcribe' }}
+          </Button>
+          <!-- Engine selector -->
+          <div class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
+            <button
+              v-for="eng in ([
+                { value: 'whisper', label: 'Whisper', title: 'Whisper ASR (word-level timestamps)' },
+                { value: 'moonshine', label: 'Moon', title: 'Moonshine ASR (faster, estimated timestamps)' },
+              ] as const)"
+              :key="eng.value"
+              type="button"
+              :class="[
+                'px-1.5 py-0.5 text-[10px] rounded transition-colors',
+                settingsStore.settings.transcriptionEngine === eng.value
+                  ? 'bg-purple-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
+              ]"
+              :title="eng.title"
+              @click="settingsStore.setTranscriptionEngine(eng.value)"
             >
-              Re-detect
-            </Button>
+              {{ eng.label }}
+            </button>
+          </div>
+          <!-- Quality selector (whisper only) -->
+          <div v-if="settingsStore.settings.transcriptionEngine === 'whisper'" class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
+            <button
+              v-for="q in ([
+                { value: 'fast', label: 'Fast', title: 'Greedy, best_of=1 — fastest' },
+                { value: 'balanced', label: 'Bal', title: 'Beam search, beam=3 — balanced' },
+                { value: 'best', label: 'Best', title: 'Beam search, beam=5 — most accurate' },
+              ] as const)"
+              :key="q.value"
+              type="button"
+              :class="[
+                'px-1.5 py-0.5 text-[10px] rounded transition-colors',
+                transcriptionStore.transcriptionQuality === q.value
+                  ? 'bg-cyan-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
+              ]"
+              :title="q.title"
+              @click="transcriptionStore.setTranscriptionQuality(q.value)"
+            >
+              {{ q.label }}
+            </button>
+          </div>
+          <!-- Last transcription metrics -->
+          <span
+            v-if="transcriptionStore.lastMetrics"
+            class="text-[10px] text-gray-500 ml-1"
+            :title="`${transcriptionStore.lastMetrics.engine}/${transcriptionStore.lastMetrics.modelName}: ${transcriptionStore.lastMetrics.totalTimeMs}ms total, load=${transcriptionStore.lastMetrics.loadTimeMs}ms, inference=${transcriptionStore.lastMetrics.inferenceTimeMs}ms, ${transcriptionStore.lastMetrics.wordCount} words, RTF=${transcriptionStore.lastMetrics.realTimeFactor.toFixed(2)}x`"
+          >
+            {{ transcriptionStore.lastMetrics.engine === 'moonshine' ? 'M' : 'W' }}:{{ (transcriptionStore.lastMetrics.totalTimeMs / 1000).toFixed(1) }}s
+            ({{ transcriptionStore.lastMetrics.realTimeFactor.toFixed(1) }}x)
+          </span>
+
+          <!-- Transcript download buttons -->
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
+            :disabled="!transcriptionStore.hasTranscription"
+            title="Download transcription as JSON"
+            @click="handleDownloadTranscriptJSON"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3c-2 0-3 1-3 3v12c0 2 1 3 3 3m8-18c2 0 3 1 3 3v12c0 2-1 3-3 3" />
+            </svg>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
+            :disabled="!transcriptionStore.hasTranscription"
+            title="Download transcription as TXT"
+            @click="handleDownloadTranscriptTXT"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-6 2.5h4" />
+            </svg>
+          </Button>
+        </div>
+
+        <div class="w-px h-5 bg-gray-700 shrink-0" />
+
+        <!-- Export Profiles -->
+        <div class="flex items-center gap-1 border-l border-gray-700 pl-2 shrink-0">
+          <Button
+            v-for="profile in settingsStore.getExportProfiles()"
+            :key="profile.id"
+            variant="ghost"
+            size="sm"
+            :disabled="!hasFile || !exportStore.canExport"
+            :loading="exportStore.loading"
+            :title="profile.name"
+            @click="exportStore.exportWithProfile(profile)"
+          >
+            <span class="text-[10px]">
+              <span v-if="profile.isFavorite" class="text-yellow-400 mr-0.5">&#9733;</span>{{ profileLabel(profile) }}
+            </span>
+          </Button>
+        </div>
+
+        <!-- Spacer -->
+        <div class="flex-1" />
+      </div>
+
+      <!-- VAD Settings Popover (outside scroll container so it's not clipped) -->
+      <div
+        v-if="showVadSettings"
+        ref="vadPopoverRef"
+        class="absolute z-50 p-3 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[240px]"
+        :style="{ top: `${TOOLBAR_ROW_HEIGHT}px`, ...vadPopoverStyle }"
+      >
+        <div class="text-xs text-gray-400 mb-2 font-medium">Silence Detection</div>
+        <div class="space-y-3">
+          <!-- Preset selector -->
+          <div>
+            <label class="text-[10px] text-gray-500 block mb-1">Preset</label>
+            <div class="flex gap-1">
+              <button
+                v-for="preset in VAD_PRESETS"
+                :key="preset.name"
+                type="button"
+                :class="[
+                  'px-2 py-1 text-[10px] rounded transition-colors',
+                  vadStore.activePreset === preset.name
+                    ? 'bg-cyan-600 text-white'
+                    : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
+                ]"
+                :title="preset.description"
+                @click="vadStore.setPreset(preset.name as VadPresetName)"
+              >
+                {{ preset.label }}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] text-gray-500 block mb-1">
+              Sensitivity: {{ (vadStore.options.energyThreshold * 100).toFixed(0) }}%
+            </label>
+            <Slider
+              :model-value="vadStore.options.energyThreshold"
+              :min="0.01"
+              :max="0.5"
+              :step="0.01"
+              @update:model-value="(v: number) => vadStore.setOptions({ energyThreshold: v })"
+            />
+          </div>
+          <div>
+            <label class="text-[10px] text-gray-500 block mb-1">
+              Padding: {{ (vadStore.options.padding * 1000).toFixed(0) }}ms
+            </label>
+            <Slider
+              :model-value="vadStore.options.padding"
+              :min="0"
+              :max="0.5"
+              :step="0.01"
+              @update:model-value="(v: number) => vadStore.setOptions({ padding: v })"
+            />
+          </div>
+          <div>
+            <label class="text-[10px] text-gray-500 block mb-1">
+              Min Silence: {{ (vadStore.options.minSilenceDuration * 1000).toFixed(0) }}ms
+            </label>
+            <Slider
+              :model-value="vadStore.options.minSilenceDuration"
+              :min="0.1"
+              :max="2.0"
+              :step="0.05"
+              @update:model-value="(v: number) => vadStore.setOptions({ minSilenceDuration: v })"
+            />
+          </div>
+          <div>
+            <label class="text-[10px] text-gray-500 block mb-1">
+              Frame Size: {{ vadStore.options.frameSizeMs }}ms
+            </label>
+            <div class="flex gap-1">
+              <button
+                v-for="fs in [10, 20, 30]"
+                :key="fs"
+                type="button"
+                :class="[
+                  'px-2 py-0.5 text-[10px] rounded transition-colors',
+                  vadStore.options.frameSizeMs === fs
+                    ? 'bg-cyan-600 text-white'
+                    : 'bg-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-600'
+                ]"
+                @click="vadStore.setOptions({ frameSizeMs: fs })"
+              >
+                {{ fs }}ms
+              </button>
+            </div>
+          </div>
+          <!-- Detection stats -->
+          <div v-if="vadStore.hasResult" class="text-[10px] text-gray-500 pt-1 border-t border-gray-700">
+            Speech: {{ vadStore.totalSpeechDuration.toFixed(1) }}s
+            | Silence: {{ vadStore.totalSilenceDuration.toFixed(1) }}s
+            ({{ vadStore.silencePercentage.toFixed(0) }}%)
           </div>
         </div>
-      </div>
-
-      <div class="w-px h-5 bg-gray-700" />
-
-      <!-- Audio Cleaning -->
-      <div ref="cleaningRef" class="flex items-center gap-1 relative">
-        <Button
-          variant="secondary"
-          size="sm"
-          :disabled="!hasFile || !cleaningStore.canClean"
-          :loading="cleaningStore.loading"
-          @click="showCleaningPanel = false; cleaningStore.cleanSelectedTrack()"
-        >
-          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-          </svg>
-          Clean
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="sm"
-          icon
-          :class="{ 'bg-gray-700': showCleaningPanel }"
-          @click="showCleaningPanel = !showCleaningPanel; if (showCleaningPanel) { showVadSettings = false; showRecordingPanel = false; }"
-          title="Cleaning settings"
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-          </svg>
-        </Button>
-
-        <!-- Cleaning Panel Popover -->
-        <div
-          v-if="showCleaningPanel"
-          class="absolute top-full left-0 mt-2 z-50"
-        >
-          <CleaningPanel />
-        </div>
-      </div>
-
-      <div class="w-px h-5 bg-gray-700" />
-
-      <!-- Transcription -->
-      <div class="flex items-center gap-1 relative">
-        <Button
-          variant="secondary"
-          size="sm"
-          :disabled="!hasFile || !transcriptionStore.hasModel"
-          :loading="transcriptionStore.loading"
-          :title="!transcriptionStore.hasModel ? 'Model not available - check Settings' : transcriptionStore.hasTranscription ? 'Re-run transcription' : 'Transcribe audio'"
-          @click="handleTranscribe"
-        >
-          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-          </svg>
-          {{ transcriptionStore.hasTranscription ? 'Re-transcribe' : 'Transcribe' }}
-        </Button>
-        <!-- Engine selector -->
-        <div class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
-          <button
-            v-for="eng in ([
-              { value: 'whisper', label: 'Whisper', title: 'Whisper ASR (word-level timestamps)' },
-              { value: 'moonshine', label: 'Moon', title: 'Moonshine ASR (faster, estimated timestamps)' },
-            ] as const)"
-            :key="eng.value"
-            type="button"
-            :class="[
-              'px-1.5 py-0.5 text-[10px] rounded transition-colors',
-              settingsStore.settings.transcriptionEngine === eng.value
-                ? 'bg-purple-600 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
-            ]"
-            :title="eng.title"
-            @click="settingsStore.setTranscriptionEngine(eng.value)"
+        <div class="mt-3 pt-2 border-t border-gray-700">
+          <Button
+            variant="secondary"
+            size="sm"
+            class="w-full"
+            :disabled="!hasFile"
+            :loading="vadStore.loading"
+            @click="handleDetectSilence"
           >
-            {{ eng.label }}
-          </button>
+            Re-detect
+          </Button>
         </div>
-        <!-- Quality selector (whisper only) -->
-        <div v-if="settingsStore.settings.transcriptionEngine === 'whisper'" class="flex items-center gap-0.5 bg-gray-800 rounded p-0.5">
-          <button
-            v-for="q in ([
-              { value: 'fast', label: 'Fast', title: 'Greedy, best_of=1 — fastest' },
-              { value: 'balanced', label: 'Bal', title: 'Beam search, beam=3 — balanced' },
-              { value: 'best', label: 'Best', title: 'Beam search, beam=5 — most accurate' },
-            ] as const)"
-            :key="q.value"
-            type="button"
-            :class="[
-              'px-1.5 py-0.5 text-[10px] rounded transition-colors',
-              transcriptionStore.transcriptionQuality === q.value
-                ? 'bg-cyan-600 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
-            ]"
-            :title="q.title"
-            @click="transcriptionStore.setTranscriptionQuality(q.value)"
-          >
-            {{ q.label }}
-          </button>
-        </div>
-        <!-- Last transcription metrics -->
-        <span
-          v-if="transcriptionStore.lastMetrics"
-          class="text-[10px] text-gray-500 ml-1"
-          :title="`${transcriptionStore.lastMetrics.engine}/${transcriptionStore.lastMetrics.modelName}: ${transcriptionStore.lastMetrics.totalTimeMs}ms total, load=${transcriptionStore.lastMetrics.loadTimeMs}ms, inference=${transcriptionStore.lastMetrics.inferenceTimeMs}ms, ${transcriptionStore.lastMetrics.wordCount} words, RTF=${transcriptionStore.lastMetrics.realTimeFactor.toFixed(2)}x`"
-        >
-          {{ transcriptionStore.lastMetrics.engine === 'moonshine' ? 'M' : 'W' }}:{{ (transcriptionStore.lastMetrics.totalTimeMs / 1000).toFixed(1) }}s
-          ({{ transcriptionStore.lastMetrics.realTimeFactor.toFixed(1) }}x)
-        </span>
-
-        <!-- Transcript download buttons -->
-        <Button
-          variant="ghost"
-          size="sm"
-          icon
-          :disabled="!transcriptionStore.hasTranscription"
-          title="Download transcription as JSON"
-          @click="handleDownloadTranscriptJSON"
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3c-2 0-3 1-3 3v12c0 2 1 3 3 3m8-18c2 0 3 1 3 3v12c0 2-1 3-3 3" />
-          </svg>
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          icon
-          :disabled="!transcriptionStore.hasTranscription"
-          title="Download transcription as TXT"
-          @click="handleDownloadTranscriptTXT"
-        >
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-6 2.5h4" />
-          </svg>
-        </Button>
       </div>
 
-      <div class="w-px h-5 bg-gray-700" />
-
-      <!-- Export Profiles -->
-      <div class="flex items-center gap-1 border-l border-gray-700 pl-2">
-        <Button
-          v-for="profile in settingsStore.getExportProfiles()"
-          :key="profile.id"
-          variant="ghost"
-          size="sm"
-          :disabled="!hasFile || !exportStore.canExport"
-          :loading="exportStore.loading"
-          :title="profile.name"
-          @click="exportStore.exportWithProfile(profile)"
-        >
-          <span class="text-[10px]">
-            <span v-if="profile.isFavorite" class="text-yellow-400 mr-0.5">&#9733;</span>{{ profileLabel(profile) }}
-          </span>
-        </Button>
+      <!-- Cleaning Panel Popover (outside scroll container so it's not clipped) -->
+      <div
+        v-if="showCleaningPanel"
+        ref="cleaningPopoverRef"
+        class="absolute z-50"
+        :style="{ top: `${TOOLBAR_ROW_HEIGHT}px`, ...cleaningPopoverStyle }"
+      >
+        <CleaningPanel />
       </div>
-
-      <!-- Spacer -->
-      <div class="flex-1" />
     </div>
   </div>
 </template>
+
+<style scoped>
+.toolbar-row2 {
+  scrollbar-width: none;
+}
+.toolbar-row2::-webkit-scrollbar {
+  display: none;
+}
+</style>

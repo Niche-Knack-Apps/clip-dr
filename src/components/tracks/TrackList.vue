@@ -94,8 +94,14 @@ function formatZoom(v: number): string {
 const scrollContainerRef = ref<HTMLDivElement | null>(null);
 // Reference to the inner content wrapper to measure actual rendered width
 const contentRef = ref<HTMLDivElement | null>(null);
-const contentWidth = ref(0);
-let contentResizeObserver: ResizeObserver | null = null;
+// Viewport width of the scroll container (stable — only changes on window/panel resize)
+const containerVisibleWidth = ref(0);
+let containerResizeObserver: ResizeObserver | null = null;
+
+// Effective content width: reactive, updates instantly with zoom (no async ResizeObserver lag)
+const effectiveContentWidth = computed(() => {
+  return Math.max(timelineWidth.value, containerVisibleWidth.value);
+});
 
 // Timeline width based on zoom level
 // When zoomed all the way out, show all content plus 10% padding on the right
@@ -129,47 +135,15 @@ watch(
 );
 
 watch(timelineWidth, (newW, oldW) => {
-  console.log(`[Zoom] timelineWidth changed: ${oldW?.toFixed(1)} → ${newW.toFixed(1)}, trackZoom=${trackZoom.value.toFixed(6)}, duration=${tracksStore.timelineDuration.toFixed(2)}, scrollContainerW=${scrollContainerRef.value?.clientWidth}`);
+  console.log(`[Zoom] timelineWidth changed: ${oldW?.toFixed(1)} → ${newW.toFixed(1)}, trackZoom=${trackZoom.value.toFixed(6)}, duration=${tracksStore.timelineDuration.toFixed(2)}, scrollContainerW=${containerVisibleWidth.value}`);
 });
 
 // Zoom constants (match FullWaveform.vue exactly)
 const ZOOM_FACTOR = 0.15;
 
-// Wheel-burst coalescing for Ctrl+scroll zoom: accumulate deltaY per frame,
-// then apply zoom + scroll correction together in one rAF.
-let pendingZoomDeltaY = 0;
-let pendingZoomAnchorLocalX = 0;
-let pendingZoomAnchorScrollX = 0;
-let pendingZoomAnchorOldZoom = 0;
-let zoomRafId: number | null = null;
-let isFirstZoomEventInFrame = true;
-
-function flushZoomScroll() {
-  zoomRafId = null;
-  const container = scrollContainerRef.value;
-  if (!container || pendingZoomDeltaY === 0) {
-    pendingZoomDeltaY = 0;
-    isFirstZoomEventInFrame = true;
-    return;
-  }
-
-  const factor = Math.exp(-pendingZoomDeltaY * 0.002);
-  const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, pendingZoomAnchorOldZoom * factor));
-  const timeAtMouse = (pendingZoomAnchorLocalX + pendingZoomAnchorScrollX) / pendingZoomAnchorOldZoom;
-
-  // Don't zoom IN when user wants to zoom OUT (at min boundary)
-  if (pendingZoomDeltaY > 0 && newZoom >= pendingZoomAnchorOldZoom) {
-    pendingZoomDeltaY = 0;
-    isFirstZoomEventInFrame = true;
-    return;
-  }
-
-  uiStore.trackZoom = newZoom;
-  container.scrollLeft = timeAtMouse * newZoom - pendingZoomAnchorLocalX;
-
-  pendingZoomDeltaY = 0;
-  isFirstZoomEventInFrame = true;
-}
+// Zoom coalescing: sync zoom per event, coalesced scroll correction via nextTick
+let zoomAnchor: { timeAtMouse: number; localX: number } | null = null;
+let zoomCorrectionScheduled = false;
 
 // Handle scroll wheel:
 // - Plain wheel = expand/contract zoom-view selection window (matches FullWaveform/ZoomedWaveform)
@@ -190,32 +164,71 @@ function handleWheel(event: WheelEvent) {
   if (!rect) return;
 
   const mouseX = event.clientX - rect.left;
-
-  // Don't zoom when over track controls (left panel)
-  if (mouseX < panelWidth.value) return;
-
-  event.preventDefault();
+  const overPanel = mouseX < panelWidth.value;
 
   // Ctrl/Cmd+wheel → deltaY-proportional zoom centered on mouse position
   if (event.ctrlKey || event.metaKey) {
+    event.preventDefault();
+
+    if (overPanel) {
+      // Mouse over panel — zoom from left edge (same behavior as InfiniteKnob slider)
+      // No scroll correction needed: scrollLeft stays the same, content scales from left CSS edge
+      const factor = Math.exp(-event.deltaY * 0.002);
+      const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, trackZoom.value * factor));
+      if (newZoom === trackZoom.value) return;
+      if (event.deltaY > 0 && newZoom >= trackZoom.value) return;
+      uiStore.trackZoom = newZoom;
+      return;
+    }
+
     const container = scrollContainerRef.value;
     if (!container) return;
 
-    // Accumulate deltaY; capture anchor from FIRST event in frame
-    pendingZoomDeltaY += event.deltaY;
-    if (isFirstZoomEventInFrame) {
-      pendingZoomAnchorLocalX = mouseX - panelWidth.value;
-      pendingZoomAnchorScrollX = container.scrollLeft;
-      pendingZoomAnchorOldZoom = trackZoom.value;
-      isFirstZoomEventInFrame = false;
+    const localX = mouseX - panelWidth.value;
+
+    // Capture anchor from FIRST event in coalescing batch
+    // (subsequent events have stale scrollLeft — not yet corrected)
+    if (!zoomAnchor) {
+      const scrollX = container.scrollLeft;
+      const oldZoom = trackZoom.value;
+      zoomAnchor = {
+        timeAtMouse: (localX + scrollX) / oldZoom,
+        localX,
+      };
     }
 
-    // Schedule one rAF to apply zoom + scroll correction together
-    if (zoomRafId === null) {
-      zoomRafId = requestAnimationFrame(flushZoomScroll);
+    // Apply zoom immediately — each event compounds on current value
+    const factor = Math.exp(-event.deltaY * 0.002);
+    const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, trackZoom.value * factor));
+    if (newZoom === trackZoom.value) return;
+    // Don't zoom IN when user wants to zoom OUT (at min boundary)
+    if (event.deltaY > 0 && newZoom >= trackZoom.value) return;
+
+    // Direct assignment (bypass setTrackZoom to avoid resetMinTimelineDuration fighting)
+    uiStore.trackZoom = newZoom;
+
+    // Schedule anchor cleanup + safety correction after Vue DOM patch
+    if (!zoomCorrectionScheduled) {
+      zoomCorrectionScheduled = true;
+      nextTick(() => {
+        zoomCorrectionScheduled = false;
+        const c = scrollContainerRef.value;
+        if (zoomAnchor && c) {
+          const currentZoom = uiStore.trackZoom;
+          const finalScrollLeft = zoomAnchor.timeAtMouse * currentZoom - zoomAnchor.localX;
+          console.log(`[Zoom] scroll correction: anchor=${zoomAnchor.timeAtMouse.toFixed(3)}s, localX=${zoomAnchor.localX.toFixed(0)}, zoom=${currentZoom.toFixed(6)}, scrollLeft: ${c.scrollLeft.toFixed(0)} → ${finalScrollLeft.toFixed(0)}`);
+          c.scrollLeft = finalScrollLeft;
+        }
+        zoomAnchor = null;
+      });
     }
     return;
   }
+
+  // Don't handle plain wheel when over track controls panel
+  if (overPanel) return;
+
+  event.preventDefault();
 
   // Plain wheel → expand/contract selection window (matches FullWaveform.handleWheel)
   const dur = tracksStore.timelineDuration;
@@ -237,7 +250,7 @@ function handleWheel(event: WheelEvent) {
   // Map mouse X to time on the full timeline
   // Account for scroll position and panel width
   const timelineX = mouseX - panelWidth.value + (scrollContainerRef.value?.scrollLeft ?? 0);
-  const timelineAreaWidth = contentWidth.value - panelWidth.value;
+  const timelineAreaWidth = effectiveContentWidth.value - panelWidth.value;
   const timeUnderMouse = timelineAreaWidth > 0
     ? (timelineX / timelineAreaWidth) * dur
     : dur / 2;
@@ -485,16 +498,16 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
   dragScrollContainerRect.value = null;
 }
 
-// Measure actual rendered width of the content wrapper
+// Measure scroll container viewport width (stable — only changes on window/panel resize, not zoom)
 onMounted(() => {
-  if (contentRef.value) {
-    contentWidth.value = contentRef.value.clientWidth;
-    contentResizeObserver = new ResizeObserver((entries) => {
+  if (scrollContainerRef.value) {
+    containerVisibleWidth.value = scrollContainerRef.value.clientWidth;
+    containerResizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        contentWidth.value = entry.contentRect.width;
+        containerVisibleWidth.value = entry.contentRect.width;
       }
     });
-    contentResizeObserver.observe(contentRef.value);
+    containerResizeObserver.observe(scrollContainerRef.value);
   }
 
   // Auto-fit zoom on first mount when tracks already exist
@@ -514,7 +527,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  contentResizeObserver?.disconnect();
+  containerResizeObserver?.disconnect();
   document.removeEventListener('mousemove', trackDragMouse);
   document.removeEventListener('mousemove', handleDragBarMouseMove);
   document.removeEventListener('mouseup', handleDragBarMouseUp);
@@ -533,9 +546,6 @@ onUnmounted(() => {
   }
   if (rightDragRafId !== null) {
     cancelAnimationFrame(rightDragRafId);
-  }
-  if (zoomRafId !== null) {
-    cancelAnimationFrame(zoomRafId);
   }
   stopAutoScroll();
 });
@@ -572,7 +582,7 @@ const isCrossTrackDrag = computed(() =>
 const ghostWidthPx = computed(() => {
   const clip = draggingClipData.value;
   if (!clip || !dragGhostActive.value) return 0;
-  const timelineAreaWidth = contentWidth.value - panelWidth.value;
+  const timelineAreaWidth = effectiveContentWidth.value - panelWidth.value;
   if (timelineAreaWidth <= 0 || tracksStore.timelineDuration <= 0) return 0;
   return (clip.duration / tracksStore.timelineDuration) * timelineAreaWidth;
 });
@@ -739,7 +749,7 @@ function flushDragPanMove() {
   dragLastX = event.clientX;
 
   const dur = tracksStore.timelineDuration;
-  const timelineAreaWidth = contentWidth.value - panelWidth.value;
+  const timelineAreaWidth = effectiveContentWidth.value - panelWidth.value;
   if (dur > 0 && timelineAreaWidth > 0) {
     const deltaTime = deltaX / (timelineAreaWidth / dur);
     selectionStore.moveSelection(deltaTime);
@@ -785,7 +795,13 @@ function flushRightDragMove() {
   pendingRightDragEvent = null;
   const deltaY = event.clientY - rightDragLastY;
   rightDragLastY = event.clientY;
-  scrollContainerRef.value.scrollTop += deltaY;
+
+  const container = scrollContainerRef.value;
+  const maxScroll = container.scrollHeight - container.clientHeight;
+  const barHeight = container.clientHeight;
+  // Scale: full bar drag = full scrollable range (same as horizontal bar)
+  const scale = barHeight > 0 && maxScroll > 0 ? maxScroll / barHeight : 1;
+  container.scrollTop += deltaY * scale;
 }
 
 function handleRightBarMouseUp() {
@@ -847,16 +863,13 @@ function handleBottomBarMouseUp() {
 
 // Selection window container width — timeline area excluding panel
 const selectionWindowContainerWidth = computed(() => {
-  if (contentWidth.value <= 0) return 0;
-  return contentWidth.value - panelWidth.value;
+  if (effectiveContentWidth.value <= 0) return 0;
+  return effectiveContentWidth.value - panelWidth.value;
 });
 
 // Clip select handler (click without drag)
+// selectClip() now also selects the parent track, so no need to call selectTrack separately
 function handleClipSelect(trackId: string, clipId: string) {
-  // Only change track selection if needed (avoid clearing clip selection via selectTrack)
-  if (tracksStore.selectedTrackId !== trackId) {
-    tracksStore.selectTrack(trackId);
-  }
   tracksStore.selectClip(trackId, clipId);
 }
 </script>

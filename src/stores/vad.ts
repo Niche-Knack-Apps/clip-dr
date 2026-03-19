@@ -1,12 +1,9 @@
 import { defineStore } from 'pinia';
 import { ref, shallowRef, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { writeFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
 import type { VadResult, VadOptions } from '@/shared/types';
-import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
-import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
+import { renderTrackToTempWav } from '@/services/track-render';
 
 export type VadPresetName = 'gentle' | 'moderate' | 'aggressive';
 
@@ -57,7 +54,6 @@ export const VAD_PRESETS: VadPreset[] = [
 ];
 
 export const useVadStore = defineStore('vad', () => {
-  const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
 
   const result = shallowRef<VadResult | null>(null);
@@ -96,27 +92,15 @@ export const useVadStore = defineStore('vad', () => {
       error.value = 'Select a track to detect silence';
       return;
     }
-    console.log('[VAD] Detecting silence for track:', selectedTrack?.name);
+    console.log(`[VAD] Selected track: id=${trackId}, name="${selectedTrack?.name}", duration=${selectedTrack?.duration?.toFixed(2)}s`);
 
     loading.value = true;
     error.value = null;
 
     try {
-      // Get current buffer state (clips mixed together)
-      const mixedBuffer = tracksStore.mixClipsForTrack(trackId, audioStore.getAudioContext());
-      if (!mixedBuffer) {
-        error.value = 'No audio clips to analyze';
-        return;
-      }
-
-      // Encode to WAV and write to temp file
-      const wavData = await encodeWavFloat32InWorker(mixedBuffer);
-      const tempFileName = `vad_buffer_${Date.now()}.wav`;
-      await writeFile(tempFileName, wavData, { baseDir: BaseDirectory.Temp });
-      const tempDirPath = await tempDir();
-      const tempPath = `${tempDirPath}${tempDirPath.endsWith('/') ? '' : '/'}${tempFileName}`;
-
-      console.log('[VAD] Detecting from current buffer state, temp file:', tempPath);
+      // Render track content to temp WAV (handles both buffered and EDL tracks)
+      const tempPath = await renderTrackToTempWav(trackId);
+      console.log('[VAD] Detecting from rendered track content, temp file:', tempPath);
 
       const vadResult = await invoke<VadResult>('detect_speech_segments', {
         path: tempPath,

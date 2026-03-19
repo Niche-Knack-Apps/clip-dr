@@ -237,11 +237,16 @@ export function mixTrackClipsToBuffer(
 
   for (const clip of bufferedClips) {
     const startSample = Math.floor((clip.clipStart - timelineStart) * sampleRate);
+    // Limit copy to clip.duration — buffer may be longer than clip (e.g. full source file)
+    const maxCopySamples = Math.min(
+      clip.buffer.length,
+      Math.ceil(clip.duration * sampleRate),
+    );
     for (let ch = 0; ch < numChannels; ch++) {
       const outputData = mixedBuffer.getChannelData(ch);
       const inputCh = Math.min(ch, clip.buffer.numberOfChannels - 1);
       const inputData = clip.buffer.getChannelData(inputCh);
-      for (let i = 0; i < inputData.length && startSample + i < totalSamples; i++) {
+      for (let i = 0; i < maxCopySamples && startSample + i < totalSamples; i++) {
         if (startSample + i >= 0) {
           outputData[startSample + i] += inputData[i];
         }
