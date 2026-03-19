@@ -295,10 +295,13 @@ describe('Solo mutual exclusivity', () => {
 
     store.addEmptyTrack();
 
-    // The new track (last in array) should be auto-muted
+    // The new track is auto-selected, which moves solo to it
     const newTrack = store.tracks[store.tracks.length - 1];
-    expect(newTrack.muted).toBe(true);
-    expect(newTrack.solo).toBe(false);
+    expect(newTrack.muted).toBe(false);
+    expect(newTrack.solo).toBe(true);
+    // Previous solo track should now be auto-muted
+    expect(store.getTrackById(t1.id)!.solo).toBe(false);
+    expect(store.getTrackById(t1.id)!.muted).toBe(true);
   });
 
   it('setTrackMuted on solo\'d track is a no-op', async () => {

@@ -48,9 +48,18 @@ export const useTracksStore = defineStore('tracks', () => {
   const selectedTrackId = ref<string | 'ALL' | null>('ALL');
   const viewMode = ref<ViewMode>('all');
 
-  // Selected clip within a track (for segment operations)
-  const selectedClipId = ref<string | null>(null);
-  const selectedClipTrackId = ref<string | null>(null);
+  // Focused clip within a track (for highlight ring on specifically clicked clip)
+  const focusedClipId = ref<string | null>(null);
+
+  // Derived: all clip IDs on the selected track are considered "selected"
+  const selectedTrackClipIds = computed<string[]>(() => {
+    if (!selectedTrackId.value || selectedTrackId.value === 'ALL') return [];
+    const clips = getTrackClips(selectedTrackId.value);
+    return clips.map(c => c.id);
+  });
+
+  // Backward-compat alias: selectedClipId points to the focused clip
+  const selectedClipId = focusedClipId;
 
   // Pending drag position for single-clip tracks — decoupled from track.trackStart
   // to prevent timelineDuration from changing during drag (which causes clip resizing)
@@ -113,25 +122,33 @@ export const useTracksStore = defineStore('tracks', () => {
   // Computed: Check if any track has audio loaded
   const hasAudio = computed(() => tracks.value.length > 0);
 
-  // Computed: Get selected clip info (O(1) via cached trackId — PERF-12)
+  // Computed: Get focused clip info (derives trackId from selectedTrackId)
   const selectedClip = computed(() => {
-    if (!selectedClipId.value || !selectedClipTrackId.value) return null;
-    const clips = getTrackClips(selectedClipTrackId.value);
-    const clip = clips.find(c => c.id === selectedClipId.value);
-    if (clip) return { trackId: selectedClipTrackId.value, clip };
-    // Fallback: trackId stale (clip moved/deleted) — clear selection
+    if (!focusedClipId.value) return null;
+    const trackId = selectedTrackId.value;
+    if (!trackId || trackId === 'ALL') return null;
+    const clips = getTrackClips(trackId);
+    const clip = clips.find(c => c.id === focusedClipId.value);
+    if (clip) return { trackId, clip };
     return null;
   });
 
   function selectClip(trackId: string, clipId: string): void {
-    selectedClipId.value = clipId;
-    selectedClipTrackId.value = trackId;
+    // Selecting a clip also selects its parent track
+    if (selectedTrackId.value !== trackId) {
+      selectedTrackId.value = trackId;
+      viewMode.value = 'selected';
+    }
+    focusedClipId.value = clipId;
+    // If any track is solo'd, move solo to this clip's track
+    if (hasActiveSolo()) {
+      _moveSoloTo(trackId);
+    }
     console.log('[Tracks] Selected clip:', clipId, 'in track:', trackId);
   }
 
   function clearClipSelection(): void {
-    selectedClipId.value = null;
-    selectedClipTrackId.value = null;
+    focusedClipId.value = null;
   }
 
   // PERF-03: Generate waveform data in Web Worker to avoid blocking main thread
@@ -175,6 +192,12 @@ export const useTracksStore = defineStore('tracks', () => {
 
     tracks.value = [...tracks.value, track];
     bumpSyncEpoch();
+
+    // Auto-select newly created track
+    selectedTrackId.value = track.id;
+    viewMode.value = 'selected';
+    focusedClipId.value = null;
+
     console.log('[Tracks] Created track:', track.name, 'duration:', track.duration, 'at:', track.trackStart, 'source:', sourcePath);
 
     return track;
@@ -201,6 +224,11 @@ export const useTracksStore = defineStore('tracks', () => {
     tracks.value = tracks.value.filter((t) => t.id !== trackId);
     bumpSyncEpoch();
     console.log('[Tracks] Deleted track:', trackId);
+
+    // Clear clip selection if the focused clip was on the deleted track
+    if (selectedTrackId.value === trackId) {
+      focusedClipId.value = null;
+    }
 
     // Update selection: pick an adjacent track, or fall back to 'ALL' if none remain
     if (selectedTrackId.value === trackId) {
@@ -235,15 +263,33 @@ export const useTracksStore = defineStore('tracks', () => {
   // Select a track or 'ALL' for composite view
   function selectTrack(trackId: string | 'ALL'): void {
     selectedTrackId.value = trackId;
-    selectedClipId.value = null;
-    selectedClipTrackId.value = null;
+    focusedClipId.value = null;
     viewMode.value = trackId === 'ALL' ? 'all' : 'selected';
+    // If any track is solo'd, move solo to the newly selected track
+    if (trackId !== 'ALL' && hasActiveSolo()) {
+      _moveSoloTo(trackId);
+    }
     console.log('[Tracks] Selected:', trackId);
   }
 
   /** Check if any track currently has solo enabled. */
   function hasActiveSolo(): boolean {
     return tracks.value.some(t => t.solo);
+  }
+
+  /** Move solo to a different track without pushing history.
+   *  Used when selection changes while solo is active. */
+  function _moveSoloTo(trackId: string): void {
+    tracks.value = tracks.value.map(t => {
+      if (t.id === trackId) {
+        return { ...t, solo: true, muted: false, autoMuted: false };
+      }
+      if (t.solo) {
+        // Previous solo track becomes autoMuted
+        return { ...t, solo: false, muted: true, autoMuted: true };
+      }
+      return t;
+    });
   }
 
   function setTrackMuted(trackId: string, muted: boolean): void {
@@ -276,6 +322,12 @@ export const useTracksStore = defineStore('tracks', () => {
 
   function setTrackSolo(trackId: string, solo: boolean): void {
     useHistoryStore().pushState('Toggle solo');
+    // Solo implies track selection — user wants to focus on this track
+    if (solo && selectedTrackId.value !== trackId) {
+      selectedTrackId.value = trackId;
+      viewMode.value = 'selected';
+      focusedClipId.value = null;
+    }
     // Exclusive solo: when enabling, auto-mute all others (marking autoMuted);
     // when disabling, only unmute tracks that were auto-muted by solo — preserve
     // tracks the user explicitly muted before solo was engaged.
@@ -332,6 +384,7 @@ export const useTracksStore = defineStore('tracks', () => {
     bumpSyncEpoch();
     selectedTrackId.value = 'ALL';
     viewMode.value = 'all';
+    focusedClipId.value = null;
     colorIndex = 0;
   }
 
@@ -1844,10 +1897,9 @@ export const useTracksStore = defineStore('tracks', () => {
       triggerRef(tracks);
       bumpSyncEpoch();
 
-      // Clear clip selection if the deleted clip was selected
-      if (selectedClipId.value === clipId) {
-        selectedClipId.value = null;
-        selectedClipTrackId.value = null;
+      // Clear clip focus if the deleted clip was focused
+      if (focusedClipId.value === clipId) {
+        focusedClipId.value = null;
       }
 
       console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
@@ -1907,9 +1959,8 @@ export const useTracksStore = defineStore('tracks', () => {
     triggerRef(tracks);
     bumpSyncEpoch();
 
-    if (selectedClipId.value === clipId) {
-      selectedClipId.value = null;
-      selectedClipTrackId.value = null;
+    if (focusedClipId.value === clipId) {
+      focusedClipId.value = null;
     }
 
     console.log(`[Tracks] Removed clip ${clipId} from track ${trackId}, track preserved, ${newClips.length} clips remain`);
@@ -2922,6 +2973,8 @@ export const useTracksStore = defineStore('tracks', () => {
     getTrackById,
     selectedTrackId,
     selectedClipId,
+    focusedClipId,
+    selectedTrackClipIds,
     viewMode,
     selectedTrack,
     selectedClip,
