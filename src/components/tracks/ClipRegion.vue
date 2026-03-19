@@ -14,6 +14,7 @@ interface Props {
   draggingClipId?: string | null;
   isSelected?: boolean;
   isCrossTrackDrag?: boolean;
+  isActiveTrim?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -21,6 +22,7 @@ const props = withDefaults(defineProps<Props>(), {
   draggingClipId: null,
   isSelected: false,
   isCrossTrackDrag: false,
+  isActiveTrim: false,
 });
 
 const emit = defineEmits<{
@@ -50,6 +52,32 @@ const left = computed(() => {
 const width = computed(() => {
   if (props.duration <= 0) return 0;
   return (clipDuration.value / props.duration) * props.containerWidth;
+});
+
+// During active trim: source-based waveform dimensions for static rendering
+const sourceDuration = computed(() => props.clip?.sourceDuration ?? clipDuration.value);
+const sourceIn = computed(() => props.clip?.sourceIn ?? 0);
+const sourceOffsetVal = computed(() => props.clip?.sourceOffset ?? 0);
+
+// Source-scale waveform width (total source audio width in pixels)
+const sourceWidth = computed(() => {
+  if (props.duration <= 0) return width.value;
+  return (sourceDuration.value / props.duration) * props.containerWidth;
+});
+
+// Whether this clip uses source-based waveform rendering (wider canvas, offset + overflow-hidden)
+const useSourceRendering = computed(() => {
+  if (!props.clip) return false;
+  return props.clip.sourceIn !== undefined && props.clip.sourceDuration !== undefined;
+});
+
+// Offset the waveform canvas leftward to show correct source region
+// The visible clip starts at (sourceOffset - sourceIn) within the source audio
+const waveformOffset = computed(() => {
+  if (!useSourceRendering.value || !props.clip) return 0;
+  const offsetInSource = sourceOffsetVal.value - sourceIn.value;
+  if (offsetInSource <= 0 || props.duration <= 0) return 0;
+  return -(offsetInSource / props.duration) * props.containerWidth;
 });
 
 // Use track's color with opacity
@@ -202,7 +230,8 @@ function drawWaveform() {
   const overviewData = waveformData.value;
   if (!overviewData || overviewData.length < 2) return;
 
-  const pixelWidth = Math.max(2, width.value);
+  // For clips with source bounds, render at full source scale (overflow-hidden clips to visible portion)
+  const pixelWidth = Math.max(2, useSourceRendering.value ? sourceWidth.value : width.value);
   const pixelHeight = canvas.clientHeight;
   if (pixelWidth <= 0 || pixelHeight <= 0) return;
 
@@ -281,8 +310,8 @@ function drawWaveform() {
   ctx.fill();
 }
 
-// Redraw when waveform data, width, muted state, or density threshold changes
-watch([waveformData, width, waveformColor, showWaveform], () => {
+// Redraw when waveform data, width, muted state, source bounds, or density threshold changes
+watch([waveformData, width, sourceWidth, waveformColor, showWaveform], () => {
   nextTick(drawWaveform);
 });
 
@@ -358,10 +387,17 @@ function handleMouseDown(event: MouseEvent) {
     @mousedown="handleMouseDown"
     @click.stop
   >
-    <!-- Waveform canvas -->
+    <!-- Waveform canvas (for clips with source bounds: wider than container, offset to show correct region) -->
     <canvas
       ref="canvasRef"
-      class="absolute inset-0 w-full h-full pointer-events-none"
+      class="absolute top-0 h-full pointer-events-none"
+      :style="useSourceRendering ? {
+        left: `${waveformOffset}px`,
+        width: `${sourceWidth}px`,
+      } : {
+        left: '0',
+        width: '100%',
+      }"
     />
     <div
       class="absolute inset-0 border rounded pointer-events-none"
