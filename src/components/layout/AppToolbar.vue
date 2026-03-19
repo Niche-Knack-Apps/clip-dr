@@ -86,10 +86,14 @@ const cleaningRef = ref<HTMLElement | null>(null);
 const vadRef = ref<HTMLElement | null>(null);
 const vadPopoverRef = ref<HTMLElement | null>(null);
 const cleaningPopoverRef = ref<HTMLElement | null>(null);
+const exportRef = ref<HTMLElement | null>(null);
+const exportPopoverRef = ref<HTMLElement | null>(null);
 const row2ScrollRef = ref<HTMLElement | null>(null);
 const recordingPanelStyle = ref<Record<string, string>>({});
 const vadPopoverStyle = ref<Record<string, string>>({});
 const cleaningPopoverStyle = ref<Record<string, string>>({});
+const exportPopoverStyle = ref<Record<string, string>>({});
+const showExportPanel = ref(false);
 const searchFocused = ref(false);
 
 // Inline project rename
@@ -145,6 +149,10 @@ function handleClickOutside(event: MouseEvent) {
   if (showVadSettings.value && !vadRef.value?.contains(target) && !vadPopoverRef.value?.contains(target)) {
     showVadSettings.value = false;
   }
+  // Export panel
+  if (showExportPanel.value && !exportRef.value?.contains(target) && !exportPopoverRef.value?.contains(target)) {
+    showExportPanel.value = false;
+  }
 }
 
 onMounted(() => {
@@ -186,6 +194,10 @@ watch(showVadSettings, (show) => {
 
 watch(showCleaningPanel, (show) => {
   if (show) nextTick(() => { cleaningPopoverStyle.value = computePopoverLeft(cleaningRef); });
+});
+
+watch(showExportPanel, (show) => {
+  if (show) nextTick(() => { exportPopoverStyle.value = computePopoverLeft(exportRef); });
 });
 
 // Check for model on load
@@ -548,8 +560,7 @@ defineExpose({ focusSearch });
         </div>
       </div>
 
-      <!-- Spacer -->
-      <div class="flex-1" />
+      <div class="w-px h-5 bg-gray-700" />
 
       <!-- Search -->
       <div
@@ -715,7 +726,7 @@ defineExpose({ focusSearch });
             size="sm"
             icon
             :class="{ 'bg-gray-700': showVadSettings }"
-            @click="showVadSettings = !showVadSettings; if (showVadSettings) { showCleaningPanel = false; showRecordingPanel = false; }"
+            @click="showVadSettings = !showVadSettings; if (showVadSettings) { showCleaningPanel = false; showRecordingPanel = false; showExportPanel = false; }"
             title="VAD settings"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -746,7 +757,7 @@ defineExpose({ focusSearch });
             size="sm"
             icon
             :class="{ 'bg-gray-700': showCleaningPanel }"
-            @click="showCleaningPanel = !showCleaningPanel; if (showCleaningPanel) { showVadSettings = false; showRecordingPanel = false; }"
+            @click="showCleaningPanel = !showCleaningPanel; if (showCleaningPanel) { showVadSettings = false; showRecordingPanel = false; showExportPanel = false; }"
             title="Cleaning settings"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -855,21 +866,32 @@ defineExpose({ focusSearch });
 
         <div class="w-px h-5 bg-gray-700 shrink-0" />
 
-        <!-- Export Profiles -->
-        <div class="flex items-center gap-1 border-l border-gray-700 pl-2 shrink-0">
+        <!-- Export -->
+        <div ref="exportRef" class="flex items-center gap-1 shrink-0">
           <Button
-            v-for="profile in settingsStore.getExportProfiles()"
-            :key="profile.id"
-            variant="ghost"
+            variant="secondary"
             size="sm"
             :disabled="!hasFile || !exportStore.canExport"
             :loading="exportStore.loading"
-            :title="profile.name"
-            @click="exportStore.exportWithProfile(profile)"
+            @click="showExportPanel = false; exportStore.exportWithProfile(settingsStore.getExportProfiles().find(p => p.isFavorite) || settingsStore.getExportProfiles()[0])"
           >
-            <span class="text-[10px]">
-              <span v-if="profile.isFavorite" class="text-yellow-400 mr-0.5">&#9733;</span>{{ profileLabel(profile) }}
-            </span>
+            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Export
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
+            :class="{ 'bg-gray-700': showExportPanel }"
+            @click="showExportPanel = !showExportPanel; if (showExportPanel) { showVadSettings = false; showCleaningPanel = false; showRecordingPanel = false; }"
+            title="Export format options"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+            </svg>
           </Button>
         </div>
 
@@ -993,6 +1015,33 @@ defineExpose({ focusSearch });
         :style="{ top: `${TOOLBAR_ROW_HEIGHT}px`, ...cleaningPopoverStyle }"
       >
         <CleaningPanel />
+      </div>
+
+      <!-- Export Panel Popover (outside scroll container so it's not clipped) -->
+      <div
+        v-if="showExportPanel"
+        ref="exportPopoverRef"
+        class="absolute z-50 p-3 bg-gray-800 rounded-lg shadow-xl border border-gray-700 min-w-[200px]"
+        :style="{ top: `${TOOLBAR_ROW_HEIGHT}px`, ...exportPopoverStyle }"
+      >
+        <div class="text-xs text-gray-400 mb-2 font-medium">Export Format</div>
+        <div class="flex flex-col gap-1">
+          <Button
+            v-for="profile in settingsStore.getExportProfiles()"
+            :key="profile.id"
+            variant="ghost"
+            size="sm"
+            class="w-full justify-start"
+            :disabled="!hasFile || !exportStore.canExport"
+            :loading="exportStore.loading"
+            :title="profile.name"
+            @click="exportStore.exportWithProfile(profile); showExportPanel = false"
+          >
+            <span class="text-xs">
+              <span v-if="profile.isFavorite" class="text-yellow-400 mr-1">&#9733;</span>{{ profile.name }}
+            </span>
+          </Button>
+        </div>
       </div>
     </div>
   </div>
