@@ -374,22 +374,10 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
           actions.onSetLoopMode?.('full');
         }
         break;
-      case KEYBOARD_SHORTCUTS.LOOP_ZOOM:
-        if (!isCtrlOrCmd) {
-          event.preventDefault();
-          actions.onSetLoopMode?.('zoom');
-        }
-        break;
       case KEYBOARD_SHORTCUTS.LOOP_INOUT:
         if (!isCtrlOrCmd) {
           event.preventDefault();
           actions.onSetLoopMode?.('inout');
-        }
-        break;
-      case KEYBOARD_SHORTCUTS.LOOP_ACTIVE:
-        if (!isCtrlOrCmd) {
-          event.preventDefault();
-          actions.onSetLoopMode?.('active');
         }
         break;
       case KEYBOARD_SHORTCUTS.LOOP_CLIP:

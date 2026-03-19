@@ -133,12 +133,10 @@ export const TRACK_PANEL_MIN_WIDTH = 80;
 export const TRACK_PANEL_MAX_WIDTH = 300;
 export const TRACK_PANEL_DEFAULT_WIDTH = 240;
 
-export type LoopMode = 'full' | 'zoom' | 'inout' | 'active' | 'clip';
+export type LoopMode = 'full' | 'inout' | 'clip';
 export const LOOP_MODES: { value: LoopMode; label: string }[] = [
   { value: 'full', label: 'Full' },
-  { value: 'zoom', label: 'Zoom' },
   { value: 'inout', label: 'I/O' },
-  { value: 'active', label: 'Tracks' },
   { value: 'clip', label: 'Clip' },
 ];
 

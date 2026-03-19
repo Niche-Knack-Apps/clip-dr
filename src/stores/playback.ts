@@ -74,11 +74,6 @@ export const usePlaybackStore = defineStore('playback', () => {
   // Get loop region based on current loop mode
   function getLoopRegion(): { start: number; end: number } {
     switch (loopMode.value) {
-      case 'zoom':
-        return {
-          start: selectionStore.selection.start,
-          end: selectionStore.selection.end,
-        };
       case 'inout': {
         const { inPoint, outPoint } = selectionStore.inOutPoints;
         if (inPoint !== null && outPoint !== null) {
@@ -86,8 +81,6 @@ export const usePlaybackStore = defineStore('playback', () => {
         }
         return { start: 0, end: getEffectiveDuration() };
       }
-      case 'active':
-        return getActiveRegion();
       case 'clip': {
         // Loop on selected track if one is selected
         const selected = tracksStore.selectedTrack;
