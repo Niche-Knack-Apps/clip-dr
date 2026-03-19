@@ -799,8 +799,8 @@ function flushRightDragMove() {
   const container = scrollContainerRef.value;
   const maxScroll = container.scrollHeight - container.clientHeight;
   const barHeight = container.clientHeight;
-  // Scale: full bar drag = full scrollable range (same as horizontal bar)
-  const scale = barHeight > 0 && maxScroll > 0 ? maxScroll / barHeight : 1;
+  // Scale up when content overflows beyond bar height, but never slower than 1:1
+  const scale = barHeight > 0 && maxScroll > 0 ? Math.max(1, maxScroll / barHeight) : 1;
   container.scrollTop += deltaY * scale;
 }
 

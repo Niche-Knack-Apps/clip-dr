@@ -99,10 +99,17 @@ export const useSilenceStore = defineStore('silence', () => {
   function initFromVad(trackId: string): void {
     if (!vadStore.result) return;
 
+    // VAD timestamps are 0-based relative to the rendered track content.
+    // Offset by the track's earliest clip position so overlays align on the timeline.
+    const clips = tracksStore.getTrackClips(trackId);
+    const timelineOffset = clips.length > 0
+      ? Math.min(...clips.map(c => c.clipStart))
+      : 0;
+
     const regions = vadStore.silenceSegments.map(seg => ({
       id: generateId(),
-      start: seg.start,
-      end: seg.end,
+      start: seg.start + timelineOffset,
+      end: seg.end + timelineOffset,
       enabled: true,
     }));
 
@@ -110,7 +117,7 @@ export const useSilenceStore = defineStore('silence', () => {
     newMap.set(trackId, regions);
     silenceRegions.value = newMap;
 
-    console.log(`Created ${regions.length} silence regions for track ${trackId} from VAD`);
+    console.log(`Created ${regions.length} silence regions for track ${trackId} from VAD (offset: ${timelineOffset.toFixed(2)}s)`);
   }
 
   // Add a new silence region manually for a specific track
