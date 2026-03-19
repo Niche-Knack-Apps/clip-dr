@@ -9,6 +9,7 @@ import { useExportStore } from '@/stores/export';
 import { useSettingsStore } from '@/stores/settings';
 import { useSelectionStore } from '@/stores/selection';
 import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
+import TimeRuler from './TimeRuler.vue';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH, MIN_SELECTION_DURATION, TRACK_HEIGHT } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
 import type { ExportProfile } from '@/shared/types';
@@ -946,11 +947,19 @@ function handleClipSelect(trackId: string, clipId: string) {
 
     <!-- Drag strip to pan zoom window (horizontal only) -->
     <div
-      class="h-5 flex items-center justify-center select-none shrink-0 border-b border-gray-700/60"
+      class="h-6 select-none shrink-0 border-b border-gray-700/60 relative"
       :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
     >
-      <div class="flex items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
+      <TimeRuler
+        v-if="tracksStore.timelineDuration > 0 && selectionWindowContainerWidth > 0"
+        :panel-width="panelWidth"
+        :container-width="selectionWindowContainerWidth"
+        :timeline-duration="tracksStore.timelineDuration"
+        :time-format="settingsStore.settings.timeFormat"
+      />
+      <!-- Fallback grip icon when no tracks loaded -->
+      <div v-else class="flex items-center justify-center h-full gap-0.5 text-gray-600">
         <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>
         <div class="w-4 h-1 rounded-full bg-current" />
         <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7" /></svg>
