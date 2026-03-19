@@ -1037,8 +1037,15 @@ defineExpose({ focusSearch });
             :title="profile.name"
             @click="exportStore.exportWithProfile(profile); showExportPanel = false"
           >
-            <span class="text-xs">
-              <span v-if="profile.isFavorite" class="text-yellow-400 mr-1">&#9733;</span>{{ profile.name }}
+            <span class="text-xs flex items-center gap-1.5">
+              <span v-if="profile.isFavorite" class="text-yellow-400">&#9733;</span>
+              <span class="font-medium">{{ profile.format.toUpperCase() }}</span>
+              <span class="text-gray-500">
+                <template v-if="profile.format === 'mp3' && profile.mp3Bitrate">{{ profile.mp3Bitrate }}kbps</template>
+                <template v-else-if="profile.format === 'ogg' && profile.oggQuality != null">q{{ profile.oggQuality }}</template>
+                <template v-else-if="profile.format === 'wav'">Lossless</template>
+                <template v-else-if="profile.format === 'flac'">Lossless</template>
+              </span>
             </span>
           </Button>
         </div>
