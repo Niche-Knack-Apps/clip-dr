@@ -1,11 +1,10 @@
 import { defineStore } from 'pinia';
 import { ref, computed, triggerRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { writeTempFile } from '@/shared/fs-utils';
 import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark, TranscriptionMetrics } from '@/shared/types';
-import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
+import { renderTrackToTempWav } from '@/services/track-render';
 import { useSettingsStore } from './settings';
 import { generateId, binarySearch, isTrackPlayable } from '@/shared/utils';
 import { SEARCH_MIN_WORDS, SEARCH_STOPWORDS } from '@/shared/constants';
@@ -773,16 +772,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       throw new Error(`Whisper model not found. Download ggml-tiny.bin from huggingface.co/ggerganov/whisper.cpp and place in: ${dir}`);
     }
 
-    // Decide: use source file or mix from buffer
+    // Decide: use source file or render arranged track content
     const audioPath = track.sourcePath;
     const hasClips = track.clips && track.clips.length > 0;
 
     if (audioPath && !hasClips) {
-      // Simple case: transcribe from file
+      // Simple case: whole source file, no clips — transcribe directly
       await runTranscriptionFromFile(trackId, audioPath);
     } else {
-      // Multi-clip or no source file: mix and transcribe from buffer
-      await runTranscriptionFromBuffer(trackId);
+      // Render arranged track content to temp WAV (handles both buffered and EDL tracks).
+      // The transcript corresponds to the rendered arranged content, not the original source timeline.
+      const tempPath = await renderTrackToTempWav(trackId);
+      await runTranscriptionFromFile(trackId, tempPath);
     }
   }
 
@@ -848,60 +849,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     await saveTranscription(trackId);
   }
 
-
-  async function runTranscriptionFromBuffer(trackId: string): Promise<void> {
-    if (trackId === tracksStore.selectedTrackId) {
-      progress.value = { stage: 'loading', progress: 10, message: 'Preparing audio...' };
-    }
-
-    const mixedBuffer = tracksStore.mixClipsForTrack(trackId, audioStore.getAudioContext());
-    if (!mixedBuffer) throw new Error('No audio clips to transcribe');
-
-    if (trackId === tracksStore.selectedTrackId) {
-      progress.value = { stage: 'loading', progress: 20, message: 'Encoding audio...' };
-    }
-
-    const wavData = await encodeWavFloat32InWorker(mixedBuffer);
-
-    const tempPath = await writeTempFile(`transcribe_buffer_${Date.now()}.wav`, wavData);
-
-    if (trackId === tracksStore.selectedTrackId) {
-      const engineLabel = settingsStore.settings.transcriptionEngine === 'moonshine' ? 'Moonshine' : 'Whisper';
-      progress.value = { stage: 'transcribing', progress: 30, message: `Transcribing with ${engineLabel}...` };
-    }
-
-    const result = await invokeTranscription(tempPath);
-    if (result.metrics) lastMetrics.value = result.metrics;
-
-    if (trackId === tracksStore.selectedTrackId) {
-      progress.value = { stage: 'aligning', progress: 90, message: 'Aligning words...' };
-    }
-
-    // CON-H3: discard result if the track was deleted while transcription was running
-    if (!tracksStore.tracks.find(t => t.id === trackId)) {
-      console.warn('[Transcription] Track deleted during transcription, discarding result:', trackId);
-      return;
-    }
-
-    logMapState(`BEFORE set in runTranscriptionFromBuffer(${trackId.slice(0, 8)})`);
-    transcriptions.value.set(trackId, {
-      trackId,
-      words: result.words.map((w) => ({ ...w, id: w.id || generateId() })),
-      fullText: result.text,
-      language: result.language,
-      processedAt: Date.now(),
-      wordOffsets: new Map(),
-      enableFalloff: true,
-    });
-    logMapState(`AFTER set in runTranscriptionFromBuffer(${trackId.slice(0, 8)})`);
-    triggerRef(transcriptions);
-
-    if (trackId === tracksStore.selectedTrackId) {
-      progress.value = { stage: 'complete', progress: 100, message: 'Complete!' };
-    }
-
-    await saveTranscription(trackId);
-  }
 
   // ─── Export helpers ───
 

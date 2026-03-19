@@ -55,13 +55,29 @@ const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const selectionColor = computed(() => settingsStore.settings.selectionColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 
-// All timemarks from all tracks with pixel positions (full timeline: 0 to duration)
+// In/Out point markers on full waveform
+const inPoint = computed(() => selectionStore.inOutPoints.inPoint);
+const outPoint = computed(() => selectionStore.inOutPoints.outPoint);
+
+function timeToPixel(time: number): number {
+  const dur = duration.value;
+  if (dur <= 0 || containerWidth.value <= 0) return 0;
+  return (time / dur) * containerWidth.value;
+}
+
+// All timemarks from audible tracks with pixel positions (full timeline: 0 to duration).
+// Markers follow track audibility: if any track is solo'd, only show markers for solo'd tracks;
+// otherwise hide markers for muted tracks. This ensures markers represent content the user can hear.
 const allTimemarks = computed(() => {
   const dur = duration.value;
   if (dur <= 0 || containerWidth.value <= 0) return [];
+  const hasSolo = tracksStore.tracks.some(t => t.solo);
   const marks: { id: string; trackId: string; label: string; color: string; pixelLeft: number; time: number; trackStart: number }[] = [];
   for (const track of tracksStore.tracks) {
     if (!track.timemarks) continue;
+    if (track.importStatus === 'importing' || track.importStatus === 'decoding') continue;
+    if (hasSolo && !track.solo) continue;
+    if (!hasSolo && track.muted) continue;
     for (const mark of track.timemarks) {
       const absTime = track.trackStart + mark.time;
       marks.push({
@@ -248,25 +264,36 @@ function handleResizeEnd(newEnd: number) {
   selectionStore.resizeSelectionEnd(newEnd);
 }
 
-// Resolved trackId for silence overlay operations
-function silenceTrackId(): string {
-  return tracksStore.selectedTrack?.id ?? tracksStore.tracks[0]?.id ?? '';
+// Aggregate silence regions from ALL tracks (each tagged with its trackId for edit ops)
+const allSilenceRegions = computed(() => {
+  const result: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsForTrack>[number] }[] = [];
+  for (const track of tracksStore.tracks) {
+    for (const region of silenceStore.getRegionsForTrack(track.id)) {
+      result.push({ trackId: track.id, region });
+    }
+  }
+  return result;
+});
+
+// Resolve trackId for a silence region by looking it up in the aggregated list
+function findTrackForRegion(regionId: string): string {
+  return allSilenceRegions.value.find(r => r.region.id === regionId)?.trackId ?? '';
 }
 
 function handleSilenceResize(id: string, updates: { start?: number; end?: number }) {
-  silenceStore.updateRegion(silenceTrackId(), id, updates);
+  silenceStore.updateRegion(findTrackForRegion(id), id, updates);
 }
 
 function handleSilenceMove(id: string, delta: number) {
-  silenceStore.moveRegion(silenceTrackId(), id, delta);
+  silenceStore.moveRegion(findTrackForRegion(id), id, delta);
 }
 
 function handleSilenceDelete(id: string) {
-  silenceStore.deleteRegion(silenceTrackId(), id);
+  silenceStore.deleteRegion(findTrackForRegion(id), id);
 }
 
 function handleSilenceRestore(id: string) {
-  silenceStore.restoreRegion(silenceTrackId(), id);
+  silenceStore.restoreRegion(findTrackForRegion(id), id);
 }
 
 onMounted(() => {
@@ -331,7 +358,7 @@ onUnmounted(() => {
 
       <!-- Silence region overlays (z-10 to stay above waveform but below selection) -->
       <SilenceOverlay
-        v-for="region in silenceStore.getRegionsForTrack(silenceTrackId())"
+        v-for="{ region } in allSilenceRegions"
         :key="region.id"
         :region="region"
         :container-width="containerWidth"
@@ -356,9 +383,45 @@ onUnmounted(() => {
         @resize-end="handleResizeEnd"
       />
 
-      <!-- Timemark indicators (draggable + right-click to delete) -->
+      <!-- Ghost trim-edge line (visible during active trim) -->
+      <div
+        v-if="uiStore.activeTrimEdge"
+        class="absolute top-0 bottom-0 w-px z-16 pointer-events-none"
+        :style="{
+          left: `${timeToPixel(uiStore.activeTrimEdge.time)}px`,
+          backgroundColor: uiStore.activeTrimEdge.edge === 'left' ? 'rgba(0,212,255,0.4)' : 'rgba(255,100,100,0.4)',
+        }"
+      />
+
+      <!-- In/Out point markers on full waveform -->
+      <div
+        v-if="inPoint !== null"
+        class="absolute top-0 bottom-0 w-px bg-emerald-400 z-12 pointer-events-none"
+        :style="{ left: `${timeToPixel(inPoint)}px` }"
+      >
+        <div class="absolute -top-0.5 -left-1 text-[8px] font-bold text-emerald-400">I</div>
+      </div>
+      <div
+        v-if="outPoint !== null"
+        class="absolute top-0 bottom-0 w-px bg-red-400 z-12 pointer-events-none"
+        :style="{ left: `${timeToPixel(outPoint)}px` }"
+      >
+        <div class="absolute -top-0.5 -left-1.5 text-[8px] font-bold text-red-400">O</div>
+      </div>
+      <!-- I/O region highlight -->
+      <div
+        v-if="inPoint !== null && outPoint !== null"
+        class="absolute top-0 bottom-0 bg-white/5 z-11 pointer-events-none"
+        :style="{
+          left: `${timeToPixel(inPoint)}px`,
+          width: `${timeToPixel(outPoint) - timeToPixel(inPoint)}px`,
+        }"
+      />
+
+      <!-- Timemark indicators (hidden during clip drag/trim, draggable + right-click to delete) -->
       <div
         v-for="mark in allTimemarks"
+        v-show="!uiStore.isClipDragActive"
         :key="mark.id"
         class="absolute top-0 bottom-0 z-15 cursor-grab group/tm"
         :class="{ 'cursor-grabbing': timemarkDrag?.markId === mark.id, 'tm-highlighted': uiStore.hoveredTimemarkId === mark.id }"

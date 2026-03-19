@@ -150,7 +150,7 @@ export const useHistoryStore = defineStore('history', () => {
       tracks: {
         tracks: tracksStore.tracks.map(cloneTrack),
         selectedTrackId: tracksStore.selectedTrackId,
-        selectedClipId: tracksStore.selectedClipId,
+        selectedClipId: tracksStore.focusedClipId,
         viewMode: tracksStore.viewMode,
       },
       transcription: {
@@ -179,7 +179,7 @@ export const useHistoryStore = defineStore('history', () => {
       // Tracks
       tracksStore.tracks = snapshot.tracks.tracks.map(cloneTrack);
       tracksStore.selectedTrackId = snapshot.tracks.selectedTrackId;
-      tracksStore.selectedClipId = snapshot.tracks.selectedClipId;
+      tracksStore.focusedClipId = snapshot.tracks.selectedClipId;
       tracksStore.viewMode = snapshot.tracks.viewMode;
 
       // Transcription — restore the Map

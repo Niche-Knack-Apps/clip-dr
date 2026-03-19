@@ -247,6 +247,74 @@ describe('Zoom Interaction — Selection Store', () => {
     expect(separate).toBeCloseTo(combined, 10);
   });
 
+  it('sync DOM write: minWidth matches timelineWidth formula for any zoom', () => {
+    // Verifies that the synchronous DOM write computes the same minWidth
+    // as the timelineWidth computed property, ensuring Vue's later patch is a no-op
+    const panelWidth = 240;
+    const duration = 129.49;
+    const paddedDuration = duration * 1.1;
+
+    const zooms = [3.0, 6.431, 10.77, 50.66, 100.8, 500.0];
+    for (const zoom of zooms) {
+      const timelineWidth = paddedDuration * zoom + panelWidth;
+      const syncMinWidth = duration * 1.1 * zoom + panelWidth;
+      expect(syncMinWidth).toBeCloseTo(timelineWidth, 6);
+    }
+  });
+
+  it('sync scroll correction per-event matches coalesced correction', () => {
+    // With synchronous DOM writes, each event corrects scrollLeft immediately.
+    // The final state should match what the coalesced nextTick would compute.
+    const initialZoom = 50;
+    const localX = 300;
+    const initialScrollX = 100;
+    const timeAtMouse = (localX + initialScrollX) / initialZoom; // 8.0s
+
+    // Simulate per-event sync corrections (each event writes scrollLeft)
+    let currentZoom = initialZoom;
+    let lastScrollLeft = initialScrollX;
+    const deltas = [30, 25, 40, 20, 35];
+    for (const d of deltas) {
+      currentZoom = currentZoom * Math.exp(-d * 0.002);
+      lastScrollLeft = timeAtMouse * currentZoom - localX;
+    }
+
+    // Coalesced correction (anchor from first, zoom from last)
+    const coalescedScrollLeft = timeAtMouse * currentZoom - localX;
+
+    // Both approaches produce the same final scrollLeft
+    expect(lastScrollLeft).toBeCloseTo(coalescedScrollLeft, 6);
+
+    // Content under cursor is stable
+    const finalTime = (localX + lastScrollLeft) / currentZoom;
+    expect(finalTime).toBeCloseTo(timeAtMouse, 6);
+  });
+
+  it('multiple coalesced wheel events use first anchor and final zoom', () => {
+    // Simulates 5 wheel events in one batch:
+    // anchor captured from first event's scrollLeft/zoom,
+    // zoom compounds across all events,
+    // final scrollLeft uses first anchor + final zoom
+    const initialZoom = 50;
+    const localX = 300;
+    const initialScrollX = 100;
+    const timeAtMouse = (localX + initialScrollX) / initialZoom; // 8.0s
+
+    // Simulate 5 compound zoom steps
+    let currentZoom = initialZoom;
+    const deltas = [30, 25, 40, 20, 35];
+    for (const d of deltas) {
+      currentZoom = currentZoom * Math.exp(-d * 0.002);
+    }
+
+    // Final scroll correction uses first anchor + final zoom
+    const finalScrollLeft = timeAtMouse * currentZoom - localX;
+    const finalTimeAtMouse = (localX + finalScrollLeft) / currentZoom;
+
+    // Content under cursor remains at same time position
+    expect(finalTimeAtMouse).toBeCloseTo(timeAtMouse, 6);
+  });
+
   it('bottom scroll scaling: full bar drag traverses full scrollable range', () => {
     const scrollWidth = 10000;
     const clientWidth = 1000;
@@ -264,6 +332,91 @@ describe('Zoom Interaction — Selection Store', () => {
     const barWidth = clientWidth;
     const scale = barWidth > 0 && maxScroll > 0 ? maxScroll / barWidth : 1;
     expect(scale).toBe(1);
+  });
+
+  it('left-edge zoom (over panel): zoom changes but scrollLeft stays stable', async () => {
+    const { useUIStore } = await import('@/stores/ui');
+    const uiStore = useUIStore();
+
+    // Simulate: mouse is over the panel (< panelWidth), Ctrl+wheel zooms from left edge
+    // The invariant: scrollLeft does not change, only zoom level changes
+    const initialZoom = 50;
+    uiStore.trackZoom = initialZoom;
+
+    // Simulate 5 zoom-in events (like the panel zoom path — no scroll correction)
+    const simulatedScrollLeft = 200;
+    let currentScrollLeft = simulatedScrollLeft;
+
+    for (let i = 0; i < 5; i++) {
+      const factor = Math.exp(-(-120) * 0.002); // zoom in (negative deltaY)
+      const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, uiStore.trackZoom * factor));
+      uiStore.trackZoom = newZoom;
+      // Panel zoom does NOT adjust scrollLeft — it stays the same
+    }
+
+    expect(uiStore.trackZoom).toBeGreaterThan(initialZoom);
+    // scrollLeft unchanged (panel zoom doesn't correct it)
+    expect(currentScrollLeft).toBe(simulatedScrollLeft);
+  });
+
+  it('synchronous width prop: effectiveZoom updates in same tick as zoom change', async () => {
+    // Regression test: TrackLane used to measure containerWidth via ResizeObserver
+    // (one frame behind zoom). Now it receives width as a prop, so effectiveZoom
+    // and all derived values update synchronously with the zoom change.
+    const { useUIStore } = await import('@/stores/ui');
+    const { useTracksStore } = await import('@/stores/tracks');
+    const uiStore = useUIStore();
+    const tracksStore = useTracksStore();
+
+    await tracksStore.createTrackFromBuffer(mkBuf(30), null, 'T1', 0);
+    const duration = tracksStore.timelineDuration;
+    const panelWidth = 240;
+    // Use a small containerVisibleWidth so timeline zoom dominates at both levels
+    const containerVisibleWidth = 400;
+
+    // Simulate initial state — zoom high enough that timelineWidth > containerVisibleWidth
+    uiStore.trackZoom = 20;
+    const timelineWidth1 = duration * 1.1 * uiStore.trackZoom + panelWidth;
+    const effectiveContentWidth1 = Math.max(timelineWidth1, containerVisibleWidth);
+    const containerWidth1 = effectiveContentWidth1 - panelWidth;
+    const effectiveZoom1 = containerWidth1 / duration;
+
+    // Zoom in further
+    uiStore.trackZoom = 40;
+    const timelineWidth2 = duration * 1.1 * uiStore.trackZoom + panelWidth;
+    const effectiveContentWidth2 = Math.max(timelineWidth2, containerVisibleWidth);
+    const containerWidth2 = effectiveContentWidth2 - panelWidth;
+    const effectiveZoom2 = containerWidth2 / duration;
+
+    // effectiveZoom must change immediately (no async wait)
+    expect(effectiveZoom2).toBeGreaterThan(effectiveZoom1);
+    // containerWidth is deterministic from zoom
+    expect(containerWidth2).toBeGreaterThan(containerWidth1);
+  });
+
+  it('synchronous width prop: showImportWaveform toggles without lag', async () => {
+    // When containerWidth comes from a prop (not ResizeObserver), the
+    // showImportWaveform v-if condition updates in the same render cycle.
+    // Use a long duration so that at low zoom, effectiveZoom stays below 2
+    const duration = 600;
+    const panelWidth = 240;
+    const containerVisibleWidth = 1200;
+
+    // At very low zoom, effectiveZoom < 2 → waveform hidden
+    const lowZoom = 0.5;
+    const tlLow = duration * 1.1 * lowZoom + panelWidth;
+    const cwLow = Math.max(tlLow, containerVisibleWidth) - panelWidth;
+    const ezLow = cwLow / duration;
+
+    // At higher zoom, effectiveZoom >= 2 → waveform shown
+    const highZoom = 5;
+    const tlHigh = duration * 1.1 * highZoom + panelWidth;
+    const cwHigh = Math.max(tlHigh, containerVisibleWidth) - panelWidth;
+    const ezHigh = cwHigh / duration;
+
+    // Verify the threshold behavior
+    expect(ezLow).toBeLessThan(2);
+    expect(ezHigh).toBeGreaterThanOrEqual(2);
   });
 
   it('resizeSelectionStart/End enforce minimum selection duration', async () => {

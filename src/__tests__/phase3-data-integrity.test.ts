@@ -617,11 +617,11 @@ describe('UI-01/UI-02: encodeWavFloat32 offloaded to Web Worker', () => {
     expect(wavData.length).toBe(44 + 44100 * 4);
   });
 
-  it('stores import encodeWavFloat32InWorker, not sync version', async () => {
-    // Verify that production stores no longer import the sync function
-    const vadSource = await import('@/stores/vad?raw' as string);
-    expect((vadSource as unknown as {default: string}).default).toContain('encodeWavFloat32InWorker');
-    expect((vadSource as unknown as {default: string}).default).not.toContain("from '@/shared/audio-utils'");
+  it('track-render service imports encodeWavFloat32InWorker, not sync version', async () => {
+    // VAD and transcription delegate to renderTrackToTempWav which uses worker-based encoding
+    const renderSource = await import('@/services/track-render?raw' as string);
+    expect((renderSource as unknown as {default: string}).default).toContain('encodeWavFloat32InWorker');
+    expect((renderSource as unknown as {default: string}).default).not.toContain("from '@/shared/audio-utils'");
   });
 
   it('encodeWav16InWorker returns valid 16-bit WAV', async () => {

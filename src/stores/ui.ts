@@ -148,6 +148,12 @@ export const useUIStore = defineStore('ui', () => {
   function setHoveredTimemark(id: string | null) { hoveredTimemarkId.value = id; }
   function clearHoveredTimemark() { hoveredTimemarkId.value = null; }
 
+  // Global clip drag/trim state — used to hide markers across all views during drag (transient, not serialized)
+  const isClipDragActive = ref(false);
+
+  // Active trim edge position — ghost line shown in waveform views during trim (transient, not serialized)
+  const activeTrimEdge = ref<{ time: number; edge: 'left' | 'right' } | null>(null);
+
   return {
     trackPanelWidth,
     waveformHeight,
@@ -180,5 +186,7 @@ export const useUIStore = defineStore('ui', () => {
     hoveredTimemarkId,
     setHoveredTimemark,
     clearHoveredTimemark,
+    isClipDragActive,
+    activeTrimEdge,
   };
 });

@@ -51,6 +51,7 @@ const tracksStore = useTracksStore();
 const uiStore = useUIStore();
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
+let containerResizeObserver: ResizeObserver | null = null;
 
 // Clip dragging state
 const isClipDragging = ref(false);
@@ -238,18 +239,6 @@ const formattedDuration = computed(() => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 });
 
-let resizeObserver: ResizeObserver | null = null;
-
-function updateWidth() {
-  if (containerRef.value) {
-    containerWidth.value = containerRef.value.clientWidth;
-  }
-}
-
-function handleResize() {
-  updateWidth();
-}
-
 // Clip drag handlers - called from ClipRegion
 function handleClipDragStart(clipId: string, event: MouseEvent) {
   if (event.button !== 0) return;
@@ -278,6 +267,7 @@ function handleClipDragMove(event: MouseEvent) {
   // Check if we've crossed the drag threshold (synchronous - don't defer)
   if (!isClipDragging.value && Math.abs(deltaX) >= DRAG_THRESHOLD) {
     isClipDragging.value = true;
+    uiStore.isClipDragActive = true;
     // Compute offset from mouse cursor to clip's left edge in screen coords
     const clipLeftPx = (clipDragOriginalStart.value / duration.value) * containerWidth.value;
     const rect = containerRef.value!.getBoundingClientRect();
@@ -338,6 +328,7 @@ function handleClipDragEnd(event: MouseEvent) {
   clipDragPending.value = false;
   isClipDragging.value = false;
   draggingClipId.value = null;
+  uiStore.isClipDragActive = false;
 
   document.removeEventListener('mousemove', handleClipDragMove);
   document.removeEventListener('mouseup', handleClipDragEnd);
@@ -359,6 +350,7 @@ function handleTrimStart(clipId: string, edge: 'left' | 'right', event: MouseEve
 
   useHistoryStore().pushState('Trim clip edge');
   isTrimming.value = true;
+  uiStore.isClipDragActive = true;
   trimClipId.value = effectiveClipId;
   trimEdge.value = edge;
   trimStartX.value = event.clientX;
@@ -396,6 +388,13 @@ function flushTrim() {
     // Negative deltaX (drag left) = trim inward (negative delta)
     tracksStore.trimClipRight(props.track.id, trimClipId.value, deltaTime);
   }
+
+  // Update ghost trim edge line position for waveform views
+  const clip = trackClips.value.find(c => c.id === trimClipId.value);
+  if (clip) {
+    const edgeTime = trimEdge.value === 'left' ? clip.clipStart : clip.clipStart + clip.duration;
+    uiStore.activeTrimEdge = { time: edgeTime, edge: trimEdge.value };
+  }
 }
 
 function handleTrimEnd() {
@@ -412,6 +411,8 @@ function handleTrimEnd() {
   isTrimming.value = false;
   trimClipId.value = null;
   trimEdge.value = null;
+  uiStore.isClipDragActive = false;
+  uiStore.activeTrimEdge = null;
 
   document.removeEventListener('mousemove', handleTrimMove);
   document.removeEventListener('mouseup', handleTrimEnd);
@@ -522,16 +523,19 @@ watch(
 );
 
 onMounted(() => {
-  updateWidth();
-
-  resizeObserver = new ResizeObserver(handleResize);
   if (containerRef.value) {
-    resizeObserver.observe(containerRef.value);
+    containerWidth.value = containerRef.value.clientWidth;
+    containerResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        containerWidth.value = entry.contentRect.width;
+      }
+    });
+    containerResizeObserver.observe(containerRef.value);
   }
 });
 
 onUnmounted(() => {
-  resizeObserver?.disconnect();
+  containerResizeObserver?.disconnect();
   if (clipDragRafId !== null) {
     cancelAnimationFrame(clipDragRafId);
   }
@@ -743,8 +747,9 @@ onUnmounted(() => {
         :duration="duration"
         :is-dragging="isClipDragging"
         :dragging-clip-id="draggingClipId"
-        :is-selected="clip.id === tracksStore.selectedClipId"
+        :is-selected="tracksStore.selectedTrackClipIds.includes(clip.id)"
         :is-cross-track-drag="isCrossTrackDrag"
+        :is-active-trim="isTrimming && trimClipId === clip.id"
         @drag-start="handleClipDragStart"
         @trim-start="handleTrimStart"
       />
@@ -757,9 +762,10 @@ onUnmounted(() => {
         :duration="duration"
       />
 
-      <!-- Timemark indicators -->
+      <!-- Timemark indicators (hidden while importing, dragging, or trimming) -->
       <div
         v-for="mark in trackTimemarks"
+        v-show="!isImporting && !isClipDragging && !isTrimming"
         :key="mark.id"
         class="absolute top-0 z-[15] cursor-grab group/tm"
         :class="{ 'tm-highlighted': uiStore.hoveredTimemarkId === mark.id }"

@@ -75,25 +75,39 @@ const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 const followPlayhead = computed(() => uiStore.followPlayhead);
 
-// Resolved trackId for silence operations
-const silenceTrackId = computed(() =>
-  tracksStore.selectedTrack?.id ?? tracksStore.tracks[0]?.id ?? ''
-);
+// Aggregate silence regions from ALL tracks visible in the current zoom range
+const visibleSilenceRegions = computed(() => {
+  const start = selection.value.start;
+  const end = selection.value.end;
+  const result: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsInRange>[number] }[] = [];
+  for (const track of tracksStore.tracks) {
+    for (const region of silenceStore.getRegionsInRange(track.id, start, end)) {
+      result.push({ trackId: track.id, region });
+    }
+  }
+  return result;
+});
 
-// Get silence regions visible in the current zoom range
-const visibleSilenceRegions = computed(() =>
-  silenceStore.getRegionsInRange(silenceTrackId.value, selection.value.start, selection.value.end)
-);
+// Resolve trackId for a silence region by lookup
+function findTrackForRegion(regionId: string): string {
+  return visibleSilenceRegions.value.find(r => r.region.id === regionId)?.trackId ?? '';
+}
 
-// Timemarks visible in the current zoomed range
+// Timemarks visible in the current zoomed range, filtered by track audibility.
+// Markers follow track audibility: if any track is solo'd, only show markers for solo'd tracks;
+// otherwise hide markers for muted tracks.
 const visibleTimemarks = computed(() => {
   const start = selection.value.start;
   const end = selection.value.end;
   const range = end - start;
   if (range <= 0 || containerWidth.value <= 0) return [];
+  const hasSolo = tracksStore.tracks.some(t => t.solo);
   const marks: { id: string; trackId: string; label: string; color: string; pixelLeft: number; time: number; trackStart: number }[] = [];
   for (const track of tracksStore.tracks) {
     if (!track.timemarks) continue;
+    if (track.importStatus === 'importing' || track.importStatus === 'decoding') continue;
+    if (hasSolo && !track.solo) continue;
+    if (!hasSolo && track.muted) continue;
     for (const mark of track.timemarks) {
       const absTime = track.trackStart + mark.time;
       if (absTime >= start && absTime <= end) {
@@ -385,21 +399,21 @@ function handleOutMarkerMouseDown(event: MouseEvent) {
   document.addEventListener('mouseup', handleMouseUp);
 }
 
-// Silence overlay handlers
+// Silence overlay handlers — resolve trackId by region lookup
 function handleSilenceResize(id: string, updates: { start?: number; end?: number }) {
-  silenceStore.updateRegion(silenceTrackId.value, id, updates);
+  silenceStore.updateRegion(findTrackForRegion(id), id, updates);
 }
 
 function handleSilenceMove(id: string, delta: number) {
-  silenceStore.moveRegion(silenceTrackId.value, id, delta);
+  silenceStore.moveRegion(findTrackForRegion(id), id, delta);
 }
 
 function handleSilenceDelete(id: string) {
-  silenceStore.deleteRegion(silenceTrackId.value, id);
+  silenceStore.deleteRegion(findTrackForRegion(id), id);
 }
 
 function handleSilenceRestore(id: string) {
-  silenceStore.restoreRegion(silenceTrackId.value, id);
+  silenceStore.restoreRegion(findTrackForRegion(id), id);
 }
 
 onMounted(() => {
@@ -460,7 +474,7 @@ onUnmounted(() => {
 
       <!-- Silence region overlays (z-index below markers) -->
       <SilenceOverlay
-        v-for="region in visibleSilenceRegions"
+        v-for="{ region } in visibleSilenceRegions"
         :key="region.id"
         :region="region"
         :container-width="containerWidth"
@@ -473,9 +487,20 @@ onUnmounted(() => {
         @restore="handleSilenceRestore"
       />
 
-      <!-- Timemark indicators (draggable + right-click to delete) -->
+      <!-- Ghost trim-edge line (visible during active trim, if in zoomed range) -->
+      <div
+        v-if="uiStore.activeTrimEdge && uiStore.activeTrimEdge.time >= selection.start && uiStore.activeTrimEdge.time <= selection.end"
+        class="absolute top-0 bottom-0 w-px z-16 pointer-events-none"
+        :style="{
+          left: `${timeToX(uiStore.activeTrimEdge.time)}px`,
+          backgroundColor: uiStore.activeTrimEdge.edge === 'left' ? 'rgba(0,212,255,0.4)' : 'rgba(255,100,100,0.4)',
+        }"
+      />
+
+      <!-- Timemark indicators (hidden during clip drag/trim, draggable + right-click to delete) -->
       <div
         v-for="mark in visibleTimemarks"
+        v-show="!uiStore.isClipDragActive"
         :key="mark.id"
         class="absolute top-0 bottom-0 z-15 cursor-grab group/tm"
         :class="{ 'cursor-grabbing': timemarkDrag?.markId === mark.id, 'tm-highlighted': uiStore.hoveredTimemarkId === mark.id }"
