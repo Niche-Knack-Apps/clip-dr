@@ -227,6 +227,45 @@ describe('Zoom Interaction — Selection Store', () => {
     expect(finalTimeAtMouse).toBeCloseTo(timeAtMouse, 6);
   });
 
+  it('deltaY-proportional zoom: small deltaY gives ~1% change', () => {
+    const deltaY = 5;
+    const factor = Math.exp(-deltaY * 0.002);
+    expect(factor).toBeCloseTo(0.99, 2);
+  });
+
+  it('deltaY-proportional zoom: large deltaY (120) gives ~21% change', () => {
+    const deltaY = 120;
+    const factor = Math.exp(-deltaY * 0.002);
+    expect(factor).toBeCloseTo(0.787, 2);
+  });
+
+  it('accumulated delta matches single equivalent: exp(-a)*exp(-b) = exp(-(a+b))', () => {
+    const a = 50;
+    const b = 70;
+    const combined = Math.exp(-(a + b) * 0.002);
+    const separate = Math.exp(-a * 0.002) * Math.exp(-b * 0.002);
+    expect(separate).toBeCloseTo(combined, 10);
+  });
+
+  it('bottom scroll scaling: full bar drag traverses full scrollable range', () => {
+    const scrollWidth = 10000;
+    const clientWidth = 1000;
+    const maxScroll = scrollWidth - clientWidth;
+    const barWidth = clientWidth;
+    const scale = barWidth > 0 && maxScroll > 0 ? maxScroll / barWidth : 1;
+    // Full-width drag (1000px) should scroll full range (9000px)
+    expect(scale * clientWidth).toBe(maxScroll);
+  });
+
+  it('bottom scroll scaling: no-overflow returns scale=1', () => {
+    const scrollWidth = 800;
+    const clientWidth = 1000;
+    const maxScroll = scrollWidth - clientWidth; // negative
+    const barWidth = clientWidth;
+    const scale = barWidth > 0 && maxScroll > 0 ? maxScroll / barWidth : 1;
+    expect(scale).toBe(1);
+  });
+
   it('resizeSelectionStart/End enforce minimum selection duration', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const { useSelectionStore } = await import('@/stores/selection');

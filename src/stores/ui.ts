@@ -143,6 +143,11 @@ export const useUIStore = defineStore('ui', () => {
     }
   }
 
+  // Cross-view timemark hover highlighting (transient, not serialized)
+  const hoveredTimemarkId = ref<string | null>(null);
+  function setHoveredTimemark(id: string | null) { hoveredTimemarkId.value = id; }
+  function clearHoveredTimemark() { hoveredTimemarkId.value = null; }
+
   return {
     trackPanelWidth,
     waveformHeight,
@@ -172,5 +177,8 @@ export const useUIStore = defineStore('ui', () => {
     openFloatingMeter,
     closeFloatingMeter,
     setFloatingMeterPosition,
+    hoveredTimemarkId,
+    setHoveredTimemark,
+    clearHoveredTimemark,
   };
 });

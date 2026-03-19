@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
  * that ClipRegion.vue uses. These don't require component rendering.
  */
 
-const EDGE_ZONE_PX = 8;
+const EDGE_ZONE_PX = 12;
 
 describe('Edge Trim UI — Logic', () => {
   describe('hasHiddenLeft/hasHiddenRight computations', () => {
@@ -61,14 +61,14 @@ describe('Edge Trim UI — Logic', () => {
 
   describe('narrow clips prioritize drag over edge trim', () => {
     it('clip narrower than 2 × EDGE_ZONE_PX skips edge detection', () => {
-      const clipWidth = 12; // < 16
+      const clipWidth = 20; // < 24
       const localX = 3;
       const isEdgeDetectionEnabled = clipWidth >= EDGE_ZONE_PX * 2;
       expect(isEdgeDetectionEnabled).toBe(false);
     });
 
     it('clip exactly 2 × EDGE_ZONE_PX enables edge detection', () => {
-      const clipWidth = 16; // === 16
+      const clipWidth = 24; // === 24
       const localX = 3;
       const isEdgeDetectionEnabled = clipWidth >= EDGE_ZONE_PX * 2;
       expect(isEdgeDetectionEnabled).toBe(true);
