@@ -134,16 +134,57 @@ watch(
   }
 );
 
-watch(timelineWidth, (newW, oldW) => {
-  console.log(`[Zoom] timelineWidth changed: ${oldW?.toFixed(1)} → ${newW.toFixed(1)}, trackZoom=${trackZoom.value.toFixed(6)}, duration=${tracksStore.timelineDuration.toFixed(2)}, scrollContainerW=${containerVisibleWidth.value}`);
-});
 
 // Zoom constants (match FullWaveform.vue exactly)
 const ZOOM_FACTOR = 0.15;
 
-// Zoom coalescing: sync zoom per event, coalesced scroll correction via nextTick
+// Zoom coalescing: RAF-gated zoom with accumulated deltas
 let zoomAnchor: { timeAtMouse: number; localX: number } | null = null;
-let zoomCorrectionScheduled = false;
+let pendingZoomDelta = 0;
+let zoomRafId: number | null = null;
+// Separate state for panel-area zoom (no scroll correction needed)
+let pendingPanelZoomDelta = 0;
+let panelZoomRafId: number | null = null;
+
+function flushZoom() {
+  zoomRafId = null;
+  if (pendingZoomDelta === 0) return;
+
+  const factor = Math.exp(-pendingZoomDelta * 0.002);
+  pendingZoomDelta = 0;
+
+  const newZoom = Math.max(
+    uiStore.TRACK_ZOOM_MIN,
+    Math.min(uiStore.TRACK_ZOOM_MAX, uiStore.trackZoom * factor)
+  );
+  if (newZoom === uiStore.trackZoom) return;
+
+  uiStore.trackZoom = newZoom;
+
+  // Scroll correction — reuse existing nextTick pattern, clear anchor after correction
+  nextTick(() => {
+    const c = scrollContainerRef.value;
+    if (zoomAnchor && c) {
+      c.scrollLeft = zoomAnchor.timeAtMouse * uiStore.trackZoom - zoomAnchor.localX;
+    }
+    zoomAnchor = null;
+  });
+}
+
+function flushPanelZoom() {
+  panelZoomRafId = null;
+  if (pendingPanelZoomDelta === 0) return;
+
+  const factor = Math.exp(-pendingPanelZoomDelta * 0.002);
+  pendingPanelZoomDelta = 0;
+
+  const newZoom = Math.max(
+    uiStore.TRACK_ZOOM_MIN,
+    Math.min(uiStore.TRACK_ZOOM_MAX, uiStore.trackZoom * factor)
+  );
+  if (newZoom === uiStore.trackZoom) return;
+  uiStore.trackZoom = newZoom;
+}
 
 // Handle scroll wheel:
 // - Plain wheel = expand/contract zoom-view selection window (matches FullWaveform/ZoomedWaveform)
@@ -171,13 +212,11 @@ function handleWheel(event: WheelEvent) {
     event.preventDefault();
 
     if (overPanel) {
-      // Mouse over panel — zoom from left edge (same behavior as InfiniteKnob slider)
-      // No scroll correction needed: scrollLeft stays the same, content scales from left CSS edge
-      const factor = Math.exp(-event.deltaY * 0.002);
-      const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, trackZoom.value * factor));
-      if (newZoom === trackZoom.value) return;
-      if (event.deltaY > 0 && newZoom >= trackZoom.value) return;
-      uiStore.trackZoom = newZoom;
+      // Mouse over panel — zoom from left edge (RAF-gated, no scroll correction)
+      pendingPanelZoomDelta += event.deltaY;
+      if (panelZoomRafId === null) {
+        panelZoomRafId = requestAnimationFrame(flushPanelZoom);
+      }
       return;
     }
 
@@ -186,41 +225,18 @@ function handleWheel(event: WheelEvent) {
 
     const localX = mouseX - panelWidth.value;
 
-    // Capture anchor from FIRST event in coalescing batch
-    // (subsequent events have stale scrollLeft — not yet corrected)
-    if (!zoomAnchor) {
-      const scrollX = container.scrollLeft;
-      const oldZoom = trackZoom.value;
-      zoomAnchor = {
-        timeAtMouse: (localX + scrollX) / oldZoom,
-        localX,
-      };
-    }
-
-    // Apply zoom immediately — each event compounds on current value
-    const factor = Math.exp(-event.deltaY * 0.002);
-    const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, trackZoom.value * factor));
-    if (newZoom === trackZoom.value) return;
-    // Don't zoom IN when user wants to zoom OUT (at min boundary)
-    if (event.deltaY > 0 && newZoom >= trackZoom.value) return;
-
-    // Direct assignment (bypass setTrackZoom to avoid resetMinTimelineDuration fighting)
-    uiStore.trackZoom = newZoom;
-
-    // Schedule anchor cleanup + safety correction after Vue DOM patch
-    if (!zoomCorrectionScheduled) {
-      zoomCorrectionScheduled = true;
-      nextTick(() => {
-        zoomCorrectionScheduled = false;
-        const c = scrollContainerRef.value;
-        if (zoomAnchor && c) {
-          const currentZoom = uiStore.trackZoom;
-          const finalScrollLeft = zoomAnchor.timeAtMouse * currentZoom - zoomAnchor.localX;
-          console.log(`[Zoom] scroll correction: anchor=${zoomAnchor.timeAtMouse.toFixed(3)}s, localX=${zoomAnchor.localX.toFixed(0)}, zoom=${currentZoom.toFixed(6)}, scrollLeft: ${c.scrollLeft.toFixed(0)} → ${finalScrollLeft.toFixed(0)}`);
-          c.scrollLeft = finalScrollLeft;
-        }
-        zoomAnchor = null;
-      });
+    // Accumulate delta, schedule RAF flush
+    pendingZoomDelta += event.deltaY;
+    if (zoomRafId === null) {
+      // Capture anchor from FIRST event in RAF batch only
+      if (!zoomAnchor) {
+        const scrollX = container.scrollLeft;
+        zoomAnchor = {
+          timeAtMouse: (localX + scrollX) / trackZoom.value,
+          localX,
+        };
+      }
+      zoomRafId = requestAnimationFrame(flushZoom);
     }
     return;
   }
@@ -528,6 +544,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   containerResizeObserver?.disconnect();
+  if (zoomRafId !== null) { cancelAnimationFrame(zoomRafId); zoomRafId = null; }
+  if (panelZoomRafId !== null) { cancelAnimationFrame(panelZoomRafId); panelZoomRafId = null; }
+  pendingZoomDelta = 0;
+  pendingPanelZoomDelta = 0;
   document.removeEventListener('mousemove', trackDragMouse);
   document.removeEventListener('mousemove', handleDragBarMouseMove);
   document.removeEventListener('mouseup', handleDragBarMouseUp);
