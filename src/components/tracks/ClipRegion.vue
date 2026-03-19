@@ -310,8 +310,21 @@ function drawWaveform() {
   ctx.fill();
 }
 
-// Redraw when waveform data, width, muted state, source bounds, or density threshold changes
-watch([waveformData, width, sourceWidth, waveformColor, showWaveform], () => {
+// Split waveform redraws: RAF-debounced for zoom-driven width changes, immediate for data/color changes
+let drawDebounceId: number | null = null;
+
+// Width changes (zoom-driven) — RAF debounce to avoid per-event redraws
+watch([width, sourceWidth], () => {
+  if (drawDebounceId !== null) cancelAnimationFrame(drawDebounceId);
+  drawDebounceId = requestAnimationFrame(() => {
+    drawDebounceId = null;
+    drawWaveform();
+  });
+});
+
+// Data/color changes — immediate redraw (cancel pending debounce to avoid double-draw)
+watch([waveformData, waveformColor, showWaveform], () => {
+  if (drawDebounceId !== null) { cancelAnimationFrame(drawDebounceId); drawDebounceId = null; }
   nextTick(drawWaveform);
 });
 
@@ -338,6 +351,9 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   if (resizeRafId !== null) {
     cancelAnimationFrame(resizeRafId);
+  }
+  if (drawDebounceId !== null) {
+    cancelAnimationFrame(drawDebounceId);
   }
 });
 
