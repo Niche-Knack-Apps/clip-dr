@@ -478,10 +478,12 @@ onUnmounted(() => {
         v-for="mark in visibleTimemarks"
         :key="mark.id"
         class="absolute top-0 bottom-0 z-15 cursor-grab group/tm"
-        :class="{ 'cursor-grabbing': timemarkDrag?.markId === mark.id }"
+        :class="{ 'cursor-grabbing': timemarkDrag?.markId === mark.id, 'tm-highlighted': uiStore.hoveredTimemarkId === mark.id }"
         :style="{ left: `${mark.pixelLeft - 4}px`, width: '9px' }"
         :title="mark.label"
         @mousedown="handleTimemarkDragStart($event, mark.trackId, mark.id, mark.time)"
+        @mouseenter="uiStore.setHoveredTimemark(mark.id)"
+        @mouseleave="uiStore.clearHoveredTimemark()"
         @click.stop="handleTimemarkClick(mark.trackStart, mark.time)"
         @contextmenu.prevent.stop="handleTimemarkContextMenu($event, mark.trackId, mark.id)"
       >
@@ -495,7 +497,10 @@ onUnmounted(() => {
             borderTop: `8px solid ${mark.color}`,
           }"
         />
-        <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20">
+        <div
+          class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded text-[9px] text-gray-200 whitespace-nowrap pointer-events-none transition-opacity z-20"
+          :class="uiStore.hoveredTimemarkId === mark.id ? 'opacity-100' : 'opacity-0 group-hover/tm:opacity-100'"
+        >
           {{ mark.label }}
         </div>
       </div>

@@ -135,18 +135,40 @@ watch(timelineWidth, (newW, oldW) => {
 // Zoom constants (match FullWaveform.vue exactly)
 const ZOOM_FACTOR = 0.15;
 
-// Wheel-burst coalescing for Ctrl+scroll zoom: zoom state updates synchronously
-// on every wheel event, but scrollLeft correction is coalesced to one rAF.
-let pendingZoomAnchor: { timeAtMouse: number; localX: number; newZoom: number } | null = null;
+// Wheel-burst coalescing for Ctrl+scroll zoom: accumulate deltaY per frame,
+// then apply zoom + scroll correction together in one rAF.
+let pendingZoomDeltaY = 0;
+let pendingZoomAnchorLocalX = 0;
+let pendingZoomAnchorScrollX = 0;
+let pendingZoomAnchorOldZoom = 0;
 let zoomRafId: number | null = null;
+let isFirstZoomEventInFrame = true;
 
 function flushZoomScroll() {
   zoomRafId = null;
-  const anchor = pendingZoomAnchor;
   const container = scrollContainerRef.value;
-  if (!anchor || !container) return;
-  pendingZoomAnchor = null;
-  container.scrollLeft = anchor.timeAtMouse * anchor.newZoom - anchor.localX;
+  if (!container || pendingZoomDeltaY === 0) {
+    pendingZoomDeltaY = 0;
+    isFirstZoomEventInFrame = true;
+    return;
+  }
+
+  const factor = Math.exp(-pendingZoomDeltaY * 0.002);
+  const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, pendingZoomAnchorOldZoom * factor));
+  const timeAtMouse = (pendingZoomAnchorLocalX + pendingZoomAnchorScrollX) / pendingZoomAnchorOldZoom;
+
+  // Don't zoom IN when user wants to zoom OUT (at min boundary)
+  if (pendingZoomDeltaY > 0 && newZoom >= pendingZoomAnchorOldZoom) {
+    pendingZoomDeltaY = 0;
+    isFirstZoomEventInFrame = true;
+    return;
+  }
+
+  uiStore.trackZoom = newZoom;
+  container.scrollLeft = timeAtMouse * newZoom - pendingZoomAnchorLocalX;
+
+  pendingZoomDeltaY = 0;
+  isFirstZoomEventInFrame = true;
 }
 
 // Handle scroll wheel:
@@ -174,35 +196,21 @@ function handleWheel(event: WheelEvent) {
 
   event.preventDefault();
 
-  // Ctrl/Cmd+wheel → pixel-scale zoom centered on mouse position
+  // Ctrl/Cmd+wheel → deltaY-proportional zoom centered on mouse position
   if (event.ctrlKey || event.metaKey) {
     const container = scrollContainerRef.value;
     if (!container) return;
 
-    // Calculate time position under mouse before zoom
-    const localX = mouseX - panelWidth.value;
-    const scrollX = container.scrollLeft;
-    const oldZoom = trackZoom.value;
-    const timeAtMouse = (localX + scrollX) / oldZoom;
+    // Accumulate deltaY; capture anchor from FIRST event in frame
+    pendingZoomDeltaY += event.deltaY;
+    if (isFirstZoomEventInFrame) {
+      pendingZoomAnchorLocalX = mouseX - panelWidth.value;
+      pendingZoomAnchorScrollX = container.scrollLeft;
+      pendingZoomAnchorOldZoom = trackZoom.value;
+      isFirstZoomEventInFrame = false;
+    }
 
-    // Compute new zoom directly (bypass setTrackZoom to avoid resetMinTimelineDuration
-    // which causes timeline width changes that fight with scroll position)
-    const factor = event.deltaY < 0 ? 1.2 : (1 / 1.2);
-    const newZoom = Math.max(uiStore.TRACK_ZOOM_MIN, Math.min(uiStore.TRACK_ZOOM_MAX, oldZoom * factor));
-    if (newZoom === oldZoom) return;
-
-    // Don't zoom IN when user wants to zoom OUT (at min boundary)
-    if (event.deltaY > 0 && newZoom >= oldZoom) return;
-
-    // Update trackZoom — ResizeObserver fires same-frame (before paint) to update
-    // contentWidth, so no manual sync needed (dual-source caused flicker).
-    uiStore.trackZoom = newZoom;
-
-    // Part B: Coalesce scrollLeft correction — store the anchor and schedule ONE rAF.
-    // Under rapid wheel input, each event updates zoom state immediately (so content
-    // width is always correct), but scroll correction happens exactly once per frame
-    // using the most recent anchor — no stacked corrections, no mini-oscillations.
-    pendingZoomAnchor = { timeAtMouse, localX, newZoom };
+    // Schedule one rAF to apply zoom + scroll correction together
     if (zoomRafId === null) {
       zoomRafId = requestAnimationFrame(flushZoomScroll);
     }
@@ -818,7 +826,13 @@ function flushBottomDragMove() {
   pendingBottomDragEvent = null;
   const deltaX = event.clientX - bottomDragLastX;
   bottomDragLastX = event.clientX;
-  scrollContainerRef.value.scrollLeft += deltaX;
+
+  const container = scrollContainerRef.value;
+  const maxScroll = container.scrollWidth - container.clientWidth;
+  const barWidth = container.clientWidth;
+  // Scale: full bar drag = full scrollable range
+  const scale = barWidth > 0 && maxScroll > 0 ? maxScroll / barWidth : 1;
+  container.scrollLeft += deltaX * scale;
 }
 
 function handleBottomBarMouseUp() {

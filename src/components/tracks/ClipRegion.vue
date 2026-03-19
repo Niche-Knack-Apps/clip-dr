@@ -29,7 +29,7 @@ const emit = defineEmits<{
 }>();
 
 // Edge trim zone width in pixels
-const EDGE_ZONE_PX = 8;
+const EDGE_ZONE_PX = 12;
 
 // Use clip position if provided, otherwise fall back to track position
 const clipId = computed(() => props.clip?.id ?? props.track.id + '-main');
@@ -368,11 +368,12 @@ function handleMouseDown(event: MouseEvent) {
       :style="{ borderColor: borderColor }"
     />
 
-    <!-- Left trim handle (visible on hover when clip is wide enough and trimmable) -->
+    <!-- Left trim handle -->
     <div
       v-if="isTrimmable && width >= EDGE_ZONE_PX * 2"
-      class="absolute top-0 bottom-0 left-0 flex items-center justify-center cursor-ew-resize opacity-0 hover:opacity-100 transition-opacity group-hover/clip:opacity-60"
+      class="absolute top-0 bottom-0 left-0 flex items-center justify-center cursor-ew-resize opacity-30 group-hover/clip:opacity-70 hover:opacity-100 transition-opacity"
       :style="{ width: `${EDGE_ZONE_PX}px` }"
+      @mousedown.stop.prevent="emit('trimStart', clipId, 'left', $event)"
     >
       <div
         class="w-0.5 h-3/5 rounded-full"
@@ -380,11 +381,12 @@ function handleMouseDown(event: MouseEvent) {
       />
     </div>
 
-    <!-- Right trim handle (visible on hover when clip is wide enough and trimmable) -->
+    <!-- Right trim handle -->
     <div
       v-if="isTrimmable && width >= EDGE_ZONE_PX * 2"
-      class="absolute top-0 bottom-0 right-0 flex items-center justify-center cursor-ew-resize opacity-0 hover:opacity-100 transition-opacity group-hover/clip:opacity-60"
+      class="absolute top-0 bottom-0 right-0 flex items-center justify-center cursor-ew-resize opacity-30 group-hover/clip:opacity-70 hover:opacity-100 transition-opacity"
       :style="{ width: `${EDGE_ZONE_PX}px` }"
+      @mousedown.stop.prevent="emit('trimStart', clipId, 'right', $event)"
     >
       <div
         class="w-0.5 h-3/5 rounded-full"

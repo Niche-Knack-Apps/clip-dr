@@ -108,12 +108,14 @@ const trackClips = computed(() => {
 });
 
 // Track timemarks with pixel positions
+// Read through tracksStore.tracks shallowRef so triggerRef(tracks) invalidates this computed
 const trackTimemarks = computed(() => {
-  if (!props.track.timemarks || props.track.timemarks.length === 0 || duration.value <= 0) return [];
-  return props.track.timemarks.map(mark => ({
+  const allTracks = tracksStore.tracks;
+  const track = allTracks.find(t => t.id === props.track.id);
+  if (!track?.timemarks || track.timemarks.length === 0 || duration.value <= 0) return [];
+  return track.timemarks.map(mark => ({
     ...mark,
-    // Time is relative to the recording; add trackStart for absolute timeline position
-    pixelLeft: ((props.track.trackStart + mark.time) / duration.value) * containerWidth.value,
+    pixelLeft: ((track.trackStart + mark.time) / duration.value) * containerWidth.value,
   }));
 });
 
@@ -566,7 +568,8 @@ onUnmounted(() => {
   >
     <!-- Track controls (resizable) -->
     <div
-      class="flex flex-col gap-0.5 px-2 py-1 border-r border-gray-800 shrink-0 overflow-hidden"
+      class="sticky left-0 z-10 flex flex-col gap-0.5 px-2 py-1 border-r border-gray-800 shrink-0 overflow-hidden"
+      :class="[isSelected ? 'bg-track-active' : 'bg-track-bg']"
       :style="{ width: `${panelWidth}px` }"
     >
       <!-- Top row: drag handle, name and duration -->
@@ -759,8 +762,11 @@ onUnmounted(() => {
         v-for="mark in trackTimemarks"
         :key="mark.id"
         class="absolute top-0 z-[15] cursor-grab group/tm"
+        :class="{ 'tm-highlighted': uiStore.hoveredTimemarkId === mark.id }"
         :style="{ left: `${mark.pixelLeft - 8}px`, width: '17px', height: '50%' }"
         @mousedown.stop.prevent="handleTimemarkMouseDown(mark.id, $event)"
+        @mouseenter="uiStore.setHoveredTimemark(mark.id)"
+        @mouseleave="uiStore.clearHoveredTimemark()"
         @contextmenu.prevent.stop="handleTimemarkDelete(mark.id)"
         @click.stop
       >
@@ -786,9 +792,10 @@ onUnmounted(() => {
             '--tm-glow': mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
           }"
         />
-        <!-- Label shown on hover -->
+        <!-- Label shown on hover or cross-view highlight -->
         <div
-          class="absolute left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-[9px] font-medium whitespace-nowrap opacity-0 group-hover/tm:opacity-100 pointer-events-none transition-opacity z-20"
+          class="absolute left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-[9px] font-medium whitespace-nowrap pointer-events-none transition-opacity z-20"
+          :class="uiStore.hoveredTimemarkId === mark.id ? 'opacity-100' : 'opacity-0 group-hover/tm:opacity-100'"
           :style="{
             top: '-18px',
             backgroundColor: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
@@ -847,10 +854,12 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.group\/tm:hover .tm-flag {
+.group\/tm:hover .tm-flag,
+.tm-highlighted .tm-flag {
   filter: drop-shadow(0 0 5px var(--tm-glow)) drop-shadow(0 0 2px var(--tm-glow));
 }
-.group\/tm:hover .tm-line {
+.group\/tm:hover .tm-line,
+.tm-highlighted .tm-line {
   opacity: 0.9 !important;
   width: 2px;
   left: 7.5px;
