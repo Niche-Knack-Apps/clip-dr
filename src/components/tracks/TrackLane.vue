@@ -8,6 +8,7 @@ import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
 import type { Track } from '@/shared/types';
 import { usePlaybackStore } from '@/stores/playback';
 import { useTracksStore } from '@/stores/tracks';
+import { useSettingsStore } from '@/stores/settings';
 import { useUIStore } from '@/stores/ui';
 import { useHistoryStore } from '@/stores/history';
 import { TRACK_HEIGHT, TRACK_PANEL_MIN_WIDTH, MAX_VOLUME_DB, MIN_VOLUME_DB } from '@/shared/constants';
@@ -47,6 +48,7 @@ let trimRafId: number | null = null;
 let pendingTrimEvent: MouseEvent | null = null;
 
 const playbackStore = usePlaybackStore();
+const settingsStore = useSettingsStore();
 const tracksStore = useTracksStore();
 const uiStore = useUIStore();
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -848,7 +850,7 @@ onUnmounted(() => {
         :container-width="containerWidth"
         :start-time="0"
         :end-time="duration"
-        color="#ff3366"
+        :color="settingsStore.settings.playheadColor"
         :draggable="true"
         @drag-start="playbackStore.startScrubbing()"
         @drag="(time) => playbackStore.scrub(time)"

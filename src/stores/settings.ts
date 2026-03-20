@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { appLocalDataDir } from '@tauri-apps/api/path';
 import type { Settings, ASRModel, RecordingSource, RecordingLargeFileFormat, Mp3Bitrate, ExportFormat, ExportProfile } from '@/shared/types';
-import { DEFAULT_SETTINGS, DEFAULT_EXPORT_PROFILES } from '@/shared/constants';
+import { TRACK_COLORS } from '@/shared/types';
+import { DEFAULT_SETTINGS, DEFAULT_EXPORT_PROFILES, generatePaletteFromPrimary } from '@/shared/constants';
 
 const STORAGE_KEY = 'clip-doctor-settings';
 
@@ -52,6 +53,10 @@ export const useSettingsStore = defineStore('settings', () => {
       if (stored) {
         const parsed = JSON.parse(stored);
         settings.value = { ...DEFAULT_SETTINGS, ...parsed };
+        // Migration: waveformColor → trackPrimaryColor (if user had customized it)
+        if (parsed.waveformColor && !parsed.trackPrimaryColor) {
+          settings.value.trackPrimaryColor = parsed.waveformColor;
+        }
       }
       // Merge built-in export profiles with any custom ones from storage
       mergeExportProfiles();
@@ -281,6 +286,33 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setTrackColorMode(mode: 'auto' | 'custom'): void {
+    settings.value.trackColorMode = mode;
+    saveSettings();
+  }
+
+  function setTrackPrimaryColor(color: string): void {
+    settings.value.trackPrimaryColor = color;
+    // Keep waveformColor in sync for backward compat
+    settings.value.waveformColor = color;
+    saveSettings();
+  }
+
+  function setTrackCustomColors(colors: string[]): void {
+    settings.value.trackCustomColors = colors;
+    saveSettings();
+  }
+
+  /** Returns the active track color palette based on current mode. */
+  const trackPalette = computed<string[]>(() => {
+    if (settings.value.trackColorMode === 'custom' && settings.value.trackCustomColors.length > 0) {
+      return settings.value.trackCustomColors;
+    }
+    const primary = settings.value.trackPrimaryColor || DEFAULT_SETTINGS.trackPrimaryColor;
+    const generated = generatePaletteFromPrimary(primary, 6);
+    return generated.length > 0 ? generated : [...TRACK_COLORS];
+  });
+
   function setLastExportPath(path: string): void {
     settings.value.lastExportPath = path;
     saveSettings();
@@ -388,5 +420,10 @@ export const useSettingsStore = defineStore('settings', () => {
     setQuickSessionMode,
     // Time format
     setTimeFormat,
+    // Track color palette
+    setTrackColorMode,
+    setTrackPrimaryColor,
+    setTrackCustomColors,
+    trackPalette,
   };
 });
