@@ -1559,7 +1559,8 @@ export const useTracksStore = defineStore('tracks', () => {
   async function extractRegionFromAllTracks(
     inPoint: number,
     outPoint: number,
-    audioContext: AudioContext
+    audioContext: AudioContext,
+    trackIds?: string[]
   ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
     const regionDuration = outPoint - inPoint;
     if (regionDuration <= 0) return null;
@@ -1570,6 +1571,7 @@ export const useTracksStore = defineStore('tracks', () => {
     let sampleRate = 44100;
 
     for (const track of tracks.value) {
+      if (trackIds && !trackIds.includes(track.id)) continue;
       const trackEnd = track.trackStart + track.duration;
       // Quick reject: track has no overlap with extraction region
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
@@ -2786,9 +2788,10 @@ export const useTracksStore = defineStore('tracks', () => {
   // ── EDL helper functions ──
 
   /** Collect virtual clipboard segments for large-file regions (instant, metadata only) */
-  function collectVirtualClipboardSegments(inPoint: number, outPoint: number): VirtualClipboardSegment[] {
+  function collectVirtualClipboardSegments(inPoint: number, outPoint: number, trackIds?: string[]): VirtualClipboardSegment[] {
     const segments: VirtualClipboardSegment[] = [];
     for (const track of tracks.value) {
+      if (trackIds && !trackIds.includes(track.id)) continue;
       const trackEnd = track.trackStart + track.duration;
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
@@ -2816,10 +2819,11 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   /** Get highest sample rate/channels from contributing tracks in the region */
-  function getContributingFormat(inPoint: number, outPoint: number): { sampleRate: number; channels: number } {
+  function getContributingFormat(inPoint: number, outPoint: number, trackIds?: string[]): { sampleRate: number; channels: number } {
     let sampleRate = 0;
     let channels = 0;
     for (const track of tracks.value) {
+      if (trackIds && !trackIds.includes(track.id)) continue;
       const trackEnd = track.trackStart + track.duration;
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
       const sr = track.audioData.sampleRate || 44100;
@@ -2834,10 +2838,11 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   /** Slice and merge waveform data from tracks overlapping [inPoint, outPoint] */
-  function sliceWaveformForRegion(inPoint: number, outPoint: number): number[] {
+  function sliceWaveformForRegion(inPoint: number, outPoint: number, trackIds?: string[]): number[] {
     const allSlices: number[][] = [];
 
     for (const track of tracks.value) {
+      if (trackIds && !trackIds.includes(track.id)) continue;
       const trackEnd = track.trackStart + track.duration;
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
       const waveform = track.audioData.waveformData;
