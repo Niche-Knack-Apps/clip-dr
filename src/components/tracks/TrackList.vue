@@ -745,6 +745,16 @@ let dragLastX = 0;
 let dragPanRafId: number | null = null;
 let pendingDragPanEvent: MouseEvent | null = null;
 
+function handleDragBarWheel(event: WheelEvent) {
+  event.preventDefault();
+  const dur = tracksStore.timelineDuration;
+  const timelineAreaWidth = effectiveContentWidth.value - panelWidth.value;
+  if (dur <= 0 || timelineAreaWidth <= 0) return;
+  const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+  const deltaTime = delta / (timelineAreaWidth / dur);
+  selectionStore.moveSelection(deltaTime);
+}
+
 function handleDragBarMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   isDragPanning.value = true;
@@ -794,6 +804,14 @@ let rightDragLastY = 0;
 let rightDragRafId: number | null = null;
 let pendingRightDragEvent: MouseEvent | null = null;
 
+function handleRightBarWheel(event: WheelEvent) {
+  event.preventDefault();
+  if (!scrollContainerRef.value) return;
+  const container = scrollContainerRef.value;
+  const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+  container.scrollTop += delta;
+}
+
 function handleRightBarMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   isRightDragging.value = true;
@@ -840,6 +858,14 @@ const isBottomDragging = ref(false);
 let bottomDragLastX = 0;
 let bottomDragRafId: number | null = null;
 let pendingBottomDragEvent: MouseEvent | null = null;
+
+function handleBottomBarWheel(event: WheelEvent) {
+  event.preventDefault();
+  if (!scrollContainerRef.value) return;
+  const container = scrollContainerRef.value;
+  const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+  container.scrollLeft += delta;
+}
 
 function handleBottomBarMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
@@ -950,6 +976,7 @@ function handleClipSelect(trackId: string, clipId: string) {
       class="h-6 select-none shrink-0 border-b border-gray-700/60 relative"
       :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
+      @wheel.prevent="handleDragBarWheel"
     >
       <TimeRuler
         v-if="tracksStore.timelineDuration > 0 && selectionWindowContainerWidth > 0"
@@ -1142,6 +1169,7 @@ function handleClipSelect(trackId: string, clipId: string) {
       class="w-5 flex items-center justify-center select-none shrink-0 border-l border-gray-700/60"
       :class="isRightDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ns-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleRightBarMouseDown"
+      @wheel.prevent="handleRightBarWheel"
     >
       <div class="flex flex-col items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
         <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 15l7-7 7 7" /></svg>
@@ -1156,6 +1184,7 @@ function handleClipSelect(trackId: string, clipId: string) {
       class="h-5 flex items-center justify-center select-none shrink-0 border-t border-gray-700/60"
       :class="isBottomDragging ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize bg-gray-800 hover:bg-cyan-900/30'"
       @mousedown="handleBottomBarMouseDown"
+      @wheel.prevent="handleBottomBarWheel"
     >
       <div class="flex items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">
         <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>

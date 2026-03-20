@@ -153,6 +153,15 @@ let dragLastX = 0;
 let dragRafId: number | null = null;
 let pendingDragEvent: MouseEvent | Touch | null = null;
 
+function handleDragBarWheel(event: WheelEvent) {
+  event.preventDefault();
+  const dur = duration.value;
+  if (dur <= 0 || containerWidth.value <= 0) return;
+  const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+  const deltaTime = delta / (containerWidth.value / dur);
+  selectionStore.moveSelection(deltaTime);
+}
+
 function handleDragBarMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   isDragPanning.value = true;
@@ -332,6 +341,7 @@ onUnmounted(() => {
       class="h-5 flex items-center justify-center select-none bg-gray-800"
       :class="isDragPanning ? 'cursor-grabbing bg-cyan-800/40' : 'cursor-ew-resize hover:bg-cyan-900/30'"
       @mousedown="handleDragBarMouseDown"
+      @wheel.prevent="handleDragBarWheel"
       @touchstart.passive="handleDragBarTouchStart"
     >
       <div class="flex items-center gap-0.5 text-gray-600 hover:text-gray-400 transition-colors">

@@ -184,6 +184,36 @@ function handleWordDragStart(event: MouseEvent, word: WordWithTrack) {
   document.addEventListener('mouseup', handleMouseUp);
 }
 
+// Wheel-to-shift state for global drag bar
+let globalWheelHistoryPushed = false;
+let globalWheelSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function handleGlobalDragWheel(event: WheelEvent) {
+  event.preventDefault();
+  if (!selectedTrackId.value) return;
+  if (!transcriptionStore.hasTranscriptionForTrack(selectedTrackId.value)) return;
+
+  // Push history once per wheel gesture
+  if (!globalWheelHistoryPushed) {
+    useHistoryStore().pushState('Shift all words');
+    globalWheelHistoryPushed = true;
+  }
+
+  const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+  const deltaMs = xToMs(delta);
+  transcriptionStore.shiftAllWords(selectedTrackId.value, deltaMs);
+
+  // Debounce: save transcription + reset history flag after wheel stops
+  if (globalWheelSaveTimer) clearTimeout(globalWheelSaveTimer);
+  globalWheelSaveTimer = setTimeout(() => {
+    if (selectedTrackId.value) {
+      transcriptionStore.saveTranscription(selectedTrackId.value);
+    }
+    globalWheelHistoryPushed = false;
+    globalWheelSaveTimer = null;
+  }, 300);
+}
+
 function handleGlobalDragStart(event: MouseEvent) {
   event.preventDefault();
   if (!selectedTrackId.value) return;
@@ -417,6 +447,7 @@ onUnmounted(() => {
         :class="{ 'opacity-40': !selectedTrackId || !transcriptionStore.hasTranscriptionForTrack(selectedTrackId!) }"
         title="Drag left/right to shift all words for the selected track"
         @mousedown="handleGlobalDragStart"
+        @wheel.prevent="handleGlobalDragWheel"
       >
         <div class="flex items-center gap-0.5 text-gray-600 group-hover:text-gray-400 transition-colors">
           <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M15 19l-7-7 7-7" /></svg>
