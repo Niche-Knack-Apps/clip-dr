@@ -739,6 +739,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: cutStart,
             sourceFile,
             sourceOffset: 0,
+            sourceIn: 0,
+            sourceDuration: cutStart,
           });
         }
 
@@ -753,6 +755,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: track.duration - cutEnd,
             sourceFile,
             sourceOffset: cutEnd,
+            sourceIn: cutEnd,
+            sourceDuration: track.duration - cutEnd,
           });
         }
 
