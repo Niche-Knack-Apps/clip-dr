@@ -245,6 +245,10 @@ export interface Settings {
   quickSessionMode: boolean;
   // Time display format: 'hms' = H:MM:SS, 'ms' = MM:SS.cs (centiseconds)
   timeFormat: 'hms' | 'ms';
+  // Track color palette
+  trackColorMode: 'auto' | 'custom';
+  trackPrimaryColor: string;
+  trackCustomColors: string[];
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';

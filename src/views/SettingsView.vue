@@ -72,6 +72,28 @@ function resetHints() {
   settingsStore.setShortcutHints([...DEFAULT_SETTINGS.shortcutHints]);
 }
 
+// Custom color palette helpers
+function addCustomColor() {
+  const colors = [...settingsStore.settings.trackCustomColors];
+  // Default new color: pick from auto palette or use a sensible default
+  const palette = ['#00d4ff', '#ff6b6b', '#4ecdc4', '#ffd93d', '#aa96da', '#f38181'];
+  const next = palette[colors.length % palette.length];
+  colors.push(next);
+  settingsStore.setTrackCustomColors(colors);
+}
+
+function removeCustomColor(index: number) {
+  const colors = [...settingsStore.settings.trackCustomColors];
+  colors.splice(index, 1);
+  settingsStore.setTrackCustomColors(colors);
+}
+
+function updateCustomColor(index: number, value: string) {
+  const colors = [...settingsStore.settings.trackCustomColors];
+  colors[index] = value;
+  settingsStore.setTrackCustomColors(colors);
+}
+
 const displayPath = computed(() => {
   const path = settingsStore.settings.modelsPath;
   return path && path.trim() !== '' ? path : 'Using default location';
@@ -593,14 +615,86 @@ onMounted(async () => {
         <div>
           <h3 class="text-sm font-medium text-gray-300 mb-3">Appearance</h3>
           <div class="space-y-3">
+            <!-- Track Color Palette -->
             <div>
-              <label class="block text-xs text-gray-400 mb-1">Waveform Color</label>
+              <label class="block text-xs text-gray-400 mb-1">Track Color Mode</label>
+              <div class="flex gap-2">
+                <button
+                  class="flex-1 px-2 py-1 text-xs rounded border transition-colors"
+                  :class="settingsStore.settings.trackColorMode === 'auto'
+                    ? 'bg-cyan-600/30 border-cyan-500 text-cyan-300'
+                    : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'"
+                  @click="settingsStore.setTrackColorMode('auto')"
+                >
+                  Auto
+                </button>
+                <button
+                  class="flex-1 px-2 py-1 text-xs rounded border transition-colors"
+                  :class="settingsStore.settings.trackColorMode === 'custom'
+                    ? 'bg-cyan-600/30 border-cyan-500 text-cyan-300'
+                    : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'"
+                  @click="settingsStore.setTrackColorMode('custom')"
+                >
+                  Custom
+                </button>
+              </div>
+            </div>
+
+            <!-- Auto mode: primary color picker -->
+            <div v-if="settingsStore.settings.trackColorMode === 'auto'">
+              <label class="block text-xs text-gray-400 mb-1">Primary Color</label>
               <input
                 type="color"
-                :value="settingsStore.settings.waveformColor"
+                :value="settingsStore.settings.trackPrimaryColor"
                 class="w-full h-8 bg-gray-800 border border-gray-700 rounded cursor-pointer"
-                @input="settingsStore.setWaveformColor(($event.target as HTMLInputElement).value)"
+                @input="settingsStore.setTrackPrimaryColor(($event.target as HTMLInputElement).value)"
               />
+              <div class="flex gap-1 mt-2">
+                <div
+                  v-for="(color, i) in settingsStore.trackPalette"
+                  :key="i"
+                  class="flex-1 h-5 rounded-sm"
+                  :style="{ backgroundColor: color }"
+                  :title="color"
+                />
+              </div>
+              <p class="text-[10px] text-gray-500 mt-1">Generated palette — tracks cycle through these colors</p>
+            </div>
+
+            <!-- Custom mode: editable color list -->
+            <div v-else>
+              <label class="block text-xs text-gray-400 mb-1">Custom Colors</label>
+              <div class="space-y-1">
+                <div
+                  v-for="(color, i) in settingsStore.settings.trackCustomColors"
+                  :key="i"
+                  class="flex items-center gap-2"
+                >
+                  <input
+                    type="color"
+                    :value="color"
+                    class="w-8 h-6 bg-gray-800 border border-gray-700 rounded cursor-pointer"
+                    @input="updateCustomColor(i, ($event.target as HTMLInputElement).value)"
+                  />
+                  <div class="flex-1 h-4 rounded-sm" :style="{ backgroundColor: color }" />
+                  <button
+                    class="text-gray-500 hover:text-red-400 text-xs px-1"
+                    title="Remove color"
+                    @click="removeCustomColor(i)"
+                  >
+                    &times;
+                  </button>
+                </div>
+              </div>
+              <button
+                class="mt-2 w-full px-2 py-1 text-xs text-gray-400 border border-dashed border-gray-700 rounded hover:border-gray-500 hover:text-gray-300 transition-colors"
+                @click="addCustomColor"
+              >
+                + Add Color
+              </button>
+              <p v-if="settingsStore.settings.trackCustomColors.length === 0" class="text-[10px] text-gray-500 mt-1">
+                No custom colors — using default palette
+              </p>
             </div>
 
             <div>

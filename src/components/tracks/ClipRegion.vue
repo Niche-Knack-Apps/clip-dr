@@ -144,6 +144,17 @@ const waveformColor = computed(() => {
   return `${props.track.color}80`; // 80 = 50% opacity
 });
 
+// Flush-edge detection: suppress border-radius when clip touches timeline edges
+const flushLeft = computed(() => left.value < 1);
+const flushRight = computed(() => (left.value + width.value) > (props.containerWidth - 1));
+
+const roundedClass = computed(() => {
+  if (flushLeft.value && flushRight.value) return '';
+  if (flushLeft.value) return 'rounded-r';
+  if (flushRight.value) return 'rounded-l';
+  return 'rounded';
+});
+
 // Always render waveform — the overview data (1000 buckets) maps ~1:1 to pixels
 // at any practical display width, and the top panel renders without a threshold too.
 const showWaveform = computed(() => width.value > 0 && waveformData.value.length > 0);
@@ -399,8 +410,9 @@ function handleMouseDown(event: MouseEvent) {
 
 <template>
   <div
-    class="absolute top-1 bottom-1 rounded cursor-grab active:cursor-grabbing select-none overflow-hidden group/clip"
+    class="absolute top-1 bottom-1 cursor-grab active:cursor-grabbing select-none overflow-hidden group/clip"
     :class="[
+      roundedClass,
       track.solo ? 'ring-2 ring-yellow-500' : '',
       isThisClipDragging && props.isCrossTrackDrag ? 'opacity-20 ring-2 ring-cyan-400' : '',
       isThisClipDragging && !props.isCrossTrackDrag ? 'opacity-70 ring-2 ring-cyan-400' : '',
@@ -427,7 +439,11 @@ function handleMouseDown(event: MouseEvent) {
       }"
     />
     <div
-      class="absolute inset-0 border rounded pointer-events-none"
+      class="absolute inset-0 pointer-events-none"
+      :class="[
+        roundedClass,
+        flushLeft && flushRight ? 'border-y' : flushLeft ? 'border-y border-r' : flushRight ? 'border-y border-l' : 'border',
+      ]"
       :style="{ borderColor: borderColor }"
     />
 

@@ -88,7 +88,9 @@ export const useTracksStore = defineStore('tracks', () => {
   let colorIndex = 0;
 
   function getNextColor(): string {
-    const color = TRACK_COLORS[colorIndex % TRACK_COLORS.length];
+    const settingsStore = useSettingsStore();
+    const palette = settingsStore.trackPalette;
+    const color = palette[colorIndex % palette.length];
     colorIndex++;
     return color;
   }
