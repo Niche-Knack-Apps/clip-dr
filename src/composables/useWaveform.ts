@@ -349,8 +349,6 @@ export function useWaveform() {
       output[i] = { min: 0, max: 0 };
     }
 
-    let anyMissing = false;
-
     for (const clip of clips) {
       const clipEnd = clip.clipStart + clip.duration;
 
@@ -389,10 +387,13 @@ export function useWaveform() {
 
         const cached = getCachedTile(cacheKey);
         if (!cached || cached.length < tileBuckets * 2) {
-          anyMissing = true;
           if (!inFlightKeys.has(cacheKey)) {
             inFlightKeys.add(cacheKey);
             fetchPeakTile(peakPath, qStart, qEnd, tileBuckets, cacheKey);
+          }
+          // Fill this clip's range from overview fallback instead of discarding all clips
+          for (let i = Math.max(0, outStartIdx); i < Math.min(bucketCount, outEndIdx); i++) {
+            output[i] = fallbackBuckets[i] || { min: 0, max: 0 };
           }
           continue;
         }
@@ -410,9 +411,6 @@ export function useWaveform() {
       }
       // Clips with neither buffer nor sourceFile → silence (already initialized)
     }
-
-    // If any EDL clip's tile is missing, fall back to overview data to avoid jarring partial hi-res
-    if (anyMissing) return fallbackBuckets;
 
     return output;
   }
