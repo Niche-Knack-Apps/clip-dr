@@ -317,8 +317,15 @@ function drawWaveform() {
 // Split waveform redraws: RAF-debounced for zoom-driven width changes, immediate for data/color changes
 let drawDebounceId: number | null = null;
 
+// Track previous dimensions to skip no-op redraws
+let prevWidth = 0;
+let prevSourceWidth = 0;
+
 // Width changes (zoom-driven) — RAF debounce to avoid per-event redraws
-watch([width, sourceWidth], () => {
+watch([width, sourceWidth], ([w, sw]) => {
+  if (w === prevWidth && sw === prevSourceWidth) return;  // skip no-op
+  prevWidth = w;
+  prevSourceWidth = sw;
   if (drawDebounceId !== null) cancelAnimationFrame(drawDebounceId);
   drawDebounceId = requestAnimationFrame(() => {
     drawDebounceId = null;
