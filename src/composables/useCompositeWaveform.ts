@@ -209,6 +209,7 @@ export function useCompositeWaveform() {
             clipStart: c.clipStart,
             duration: c.duration,
             sourceOffset: c.sourceOffset ?? 0,
+            sourceIn: c.sourceIn ?? c.sourceOffset ?? 0,
             buffer: c.buffer,
           });
           hasAnyHiRes = true;

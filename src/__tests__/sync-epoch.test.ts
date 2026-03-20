@@ -226,6 +226,59 @@ describe('Sync Epoch', () => {
     expect(tracksStore.syncEpoch).toBeGreaterThan(before);
   });
 
+  it('increments on cutRegionFromTrack (EDL large-file path)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    // Create a track that takes the EDL path (no buffer, has sourceFile)
+    const buf = mkBuf(10);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'T1', 0);
+    const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+    tracksStore.tracks[idx] = {
+      ...tracksStore.tracks[idx],
+      audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+      clips: [{
+        id: 'edl-clip',
+        buffer: null,
+        waveformData: new Array(200).fill(0.5),
+        clipStart: 0,
+        duration: 10,
+        sourceFile: '/tmp/large.wav',
+        sourceOffset: 0,
+      }],
+    };
+    tracksStore.tracks = [...tracksStore.tracks];
+
+    const before = tracksStore.syncEpoch;
+    const ctx = new AudioContext();
+    await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+    expect(tracksStore.syncEpoch).toBeGreaterThan(before);
+  });
+
+  it('increments on cutRegionFromClips (multi-clip EDL track)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    // Create a track with multiple EDL clips
+    const buf = mkBuf(20);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'T1', 0);
+    const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+    tracksStore.tracks[idx] = {
+      ...tracksStore.tracks[idx],
+      audioData: { buffer: null, waveformData: new Array(400).fill(0.5), sampleRate: 44100, channels: 2 },
+      clips: [
+        { id: 'c1', buffer: null, waveformData: new Array(200).fill(0.5), clipStart: 0, duration: 10, sourceFile: '/tmp/src.wav', sourceOffset: 0 },
+        { id: 'c2', buffer: null, waveformData: new Array(200).fill(0.5), clipStart: 10, duration: 10, sourceFile: '/tmp/src.wav', sourceOffset: 10 },
+      ],
+    };
+    tracksStore.tracks = [...tracksStore.tracks];
+
+    const before = tracksStore.syncEpoch;
+    const ctx = new AudioContext();
+    await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+    expect(tracksStore.syncEpoch).toBeGreaterThan(before);
+  });
+
   it('increments on finalizeImportWaveform', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();

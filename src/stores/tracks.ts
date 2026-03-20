@@ -739,6 +739,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: cutStart,
             sourceFile,
             sourceOffset: 0,
+            sourceIn: 0,
+            sourceDuration: cutStart,
           });
         }
 
@@ -753,6 +755,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: track.duration - cutEnd,
             sourceFile,
             sourceOffset: cutEnd,
+            sourceIn: cutEnd,
+            sourceDuration: track.duration - cutEnd,
           });
         }
 
@@ -777,6 +781,7 @@ export const useTracksStore = defineStore('tracks', () => {
             hasPeakPyramid: false,
           };
           triggerRef(tracks);
+          bumpSyncEpoch();
         }
 
         // CRITICAL: metadata split always proceeds — never return null on extraction failure
@@ -880,6 +885,8 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: beforeBuffer.duration,
         sourceFile,
         sourceOffset: 0,
+        sourceIn: 0,
+        sourceDuration: beforeBuffer.duration,
       });
     }
 
@@ -905,6 +912,8 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: afterBuffer.duration,
         sourceFile,
         sourceOffset: cutEnd,
+        sourceIn: cutEnd,
+        sourceDuration: afterBuffer.duration,
       });
     }
 
@@ -1065,7 +1074,7 @@ export const useTracksStore = defineStore('tracks', () => {
             sourceFile: clip.sourceFile,
             sourceOffset: clip.sourceOffset,
             sourceIn: clip.sourceIn ?? clip.sourceOffset ?? 0,
-            sourceDuration: clip.sourceDuration ?? clip.duration,
+            sourceDuration: beforeBuf.duration,
           });
         }
 
@@ -1088,8 +1097,8 @@ export const useTracksStore = defineStore('tracks', () => {
             duration: afterBuf.duration,
             sourceFile: clip.sourceFile,
             sourceOffset: (clip.sourceOffset ?? 0) + relOverlapEnd,
-            sourceIn: clip.sourceIn ?? clip.sourceOffset ?? 0,
-            sourceDuration: clip.sourceDuration ?? clip.duration,
+            sourceIn: (clip.sourceOffset ?? 0) + relOverlapEnd,
+            sourceDuration: afterBuf.duration,
           });
         }
       }
@@ -1147,6 +1156,7 @@ export const useTracksStore = defineStore('tracks', () => {
           duration: 0,
         };
         triggerRef(tracks);
+        bumpSyncEpoch();
         console.log('[Tracks] All clips cut from track, kept empty');
       } else {
         deleteTrack(trackId);
@@ -1166,6 +1176,7 @@ export const useTracksStore = defineStore('tracks', () => {
       hasPeakPyramid: false,
     };
     triggerRef(tracks);
+    bumpSyncEpoch();
 
     console.log(`[Tracks] Cut region from ${clips.length} clips, ${newClips.length} clips remain`);
     return { buffer: mixedCut, waveformData: cutWaveform };
@@ -2058,7 +2069,7 @@ export const useTracksStore = defineStore('tracks', () => {
       sourceFile: clip.sourceFile,
       sourceOffset: clip.sourceOffset,
       sourceIn: parentSourceIn,
-      sourceDuration: parentSourceDuration,
+      sourceDuration: beforeBuffer.duration,
     };
 
     const afterClip: TrackClip = {
@@ -2069,8 +2080,8 @@ export const useTracksStore = defineStore('tracks', () => {
       duration: afterBuffer.duration,
       sourceFile: clip.sourceFile,
       sourceOffset: clip.sourceOffset != null ? clip.sourceOffset + relSplit : undefined,
-      sourceIn: parentSourceIn,
-      sourceDuration: parentSourceDuration,
+      sourceIn: clip.sourceOffset != null ? clip.sourceOffset + relSplit : parentSourceIn,
+      sourceDuration: afterBuffer.duration,
     };
 
     return { before: beforeClip, after: afterClip };

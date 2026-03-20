@@ -743,4 +743,231 @@ describe('Waveform Sync After Cut', () => {
       expect(afterRelease).not.toBe(initial);
     });
   });
+
+  // ── Fix 5: Panel waveform buffer-offset bug (v0.27.12) ──────────────────
+
+  describe('panel waveform buffer-offset for cut clips (v0.27.12)', () => {
+    /**
+     * Helper: replicates getClipAwareBucketsForLayer's buffer path logic.
+     * Tests the exact math from useWaveform.ts without needing the full composable.
+     */
+    async function getBufferClipPeaks(
+      clip: { clipStart: number; duration: number; sourceOffset: number; sourceIn?: number; buffer: AudioBuffer },
+      viewStart: number,
+      viewEnd: number,
+      bucketCount: number,
+    ) {
+      const { extractHiResPeaksForRange } = await import('@/composables/useWaveform');
+      const clipEnd = clip.clipStart + clip.duration;
+      const overlapStart = Math.max(viewStart, clip.clipStart);
+      const overlapEnd = Math.min(viewEnd, clipEnd);
+      const viewRange = viewEnd - viewStart;
+      const bucketDuration = viewRange / bucketCount;
+      const outStartIdx = Math.max(0, Math.floor((overlapStart - viewStart) / bucketDuration));
+      const outEndIdx = Math.min(bucketCount, Math.ceil((overlapEnd - viewStart) / bucketDuration));
+
+      const bufferDuration = clip.buffer.duration;
+      const bufferBase = clip.sourceOffset - (clip.sourceIn ?? clip.sourceOffset);
+      const rawStart = bufferBase + (overlapStart - clip.clipStart);
+      const rawEnd = bufferBase + (overlapEnd - clip.clipStart);
+      const rangeStart = Math.max(0, Math.min(rawStart, bufferDuration));
+      const rangeEnd = Math.max(rangeStart, Math.min(rawEnd, bufferDuration));
+      const clipBucketCount = outEndIdx - outStartIdx;
+      if (clipBucketCount <= 0) return [];
+
+      return extractHiResPeaksForRange(clip.buffer, rangeStart, rangeEnd, clipBucketCount);
+    }
+
+    /** Create a mock buffer with non-zero samples (sine wave) */
+    function createNonZeroBuffer(durationSec: number, sampleRate = 44100): AudioBuffer {
+      const length = Math.floor(durationSec * sampleRate);
+      const buf = new MockAudioBuffer({ numberOfChannels: 1, length: Math.max(1, length), sampleRate }) as unknown as AudioBuffer;
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) {
+        data[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.8;
+      }
+      return buf;
+    }
+
+    it('after-clip from X-cut produces non-zero panel peaks', async () => {
+      // Scenario: 10s track, X-cut at 3-5s → before(0-3) + after(5-10)
+      // The "after" clip has: sourceOffset=5, sourceIn=5, buffer=5s duration
+      const afterBuffer = createNonZeroBuffer(5);
+      const peaks = await getBufferClipPeaks(
+        { clipStart: 3, duration: 5, sourceOffset: 5, sourceIn: 5, buffer: afterBuffer },
+        3, 8, // view covers the after clip
+        100,
+      );
+
+      expect(peaks.length).toBe(100);
+      // With a sine wave buffer, peaks should NOT all be zero
+      const hasNonZero = peaks.some((b: { min: number; max: number }) => b.min !== 0 || b.max !== 0);
+      expect(hasNonZero).toBe(true);
+    });
+
+    it('trimmed after-clip still renders non-zero peaks', async () => {
+      // Same as above, then trim left edge of after-clip by 1s
+      // sourceOffset increases to 6, but sourceIn stays at 5 (buffer base unchanged)
+      const afterBuffer = createNonZeroBuffer(5); // covers source 5-10s
+      const peaks = await getBufferClipPeaks(
+        { clipStart: 4, duration: 4, sourceOffset: 6, sourceIn: 5, buffer: afterBuffer },
+        4, 8,
+        100,
+      );
+
+      expect(peaks.length).toBe(100);
+      const hasNonZero = peaks.some((b: { min: number; max: number }) => b.min !== 0 || b.max !== 0);
+      expect(hasNonZero).toBe(true);
+    });
+
+    it('sub-clip from cutRegionFromClips with sourceIn produces non-zero peaks', async () => {
+      // Scenario: after prior X-cut, clip has sourceIn=5. Then delete region
+      // creates a sub-clip with sourceOffset > sourceIn.
+      // E.g. sub-clip: sourceIn=5, sourceOffset=7, buffer covers 5-10s
+      const subBuffer = createNonZeroBuffer(5); // covers source 5-10s
+      const peaks = await getBufferClipPeaks(
+        { clipStart: 0, duration: 3, sourceOffset: 7, sourceIn: 5, buffer: subBuffer },
+        0, 3,
+        100,
+      );
+
+      expect(peaks.length).toBe(100);
+      const hasNonZero = peaks.some((b: { min: number; max: number }) => b.min !== 0 || b.max !== 0);
+      expect(hasNonZero).toBe(true);
+    });
+
+    it('second cut — after sub-clip sourceIn matches buffer start (v0.27.13)', async () => {
+      // Scenario: 10s buffer track → first cut at 3-5s → after clip (5-10s)
+      // → second cut at 7-8s on that after clip → after sub-clip should have sourceIn=8
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      // Create 10s buffer track
+      const buffer = createNonZeroBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const ctx = new AudioContext();
+
+      // First cut: remove 3-5s
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+      let updated = tracksStore.tracks.find(t => t.id === track.id)!;
+      expect(updated.clips!.length).toBe(2);
+
+      const beforeClip = updated.clips![0];
+      expect(beforeClip.sourceIn).toBe(0);
+      expect(beforeClip.sourceOffset).toBe(0);
+
+      const afterClip1 = updated.clips![1];
+      expect(afterClip1.sourceIn).toBe(5);
+      expect(afterClip1.sourceOffset).toBe(5);
+
+      // Second cut: remove 7-8s from timeline (maps to source 7-8s within afterClip1)
+      // afterClip1 is at clipStart=3, duration=5, so timeline 7-8 = clipStart+4 to clipStart+5
+      // which is relOverlapStart=4, relOverlapEnd=5 within the clip
+      await tracksStore.cutRegionFromTrack(track.id, 7, 8, ctx, { mode: 'edit-only' });
+      updated = tracksStore.tracks.find(t => t.id === track.id)!;
+      expect(updated.clips!.length).toBe(3);
+
+      // The after sub-clip from the second cut: covers source 8-10s
+      const afterSubClip = updated.clips![2];
+      // sourceIn must match sourceOffset (= where buffer[0] starts in source-file time)
+      expect(afterSubClip.sourceOffset).toBe(8);
+      expect(afterSubClip.sourceIn).toBe(8); // NOT 5 (the parent's sourceIn)
+
+      // Verify bufferBase = sourceOffset - sourceIn = 0 (not 3)
+      const bufferBase = afterSubClip.sourceOffset! - (afterSubClip.sourceIn ?? afterSubClip.sourceOffset!);
+      expect(bufferBase).toBe(0);
+
+      // Verify the panel renderer would produce non-zero peaks
+      const peaks = await getBufferClipPeaks(
+        {
+          clipStart: afterSubClip.clipStart,
+          duration: afterSubClip.duration,
+          sourceOffset: afterSubClip.sourceOffset!,
+          sourceIn: afterSubClip.sourceIn,
+          buffer: afterSubClip.buffer!,
+        },
+        afterSubClip.clipStart,
+        afterSubClip.clipStart + afterSubClip.duration,
+        50,
+      );
+      const hasNonZero = peaks.some((b: { min: number; max: number }) => b.min !== 0 || b.max !== 0);
+      expect(hasNonZero).toBe(true);
+    });
+
+    it('splitClipAtTime — after clip sourceIn matches buffer start (v0.27.13)', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      // Create a buffer-backed clip with sourceIn=5 (simulating a prior cut's after-clip)
+      const buffer = createNonZeroBuffer(5); // 5s buffer covering source 5-10s
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        clips: [
+          {
+            id: 'clip-A',
+            buffer,
+            waveformData: new Array(100).fill(0.5),
+            clipStart: 0,
+            duration: 5,
+            sourceOffset: 5,
+            sourceIn: 5,
+            sourceDuration: 5,
+          },
+        ],
+        duration: 5,
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // Split at midpoint (2.5s on timeline = source 7.5s)
+      const ctx = new AudioContext();
+      const result = await tracksStore.splitClipAtTime(track.id, 'clip-A', 2.5, ctx);
+      expect(result).not.toBeNull();
+
+      const { before: beforeSplit, after: afterSplit } = result!;
+
+      // Before clip: sourceIn stays at 5 (buffer[0] still maps to source 5s)
+      expect(beforeSplit.sourceIn).toBe(5);
+      expect(beforeSplit.sourceOffset).toBe(5);
+      expect(beforeSplit.sourceDuration).toBeCloseTo(2.5, 1);
+
+      // After clip: sourceIn must equal its sourceOffset (buffer[0] = source 7.5s)
+      expect(afterSplit.sourceOffset).toBe(7.5);
+      expect(afterSplit.sourceIn).toBe(7.5); // NOT 5 (the parent's sourceIn)
+      expect(afterSplit.sourceDuration).toBeCloseTo(2.5, 1);
+
+      // Verify bufferBase = 0 for the after clip
+      const bufferBase = afterSplit.sourceOffset! - (afterSplit.sourceIn ?? afterSplit.sourceOffset!);
+      expect(bufferBase).toBe(0);
+    });
+
+    it('without sourceIn fix, sourceOffset > 0 would read past buffer end', async () => {
+      // This test verifies the exact bug: when sourceIn is missing and sourceOffset=5
+      // on a 5s buffer, the OLD code would start reading at 5s into a 5s buffer → silence.
+      // The NEW code with sourceIn=5 correctly computes bufferBase=0.
+      const buffer = createNonZeroBuffer(5);
+
+      // With sourceIn set correctly: bufferBase = 5 - 5 = 0, reads from 0-5s ✓
+      const correctPeaks = await getBufferClipPeaks(
+        { clipStart: 0, duration: 5, sourceOffset: 5, sourceIn: 5, buffer },
+        0, 5,
+        50,
+      );
+      const correctHasAudio = correctPeaks.some((b: { min: number; max: number }) => b.min !== 0 || b.max !== 0);
+      expect(correctHasAudio).toBe(true);
+
+      // Without sourceIn (undefined): bufferBase = 5 - 5 = 0 (fallback works)
+      // But if sourceIn were omitted AND the fallback was broken, we'd get silence.
+      // The fix ensures the fallback defaults to sourceOffset, so bufferBase = 0.
+      const fallbackPeaks = await getBufferClipPeaks(
+        { clipStart: 0, duration: 5, sourceOffset: 5, buffer }, // no sourceIn
+        0, 5,
+        50,
+      );
+      const fallbackHasAudio = fallbackPeaks.some((b: { min: number; max: number }) => b.min !== 0 || b.max !== 0);
+      expect(fallbackHasAudio).toBe(true);
+    });
+  });
 });
