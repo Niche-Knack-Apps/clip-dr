@@ -335,6 +335,59 @@ describe('EDL Editing Architecture', () => {
     });
   });
 
+  describe('sourceIn/sourceDuration on all cut paths', () => {
+    it('EDL cut clips have sourceIn and sourceDuration', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0);
+      const trackIdx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      // Set up EDL track (buffer=null, sourceFile set)
+      tracksStore.tracks[trackIdx] = {
+        ...tracksStore.tracks[trackIdx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        clips: [{
+          id: 'edl-src',
+          buffer: null,
+          waveformData: new Array(200).fill(0.5),
+          clipStart: 0,
+          duration: 10,
+          sourceFile: '/tmp/edl-source.wav',
+          sourceOffset: 0,
+        }],
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      const ctx = new AudioContext();
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+
+      const clips = tracksStore.getTrackClips(track.id);
+      for (const clip of clips) {
+        expect(clip.sourceIn).toBeDefined();
+        expect(clip.sourceDuration).toBeDefined();
+      }
+    });
+
+    it('in-memory cut clips have sourceIn and sourceDuration', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const tracksStore = useTracksStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track 1', 0, '/tmp/small.wav');
+
+      const ctx = new AudioContext();
+      await tracksStore.cutRegionFromTrack(track.id, 3, 5, ctx, { mode: 'edit-only' });
+
+      const clips = tracksStore.getTrackClips(track.id);
+      for (const clip of clips) {
+        expect(clip.sourceIn).toBeDefined();
+        expect(clip.sourceDuration).toBeDefined();
+      }
+    });
+  });
+
   describe('cutRegionFromClips handles EDL clips', () => {
     it('splitting EDL clips produces correct sourceFile and sourceOffset', async () => {
       const { useTracksStore } = await import('@/stores/tracks');

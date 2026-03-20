@@ -80,6 +80,42 @@ function computeWaveformScale(buckets: WaveformBucket[]): number {
   return rms > 0.001 ? Math.min(targetRms / rms, 1.0) : 1.0;
 }
 
+/**
+ * Extract hi-res peaks from an AudioBuffer for a sub-range.
+ * Exported for unit testing of buffer-clip waveform extraction.
+ */
+export function extractHiResPeaksForRange(
+  buffer: AudioBuffer,
+  rangeStartSec: number,
+  rangeEndSec: number,
+  targetBuckets: number,
+): WaveformBucket[] {
+  const channelData = buffer.getChannelData(0);
+  const sampleRate = buffer.sampleRate;
+  const startSample = Math.max(0, Math.floor(rangeStartSec * sampleRate));
+  const endSample = Math.min(channelData.length, Math.ceil(rangeEndSec * sampleRate));
+  const totalSamples = endSample - startSample;
+  if (totalSamples <= 0) return new Array(targetBuckets).fill({ min: 0, max: 0 });
+
+  const samplesPerBucket = Math.max(1, Math.ceil(totalSamples / targetBuckets));
+  const buckets: WaveformBucket[] = [];
+
+  for (let i = 0; i < targetBuckets; i++) {
+    const bStart = startSample + i * samplesPerBucket;
+    const bEnd = Math.min(bStart + samplesPerBucket, endSample);
+    let min = 0;
+    let max = 0;
+    for (let j = bStart; j < bEnd; j++) {
+      const s = channelData[j];
+      if (s < min) min = s;
+      if (s > max) max = s;
+    }
+    buckets.push({ min, max });
+  }
+
+  return buckets;
+}
+
 export function useWaveform() {
   const { effectiveWaveformData, effectiveDuration, waveformLayers } = useEffectiveAudio();
   const tracksStore = useTracksStore();
@@ -291,43 +327,6 @@ export function useWaveform() {
   }
 
   /**
-   * Extract hi-res peaks from an AudioBuffer for a sub-range.
-   * Adapted from ClipRegion.vue's extractHiResPeaks but works on a time range
-   * within the buffer rather than the whole buffer.
-   */
-  function extractHiResPeaksForRange(
-    buffer: AudioBuffer,
-    rangeStartSec: number,
-    rangeEndSec: number,
-    targetBuckets: number,
-  ): WaveformBucket[] {
-    const channelData = buffer.getChannelData(0);
-    const sampleRate = buffer.sampleRate;
-    const startSample = Math.max(0, Math.floor(rangeStartSec * sampleRate));
-    const endSample = Math.min(channelData.length, Math.ceil(rangeEndSec * sampleRate));
-    const totalSamples = endSample - startSample;
-    if (totalSamples <= 0) return new Array(targetBuckets).fill({ min: 0, max: 0 });
-
-    const samplesPerBucket = Math.max(1, Math.ceil(totalSamples / targetBuckets));
-    const buckets: WaveformBucket[] = [];
-
-    for (let i = 0; i < targetBuckets; i++) {
-      const bStart = startSample + i * samplesPerBucket;
-      const bEnd = Math.min(bStart + samplesPerBucket, endSample);
-      let min = 0;
-      let max = 0;
-      for (let j = bStart; j < bEnd; j++) {
-        const s = channelData[j];
-        if (s < min) min = s;
-        if (s > max) max = s;
-      }
-      buckets.push({ min, max });
-    }
-
-    return buckets;
-  }
-
-  /**
    * Clip-aware peak fetching for layers with clips.
    * Handles both EDL clips (sourceFile → peak tile from Rust) and
    * small-file clips (buffer → hi-res extraction from AudioBuffer).
@@ -366,8 +365,14 @@ export function useWaveform() {
       if (clip.buffer) {
         // Small-file clip: extract hi-res peaks directly from AudioBuffer
         const bufferDuration = clip.buffer.duration;
-        const rangeStart = clip.sourceOffset + (overlapStart - clip.clipStart);
-        const rangeEnd = Math.min(clip.sourceOffset + (overlapEnd - clip.clipStart), bufferDuration);
+        // Buffer sample[0] corresponds to sourceIn in source-file time.
+        // sourceOffset is the current audible start in source-file time.
+        // Offset into buffer = sourceOffset - sourceIn.
+        const bufferBase = clip.sourceOffset - (clip.sourceIn ?? clip.sourceOffset);
+        const rawStart = bufferBase + (overlapStart - clip.clipStart);
+        const rawEnd = bufferBase + (overlapEnd - clip.clipStart);
+        const rangeStart = Math.max(0, Math.min(rawStart, bufferDuration));
+        const rangeEnd = Math.max(rangeStart, Math.min(rawEnd, bufferDuration));
         const clipBucketCount = outEndIdx - outStartIdx;
         if (clipBucketCount <= 0) continue;
 

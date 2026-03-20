@@ -302,6 +302,7 @@ export interface WaveformLayerClip {
   sourceFile?: string;       // large-file EDL clips
   pyramidSourceFile?: string; // original source path for peak pyramid lookup (may differ from sourceFile for decode-cached files)
   sourceOffset: number;
+  sourceIn?: number;         // buffer base position in source-file time (buffer[0] = sourceIn)
   buffer?: AudioBuffer;      // small-file clips: hi-res extraction from memory
 }
 
