@@ -184,10 +184,14 @@ function extractHiResPeaks(buffer: AudioBuffer, targetBuckets: number): number[]
 async function fetchClipPeakTile(targetBuckets: number, cacheKey: string) {
   peakTileFetching.value = true;
   try {
+    const fetchStart = useSourceRendering.value ? sourceIn.value : sourceOffset.value;
+    const fetchEnd = useSourceRendering.value
+      ? (sourceIn.value + sourceDuration.value)
+      : (sourceOffset.value + clipDuration.value);
     const data = await invoke<number[]>('get_peak_tile', {
       path: sourceFile.value,
-      startTime: sourceOffset.value,
-      endTime: sourceOffset.value + clipDuration.value,
+      startTime: fetchStart,
+      endTime: fetchEnd,
       bucketCount: targetBuckets,
     });
     peakTileData.value = data;

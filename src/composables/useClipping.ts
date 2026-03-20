@@ -74,6 +74,8 @@ export function useClipping() {
           duration: seg.duration,
           sourceFile: seg.sourceFile,
           sourceOffset: seg.sourceOffset,
+          sourceIn: seg.sourceOffset,
+          sourceDuration: seg.duration,
         }));
 
         // Distribute waveform data across clips proportionally
@@ -124,6 +126,8 @@ export function useClipping() {
           duration: seg.duration,
           sourceFile: seg.sourceFile,
           sourceOffset: seg.sourceOffset,
+          sourceIn: seg.sourceOffset,
+          sourceDuration: seg.duration,
         }));
 
         // Distribute waveform across clips proportionally

@@ -173,6 +173,7 @@ export const useTracksStore = defineStore('tracks', () => {
       waveformData: waveform,
       sampleRate: buffer.sampleRate,
       channels: buffer.numberOfChannels,
+      sourceDuration: buffer.duration,
     };
 
     const soloActive = hasActiveSolo();

@@ -1,5 +1,6 @@
-import { computed, ref } from 'vue';
+import { computed, ref, shallowRef } from 'vue';
 import { useTracksStore } from '@/stores/tracks';
+import { useUIStore } from '@/stores/ui';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { TRACK_COLORS } from '@/shared/types';
 import type { TrackClip, WaveformLayer, WaveformLayerClip, Track } from '@/shared/types';
@@ -13,6 +14,7 @@ import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
  */
 export function useCompositeWaveform() {
   const tracksStore = useTracksStore();
+  const uiStore = useUIStore();
 
   /**
    * Add a clip's waveform to the composite at the appropriate position.
@@ -72,7 +74,7 @@ export function useCompositeWaveform() {
   );
 
   // Cache for composite during drag — waveform data doesn't meaningfully change during position-only drag
-  const cachedComposite = ref<number[]>([]);
+  const cachedComposite = shallowRef<number[]>([]);
   const cachedCompositeVersion = ref<string>('');
 
   // Compute composite waveform data by merging all tracks
@@ -80,6 +82,10 @@ export function useCompositeWaveform() {
     const tracks = tracksStore.tracks;
     const version = waveformVersion.value;
 
+    // During trim, freeze composite entirely (clip props change per frame but we want stable display)
+    if (uiStore.activeTrimEdge !== null && cachedComposite.value.length > 0) {
+      return cachedComposite.value;
+    }
     // During drag, return cached composite if waveform data content hasn't changed
     if (tracksStore.activeDrag && version === cachedCompositeVersion.value && cachedComposite.value.length > 0) {
       return cachedComposite.value;
@@ -121,10 +127,19 @@ export function useCompositeWaveform() {
     return composite;
   });
 
+  // Cache for layers during trim — avoid re-rendering per frame
+  const cachedLayers = shallowRef<WaveformLayer[]>([]);
+  const cachedLayersVersion = ref<string>('');
+
   // Per-track waveform layers with solo/mute filtering
   const waveformLayers = computed((): WaveformLayer[] => {
     const tracks = tracksStore.tracks;
     if (tracks.length === 0) return [];
+
+    // During trim, freeze layers entirely (clip props change per frame but we want stable display)
+    if (uiStore.activeTrimEdge !== null && cachedLayers.value.length > 0) {
+      return cachedLayers.value;
+    }
 
     const timelineDuration = tracksStore.timelineDuration;
     if (timelineDuration <= 0) return [];
@@ -193,7 +208,7 @@ export function useCompositeWaveform() {
           layerClips.push({
             clipStart: c.clipStart,
             duration: c.duration,
-            sourceOffset: 0,
+            sourceOffset: c.sourceOffset ?? 0,
             buffer: c.buffer,
           });
           hasAnyHiRes = true;
@@ -233,6 +248,10 @@ export function useCompositeWaveform() {
       }
       usedColors.add(layer.color);
     }
+
+    // Update layer cache
+    cachedLayers.value = layers;
+    cachedLayersVersion.value = waveformVersion.value;
 
     return layers;
   });

@@ -555,4 +555,192 @@ describe('Waveform Sync After Cut', () => {
       expect(updated.audioData.sourceDuration).toBeCloseTo(20, 1);
     });
   });
+
+  // ── Regression: sourceOffset propagated in composite layer clips ──────────
+
+  describe('composite waveform layer sourceOffset (v0.27.7)', () => {
+    it('buffer clips propagate sourceOffset to WaveformLayerClip', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const { useCompositeWaveform } = await import('@/composables/useCompositeWaveform');
+      const tracksStore = useTracksStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      // Simulate a trimmed clip with sourceOffset=2 and a buffer
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        clips: [
+          {
+            id: 'trimmed',
+            buffer: createMockAudioBuffer(8) as unknown as AudioBuffer,
+            waveformData: new Array(160).fill(0.5),
+            clipStart: 0,
+            duration: 8,
+            sourceOffset: 2,
+          },
+        ],
+        duration: 8,
+        importStatus: 'ready',
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      const { waveformLayers } = useCompositeWaveform();
+      const layers = waveformLayers.value;
+
+      expect(layers.length).toBe(1);
+      expect(layers[0].clips).toBeDefined();
+      expect(layers[0].clips!.length).toBe(1);
+      // The bug was sourceOffset hardcoded to 0 — now it must reflect the clip's value
+      expect(layers[0].clips![0].sourceOffset).toBe(2);
+    });
+
+    it('EDL clips already propagate sourceOffset correctly', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const { useCompositeWaveform } = await import('@/composables/useCompositeWaveform');
+      const tracksStore = useTracksStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        sourcePath: '/tmp/src.wav',
+        clips: [
+          {
+            id: 'edl-clip',
+            buffer: null,
+            waveformData: new Array(100).fill(0.5),
+            clipStart: 0,
+            duration: 5,
+            sourceFile: '/tmp/src.wav',
+            sourceOffset: 3,
+          },
+        ],
+        duration: 5,
+        importStatus: 'large-file',
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      const { waveformLayers } = useCompositeWaveform();
+      const layers = waveformLayers.value;
+
+      expect(layers[0].clips).toBeDefined();
+      expect(layers[0].clips![0].sourceOffset).toBe(3);
+    });
+  });
+
+  // ── Regression: zoomed waveform freezes during trim drag ──────────────────
+
+  describe('composite waveform freeze during trim (v0.27.7)', () => {
+    it('compositeWaveformData returns cached value during active trim', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const { useUIStore } = await import('@/stores/ui');
+      const { useCompositeWaveform } = await import('@/composables/useCompositeWaveform');
+      const tracksStore = useTracksStore();
+      const uiStore = useUIStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        clips: [
+          { id: 'A', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 0, duration: 5, sourceFile: '/tmp/src.wav', sourceOffset: 0 },
+          { id: 'B', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 5, duration: 5, sourceFile: '/tmp/src.wav', sourceOffset: 5 },
+        ],
+        duration: 10,
+        importStatus: 'large-file',
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      const { compositeWaveformData } = useCompositeWaveform();
+
+      // Prime the cache
+      const initial = compositeWaveformData.value;
+      expect(initial.length).toBeGreaterThan(0);
+
+      // Simulate trim drag start
+      uiStore.activeTrimEdge = { time: 5, edge: 'left' };
+
+      // Mutate clip position (as trim does per frame)
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        clips: tracksStore.tracks[idx].clips!.map(c =>
+          c.id === 'B' ? { ...c, clipStart: 4.5, duration: 5.5, sourceOffset: 4.5 } : c
+        ),
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // During trim, composite should return the cached (initial) value
+      const duringTrim = compositeWaveformData.value;
+      expect(duringTrim).toBe(initial);
+
+      // Release trim
+      uiStore.activeTrimEdge = null;
+
+      // After release, composite should recompute
+      const afterRelease = compositeWaveformData.value;
+      expect(afterRelease).not.toBe(initial);
+    });
+
+    it('waveformLayers returns cached value during active trim', async () => {
+      const { useTracksStore } = await import('@/stores/tracks');
+      const { useUIStore } = await import('@/stores/ui');
+      const { useCompositeWaveform } = await import('@/composables/useCompositeWaveform');
+      const tracksStore = useTracksStore();
+      const uiStore = useUIStore();
+
+      const buffer = createMockAudioBuffer(10);
+      const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Track', 0);
+      const idx = tracksStore.tracks.findIndex(t => t.id === track.id);
+
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        audioData: { buffer: null, waveformData: new Array(200).fill(0.5), sampleRate: 44100, channels: 2 },
+        clips: [
+          { id: 'A', buffer: null, waveformData: new Array(100).fill(0.5), clipStart: 0, duration: 5, sourceFile: '/tmp/src.wav', sourceOffset: 0 },
+        ],
+        duration: 5,
+        importStatus: 'large-file',
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      const { waveformLayers } = useCompositeWaveform();
+
+      // Prime the cache
+      const initial = waveformLayers.value;
+      expect(initial.length).toBe(1);
+
+      // Start trim
+      uiStore.activeTrimEdge = { time: 0, edge: 'left' };
+
+      // Mutate clip (trim moves left edge)
+      tracksStore.tracks[idx] = {
+        ...tracksStore.tracks[idx],
+        clips: [
+          { id: 'A', buffer: null, waveformData: new Array(80).fill(0.5), clipStart: 1, duration: 4, sourceFile: '/tmp/src.wav', sourceOffset: 1 },
+        ],
+        duration: 4,
+      };
+      tracksStore.tracks = [...tracksStore.tracks];
+
+      // During trim, layers should be cached
+      const duringTrim = waveformLayers.value;
+      expect(duringTrim).toBe(initial);
+
+      // Release
+      uiStore.activeTrimEdge = null;
+
+      // After release, should recompute
+      const afterRelease = waveformLayers.value;
+      expect(afterRelease).not.toBe(initial);
+    });
+  });
 });
