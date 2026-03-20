@@ -287,8 +287,13 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const ctx = audioStore.getAudioContext();
 
     if (hasIOPoints) {
+      // Scope extraction to selected track (or all tracks if 'ALL'/null)
+      const selectedId = tracksStore.selectedTrackId;
+      const sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+
       // Determine if any overlapping track lacks an in-memory buffer
       const hasLargeFile = tracksStore.tracks.some(t => {
+        if (sourceTrackIds && !sourceTrackIds.includes(t.id)) return false;
         const trackEnd = t.trackStart + t.duration;
         if (t.trackStart >= outPoint || trackEnd <= inPoint) return false;
         return !t.audioData.buffer;
@@ -298,13 +303,13 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
       // Always collect segments BEFORE ripple delete modifies tracks — needed for
       // save/load round-trip even for small files (EDL clip metadata)
-      const virtualSegments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint);
-      const { sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint);
-      const clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint);
+      const virtualSegments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint, sourceTrackIds);
+      const { sampleRate: sr, channels: ch } = tracksStore.getContributingFormat(inPoint, outPoint, sourceTrackIds);
+      const clipWaveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint, sourceTrackIds);
 
       if (!hasLargeFile) {
         // Small file: also extract in-memory audio for immediate playback
-        extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx);
+        extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds);
       }
 
       // Ripple delete — ALWAYS edit-only (no extraction)
