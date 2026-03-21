@@ -12,7 +12,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile } from '@/shared/types';
 import { ALL_SHORTCUT_HINTS, DEFAULT_SETTINGS } from '@/shared/constants';
 
-const APP_VERSION = '0.27.17';
+const APP_VERSION = '0.27.18';
 
 const emit = defineEmits<{
   close: [];
@@ -427,6 +427,26 @@ onMounted(async () => {
             <p class="text-[10px] text-gray-500">
               <span class="text-yellow-400/70">\u2605</span> = default for Quick Re-Export (Ctrl+Shift+E).
               Built-in profiles can't be deleted.
+            </p>
+          </div>
+        </div>
+
+        <!-- Silence Removal -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Silence Removal</h3>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">
+              Crossfade at edit points: {{ settingsStore.settings.silenceCrossfadeMs }}ms{{ settingsStore.settings.silenceCrossfadeMs === 0 ? ' (off)' : '' }}
+            </label>
+            <Slider
+              :model-value="settingsStore.settings.silenceCrossfadeMs"
+              :min="0"
+              :max="50"
+              :step="1"
+              @update:model-value="settingsStore.setSilenceCrossfadeMs"
+            />
+            <p class="text-[10px] text-gray-500 mt-1">
+              Smooth transitions at silence removal boundaries. 10ms is industry standard.
             </p>
           </div>
         </div>

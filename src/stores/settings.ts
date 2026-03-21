@@ -343,6 +343,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  function setSilenceCrossfadeMs(ms: number): void {
+    settings.value.silenceCrossfadeMs = Math.max(0, Math.min(50, Math.round(ms)));
+    saveSettings();
+  }
+
   function resetProjectFolder(): void {
     settings.value.projectFolder = '';
     saveSettings();
@@ -425,5 +430,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setTrackPrimaryColor,
     setTrackCustomColors,
     trackPalette,
+    // Silence crossfade
+    setSilenceCrossfadeMs,
   };
 });

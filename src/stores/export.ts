@@ -73,8 +73,9 @@ function buildExportSummary(
 /**
  * Split a single EDL clip around silence regions, returning sub-clips that skip silence.
  * Rebases volume_envelope points to each sub-clip's local time.
+ * Applies linear fade-in/fade-out at edges created by silence cuts (crossfade).
  */
-export function subtractSilenceFromClip(clip: ExportEDLTrack, silenceRegions: SilenceRegion[]): ExportEDLTrack[] {
+export function subtractSilenceFromClip(clip: ExportEDLTrack, silenceRegions: SilenceRegion[], crossfadeSec = 0): ExportEDLTrack[] {
   const clipEnd = clip.track_start + clip.duration;
 
   // Collect silence intervals that overlap this clip
@@ -113,6 +114,13 @@ export function subtractSilenceFromClip(clip: ExportEDLTrack, silenceRegions: Si
         .filter(p => p.time >= 0 && p.time <= subDuration);
     }
 
+    // Apply crossfade at edges created by silence cuts (not at original clip boundaries)
+    const maxFade = subDuration / 2; // never exceed half the sub-clip
+    const fadeIn = (iv.start > clip.track_start && crossfadeSec > 0)
+      ? Math.min(crossfadeSec, maxFade) : undefined;
+    const fadeOut = (iv.end < clipEnd && crossfadeSec > 0)
+      ? Math.min(crossfadeSec, maxFade) : undefined;
+
     return {
       source_path: clip.source_path,
       track_start: iv.start,
@@ -120,6 +128,8 @@ export function subtractSilenceFromClip(clip: ExportEDLTrack, silenceRegions: Si
       volume: clip.volume,
       file_offset: subFileOffset,
       volume_envelope: subEnvelope,
+      fade_in: fadeIn,
+      fade_out: fadeOut,
     };
   });
 }
@@ -192,6 +202,7 @@ function removeSilenceFromBuffer(
   silenceRegions: SilenceRegion[],
   timelineStart: number,
   audioContext: AudioContext,
+  crossfadeSec = 0,
 ): AudioBuffer {
   const sampleRate = buffer.sampleRate;
   const numChannels = buffer.numberOfChannels;
@@ -225,14 +236,32 @@ function removeSilenceFromBuffer(
   const compacted = audioContext.createBuffer(numChannels, totalSpeechSamples, sampleRate);
 
   let writeCursor = 0;
-  for (const iv of speechIntervals) {
+  for (let ivIdx = 0; ivIdx < speechIntervals.length; ivIdx++) {
+    const iv = speechIntervals[ivIdx];
     const readStart = Math.floor((iv.start - timelineStart) * sampleRate);
     const readLen = Math.ceil((iv.end - iv.start) * sampleRate);
+
+    // Determine fade lengths for this interval
+    const maxFadeSamples = Math.floor(readLen / 2);
+    const needsFadeIn = iv.start > timelineStart && crossfadeSec > 0;
+    const needsFadeOut = iv.end < bufEnd && crossfadeSec > 0;
+    const fadeInSamples = needsFadeIn ? Math.min(Math.ceil(crossfadeSec * sampleRate), maxFadeSamples) : 0;
+    const fadeOutSamples = needsFadeOut ? Math.min(Math.ceil(crossfadeSec * sampleRate), maxFadeSamples) : 0;
+
     for (let ch = 0; ch < numChannels; ch++) {
       const input = buffer.getChannelData(ch);
       const output = compacted.getChannelData(ch);
       for (let i = 0; i < readLen && readStart + i < input.length && writeCursor + i < output.length; i++) {
-        output[writeCursor + i] = input[readStart + i];
+        let gain = 1.0;
+        // Linear fade-in at start of interval (after silence)
+        if (fadeInSamples > 0 && i < fadeInSamples) {
+          gain *= i / fadeInSamples;
+        }
+        // Linear fade-out at end of interval (before silence)
+        if (fadeOutSamples > 0 && i >= readLen - fadeOutSamples) {
+          gain *= (readLen - 1 - i) / fadeOutSamples;
+        }
+        output[writeCursor + i] = input[readStart + i] * gain;
       }
     }
     writeCursor += readLen;
@@ -367,7 +396,7 @@ export const useExportStore = defineStore('export', () => {
    * Flattens per-track → per-clip so edited (multi-clip) tracks export correctly.
    * Rebases volume envelope times to each clip's local origin.
    */
-  function buildEdl(tracks: Track[], outputPath: string, format: ExportFormat, bitrate: number, oggQuality?: number, silenceRegions?: SilenceRegion[]): ExportEDL {
+  function buildEdl(tracks: Track[], outputPath: string, format: ExportFormat, bitrate: number, oggQuality?: number, silenceRegions?: SilenceRegion[], crossfadeSec = 0): ExportEDL {
     const firstTrack = tracks[0];
     const sampleRate = firstTrack?.audioData.sampleRate || 44100;
     const channels = Math.min(firstTrack?.audioData.channels || 2, 2) as number;
@@ -397,7 +426,7 @@ export const useExportStore = defineStore('export', () => {
     // Split clips around silence regions (produces sub-clips that skip silence)
     if (silenceRegions && silenceRegions.length > 0) {
       const sorted = [...silenceRegions].sort((a, b) => a.start - b.start);
-      edlTracks = edlTracks.flatMap(clip => subtractSilenceFromClip(clip, sorted));
+      edlTracks = edlTracks.flatMap(clip => subtractSilenceFromClip(clip, sorted, crossfadeSec));
     }
 
     // Sort by timeline position for deterministic mixing
@@ -480,15 +509,16 @@ export const useExportStore = defineStore('export', () => {
       // Compute merged silence regions for all active tracks
       const silenceStore = useSilenceStore();
       const mergedSilence = computeUnionSilenceRegions(tracks, silenceStore);
+      const crossfadeSec = settingsStore.settings.silenceCrossfadeMs / 1000;
       if (mergedSilence.length > 0) {
         const totalSilenceDur = mergedSilence.reduce((s, r) => s + (r.end - r.start), 0);
-        console.log(`[Export] Removing ${mergedSilence.length} silence region(s) (${totalSilenceDur.toFixed(2)}s)`);
+        console.log(`[Export] Removing ${mergedSilence.length} silence region(s) (${totalSilenceDur.toFixed(2)}s), crossfade: ${settingsStore.settings.silenceCrossfadeMs}ms`);
       }
 
       // Use EDL streaming export when possible (required for large files)
       if (canUseEdlExport(tracks)) {
         console.log('[Export] Using EDL path:', true, 'tracks:', tracks.length);
-        const edl = buildEdl(tracks, outputPath, format, bitrate, oggQuality, mergedSilence);
+        const edl = buildEdl(tracks, outputPath, format, bitrate, oggQuality, mergedSilence, crossfadeSec);
 
         // Single-track export: trim leading/trailing silence by rebasing to zero
         if (tracks.length === 1) {
@@ -524,7 +554,7 @@ export const useExportStore = defineStore('export', () => {
       // Remove silence from mixed buffer if regions exist
       if (mergedSilence.length > 0) {
         const timelineStart = Math.min(...tracks.map(t => t.trackStart));
-        mixedBuffer = removeSilenceFromBuffer(mixedBuffer, mergedSilence, timelineStart, audioContext);
+        mixedBuffer = removeSilenceFromBuffer(mixedBuffer, mergedSilence, timelineStart, audioContext, crossfadeSec);
       }
       progress.value = 50;
 
@@ -633,14 +663,15 @@ export const useExportStore = defineStore('export', () => {
       // Get silence regions for this track
       const silenceStore = useSilenceStore();
       const trackSilence = silenceStore.getActiveRegionsForTrack(currentTrack.id);
+      const trackCrossfadeSec = settingsStore.settings.silenceCrossfadeMs / 1000;
       if (trackSilence.length > 0) {
         const totalSilenceDur = trackSilence.reduce((s, r) => s + (r.end - r.start), 0);
-        console.log(`[Export] Track "${currentTrack.name}": removing ${trackSilence.length} silence region(s) (${totalSilenceDur.toFixed(2)}s)`);
+        console.log(`[Export] Track "${currentTrack.name}": removing ${trackSilence.length} silence region(s) (${totalSilenceDur.toFixed(2)}s), crossfade: ${settingsStore.settings.silenceCrossfadeMs}ms`);
       }
 
       // Use EDL path when all clips have a resolvable source (handles multi-clip edited tracks)
       if (canUseEdlExport([currentTrack])) {
-        const edl = buildEdl([currentTrack], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality, trackSilence);
+        const edl = buildEdl([currentTrack], outputPath, format, profile.mp3Bitrate || 192, profile.oggQuality, trackSilence, trackCrossfadeSec);
         rebaseEdlToZero(edl);
 
         const unlisten = await listen<{ progress: number }>('export-progress', (event) => {
@@ -668,7 +699,7 @@ export const useExportStore = defineStore('export', () => {
 
       // Remove silence from buffer if regions exist
       if (trackSilence.length > 0) {
-        trackBuffer = removeSilenceFromBuffer(trackBuffer, trackSilence, currentTrack.trackStart, audioContext);
+        trackBuffer = removeSilenceFromBuffer(trackBuffer, trackSilence, currentTrack.trackStart, audioContext, trackCrossfadeSec);
       }
 
       const wavData = await encodeWavFloat32InWorker(trackBuffer);

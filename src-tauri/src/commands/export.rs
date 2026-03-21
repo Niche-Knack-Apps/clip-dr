@@ -223,6 +223,12 @@ pub struct ExportEDLTrack {
     pub file_offset: f64,
     #[serde(default)]
     pub volume_envelope: Option<Vec<AutomationPoint>>,
+    /// Linear fade-in duration in seconds at clip start (silence crossfade)
+    #[serde(default)]
+    pub fade_in: Option<f64>,
+    /// Linear fade-out duration in seconds at clip end (silence crossfade)
+    #[serde(default)]
+    pub fade_out: Option<f64>,
 }
 
 /// Loaded audio source for EDL mixing
@@ -233,6 +239,10 @@ struct EdlSource {
     file_offset: f64,
     volume: f32,
     volume_envelope: Option<Vec<AutomationPoint>>,
+    /// Linear fade-in duration in seconds
+    fade_in: f64,
+    /// Linear fade-out duration in seconds
+    fade_out: f64,
     pcm: PcmData,
     sample_rate: u32,
     channels: u16,
@@ -266,6 +276,8 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
             file_offset: track.file_offset,
             volume: track.volume,
             volume_envelope: track.volume_envelope.clone(),
+            fade_in: track.fade_in.unwrap_or(0.0),
+            fade_out: track.fade_out.unwrap_or(0.0),
             pcm,
             sample_rate,
             channels,
@@ -319,12 +331,20 @@ fn mix_chunk(
             if rel_t < 0.0 || rel_t >= src.duration { continue; }
 
             // Evaluate volume: use envelope if present, otherwise flat volume
-            let vol = match &src.volume_envelope {
+            let mut vol = match &src.volume_envelope {
                 Some(env) if !env.is_empty() => {
                     super::playback::eval_envelope(env, rel_t, src.volume, &mut env_idx)
                 }
                 _ => src.volume,
             };
+
+            // Apply linear crossfade at clip edges (silence removal boundaries)
+            if src.fade_in > 0.0 && rel_t < src.fade_in {
+                vol *= (rel_t / src.fade_in) as f32;
+            }
+            if src.fade_out > 0.0 && rel_t > src.duration - src.fade_out {
+                vol *= ((src.duration - rel_t) / src.fade_out) as f32;
+            }
 
             // Apply file_offset: rel_t is position within the clip; add offset to reach into source file
             // TIME-07: explicit floor for sample lookup (was implicit truncation via `as usize`)

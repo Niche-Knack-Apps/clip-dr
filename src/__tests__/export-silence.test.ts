@@ -144,6 +144,64 @@ describe('collapseTimeline', () => {
   });
 });
 
+describe('subtractSilenceFromClip — crossfade', () => {
+  it('applies fade_in/fade_out at silence-created edges', () => {
+    const clip = mkClip(0, 10); // 0–10
+    const result = subtractSilenceFromClip(clip, [mkSilence(3, 5)], 0.01); // 10ms crossfade
+    expect(result).toHaveLength(2);
+    // Before silence (0–3): no fade_in (original start), fade_out at silence boundary
+    expect(result[0].fade_in).toBeUndefined();
+    expect(result[0].fade_out).toBe(0.01);
+    // After silence (5–10): fade_in at silence boundary, no fade_out (original end)
+    expect(result[1].fade_in).toBe(0.01);
+    expect(result[1].fade_out).toBeUndefined();
+  });
+
+  it('both edges get fades for middle sub-clip', () => {
+    const clip = mkClip(0, 20);
+    const result = subtractSilenceFromClip(clip, [mkSilence(3, 5), mkSilence(12, 15)], 0.01);
+    expect(result).toHaveLength(3);
+    // Middle sub-clip (5–12): both edges created by silence
+    expect(result[1].fade_in).toBe(0.01);
+    expect(result[1].fade_out).toBe(0.01);
+  });
+
+  it('no fades when crossfadeSec is 0', () => {
+    const clip = mkClip(0, 10);
+    const result = subtractSilenceFromClip(clip, [mkSilence(3, 5)], 0);
+    expect(result[0].fade_in).toBeUndefined();
+    expect(result[0].fade_out).toBeUndefined();
+    expect(result[1].fade_in).toBeUndefined();
+    expect(result[1].fade_out).toBeUndefined();
+  });
+
+  it('clamps fade to half sub-clip duration', () => {
+    const clip = mkClip(0, 10);
+    // Silence 4–6 leaves sub-clips of 4s and 4s. Crossfade 3s → clamped to 2s (half)
+    const result = subtractSilenceFromClip(clip, [mkSilence(4, 6)], 3);
+    expect(result[0].fade_out).toBe(2); // 4/2 = 2
+    expect(result[1].fade_in).toBe(2);
+  });
+
+  it('silence at start: sub-clip gets fade_in only', () => {
+    const clip = mkClip(0, 10);
+    const result = subtractSilenceFromClip(clip, [mkSilence(0, 3)], 0.01);
+    expect(result).toHaveLength(1);
+    // Start edge is silence boundary, end edge is original clip end
+    expect(result[0].fade_in).toBe(0.01);
+    expect(result[0].fade_out).toBeUndefined();
+  });
+
+  it('silence at end: sub-clip gets fade_out only', () => {
+    const clip = mkClip(0, 10);
+    const result = subtractSilenceFromClip(clip, [mkSilence(7, 10)], 0.01);
+    expect(result).toHaveLength(1);
+    // Start edge is original clip start, end edge is silence boundary
+    expect(result[0].fade_in).toBeUndefined();
+    expect(result[0].fade_out).toBe(0.01);
+  });
+});
+
 describe('computeUnionSilenceRegions', () => {
   it('returns empty for no tracks', () => {
     const mockStore = { getActiveRegionsForTrack: () => [] } as any;
