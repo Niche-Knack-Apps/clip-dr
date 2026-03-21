@@ -15,8 +15,11 @@ export interface KeyboardActions {
   onDeleteTrack?: () => void;
   onFocusSearch?: () => void;
   // New actions
-  onJumpLayerStart?: () => void;
   onJumpLayerEnd?: () => void;
+  // Split & trim actions
+  onSplit?: () => void;
+  onTrimStart?: () => void;
+  onTrimEnd?: () => void;
   onSpeedUp?: () => void;
   onSpeedDown?: () => void;
   onNudge?: (ms: number) => void;
@@ -297,11 +300,28 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
         }
         break;
 
-      // New shortcuts
-      case KEYBOARD_SHORTCUTS.JUMP_LAYER_START:
+      // Split & trim shortcuts
+      case KEYBOARD_SHORTCUTS.SPLIT:
+      case 'S':
         if (!isCtrlOrCmd) {
           event.preventDefault();
-          actions.onJumpLayerStart?.();
+          guardedEditAction(actions.onSplit);
+        }
+        break;
+
+      case KEYBOARD_SHORTCUTS.TRIM_START:
+      case 'Y':
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          guardedEditAction(actions.onTrimStart);
+        }
+        break;
+
+      case KEYBOARD_SHORTCUTS.TRIM_END:
+      case 'U':
+        if (!isCtrlOrCmd) {
+          event.preventDefault();
+          guardedEditAction(actions.onTrimEnd);
         }
         break;
 

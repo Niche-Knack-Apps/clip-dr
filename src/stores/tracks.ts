@@ -2089,6 +2089,155 @@ export const useTracksStore = defineStore('tracks', () => {
     return { before: beforeClip, after: afterClip };
   }
 
+  // Split the clip under the playhead into two clips (no audio deleted)
+  async function splitAtPlayhead(
+    trackId: string,
+    playheadTime: number,
+    audioContext: AudioContext
+  ): Promise<boolean> {
+    const track = getTrackById(trackId);
+    if (!track) return false;
+
+    promoteToExplicitClips(trackId);
+    const clips = getTrackClips(trackId);
+    const clip = clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
+    if (!clip) return false;
+
+    const result = await splitClipAtTime(trackId, clip.id, playheadTime, audioContext);
+    if (!result) return false;
+
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    const currentTrack = tracks.value[trackIndex];
+    const newClips = currentTrack.clips!.map(c => c.id === clip.id ? [result.before, result.after] : [c]).flat();
+    tracks.value[trackIndex] = { ...currentTrack, clips: newClips };
+    triggerRef(tracks);
+    bumpSyncEpoch();
+
+    useHistoryStore().pushState('Split clip');
+    console.log(`[Tracks] Split clip at playhead ${playheadTime.toFixed(3)}s in track ${trackId}`);
+    return true;
+  }
+
+  // Remove everything before the playhead on the selected track
+  async function trimStartToPlayhead(
+    trackId: string,
+    playheadTime: number,
+    audioContext: AudioContext
+  ): Promise<boolean> {
+    const track = getTrackById(trackId);
+    if (!track) return false;
+    if (playheadTime <= track.trackStart + 0.001) return false;
+
+    promoteToExplicitClips(trackId);
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    const currentTrack = tracks.value[trackIndex];
+    const clips = currentTrack.clips ?? [];
+
+    const survivors: TrackClip[] = [];
+    for (const clip of clips) {
+      const clipEnd = clip.clipStart + clip.duration;
+      if (clipEnd <= playheadTime + 0.001) {
+        // Entirely before playhead — remove
+        continue;
+      } else if (clip.clipStart < playheadTime - 0.001) {
+        // Spans playhead — split and keep "after"
+        const result = await splitClipAtTime(trackId, clip.id, playheadTime, audioContext);
+        if (result) {
+          survivors.push(result.after);
+        } else {
+          survivors.push(clip);
+        }
+      } else {
+        // Entirely after playhead — keep
+        survivors.push(clip);
+      }
+    }
+
+    if (survivors.length === 0) {
+      tracks.value[trackIndex] = {
+        ...currentTrack,
+        clips: undefined,
+        audioData: { buffer: null, waveformData: [], sampleRate: currentTrack.audioData.sampleRate, channels: currentTrack.audioData.channels },
+        duration: 0,
+      };
+    } else {
+      const firstClipStart = Math.min(...survivors.map(c => c.clipStart));
+      const lastClipEnd = Math.max(...survivors.map(c => c.clipStart + c.duration));
+      tracks.value[trackIndex] = {
+        ...currentTrack,
+        clips: survivors,
+        trackStart: firstClipStart,
+        duration: lastClipEnd - firstClipStart,
+      };
+    }
+    triggerRef(tracks);
+    bumpSyncEpoch();
+
+    useHistoryStore().pushState('Trim start to playhead');
+    console.log(`[Tracks] Trimmed start to playhead ${playheadTime.toFixed(3)}s in track ${trackId}`);
+    return true;
+  }
+
+  // Remove everything after the playhead on the selected track
+  async function trimEndToPlayhead(
+    trackId: string,
+    playheadTime: number,
+    audioContext: AudioContext
+  ): Promise<boolean> {
+    const track = getTrackById(trackId);
+    if (!track) return false;
+    if (playheadTime >= track.trackStart + track.duration - 0.001) return false;
+
+    promoteToExplicitClips(trackId);
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    const currentTrack = tracks.value[trackIndex];
+    const clips = currentTrack.clips ?? [];
+
+    const survivors: TrackClip[] = [];
+    for (const clip of clips) {
+      const clipEnd = clip.clipStart + clip.duration;
+      if (clip.clipStart >= playheadTime - 0.001) {
+        // Entirely after playhead — remove
+        continue;
+      } else if (clipEnd > playheadTime + 0.001) {
+        // Spans playhead — split and keep "before"
+        const result = await splitClipAtTime(trackId, clip.id, playheadTime, audioContext);
+        if (result) {
+          survivors.push(result.before);
+        } else {
+          survivors.push(clip);
+        }
+      } else {
+        // Entirely before playhead — keep
+        survivors.push(clip);
+      }
+    }
+
+    if (survivors.length === 0) {
+      tracks.value[trackIndex] = {
+        ...currentTrack,
+        clips: undefined,
+        audioData: { buffer: null, waveformData: [], sampleRate: currentTrack.audioData.sampleRate, channels: currentTrack.audioData.channels },
+        duration: 0,
+      };
+    } else {
+      const firstClipStart = Math.min(...survivors.map(c => c.clipStart));
+      const lastClipEnd = Math.max(...survivors.map(c => c.clipStart + c.duration));
+      tracks.value[trackIndex] = {
+        ...currentTrack,
+        clips: survivors,
+        trackStart: firstClipStart,
+        duration: lastClipEnd - firstClipStart,
+      };
+    }
+    triggerRef(tracks);
+    bumpSyncEpoch();
+
+    useHistoryStore().pushState('Trim end to playhead');
+    console.log(`[Tracks] Trimmed end to playhead ${playheadTime.toFixed(3)}s in track ${trackId}`);
+    return true;
+  }
+
   // Insert a clip at the playhead position in a track, splitting existing clips if needed
   async function insertClipAtPlayhead(
     trackId: string,
@@ -3038,6 +3187,9 @@ export const useTracksStore = defineStore('tracks', () => {
     deleteClipFromTrack,
     removeClipKeepTrack,
     splitClipAtTime,
+    splitAtPlayhead,
+    trimStartToPlayhead,
+    trimEndToPlayhead,
     insertClipAtPlayhead,
     addEmptyTrack,
     resetMinTimelineDuration,
