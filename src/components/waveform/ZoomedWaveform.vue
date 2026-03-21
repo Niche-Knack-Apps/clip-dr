@@ -75,12 +75,16 @@ const waveformColor = computed(() => settingsStore.settings.waveformColor);
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 const followPlayhead = computed(() => uiStore.followPlayhead);
 
-// Aggregate silence regions from ALL tracks visible in the current zoom range
+// Aggregate silence regions from audible tracks visible in the current zoom range.
+// Follows the same mute/solo filtering as timemarks — silence for muted/non-solo'd tracks is hidden.
 const visibleSilenceRegions = computed(() => {
   const start = selection.value.start;
   const end = selection.value.end;
+  const hasSolo = tracksStore.tracks.some(t => t.solo);
   const result: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsInRange>[number] }[] = [];
   for (const track of tracksStore.tracks) {
+    if (hasSolo && !track.solo) continue;
+    if (!hasSolo && track.muted) continue;
     for (const region of silenceStore.getRegionsInRange(track.id, start, end)) {
       result.push({ trackId: track.id, region });
     }

@@ -273,10 +273,14 @@ function handleResizeEnd(newEnd: number) {
   selectionStore.resizeSelectionEnd(newEnd);
 }
 
-// Aggregate silence regions from ALL tracks (each tagged with its trackId for edit ops)
+// Aggregate silence regions from audible tracks (each tagged with its trackId for edit ops).
+// Follows the same mute/solo filtering as timemarks — silence for muted/non-solo'd tracks is hidden.
 const allSilenceRegions = computed(() => {
+  const hasSolo = tracksStore.tracks.some(t => t.solo);
   const result: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsForTrack>[number] }[] = [];
   for (const track of tracksStore.tracks) {
+    if (hasSolo && !track.solo) continue;
+    if (!hasSolo && track.muted) continue;
     for (const region of silenceStore.getRegionsForTrack(track.id)) {
       result.push({ trackId: track.id, region });
     }
