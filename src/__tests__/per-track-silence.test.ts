@@ -201,3 +201,163 @@ describe('Per-Track Silence', () => {
     expect(t2Visible[0].start).toBe(2); // t2's region
   });
 });
+
+describe('Silence Region Clip Movement (v0.27.21 regression)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('shiftRegionsForTrack moves all regions by delta', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const { useTracksStore } = await import('@/stores/tracks');
+    const silenceStore = useSilenceStore();
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(mkBuf(20), null, 'T1', 0);
+    silenceStore.addRegion(t1.id, 2, 4);
+    silenceStore.addRegion(t1.id, 6, 8);
+
+    silenceStore.shiftRegionsForTrack(t1.id, 5);
+
+    const regions = silenceStore.getRegionsForTrack(t1.id);
+    expect(regions[0].start).toBe(7);
+    expect(regions[0].end).toBe(9);
+    expect(regions[1].start).toBe(11);
+    expect(regions[1].end).toBe(13);
+  });
+
+  it('shiftRegionsForTrack drops regions shifted before 0', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const { useTracksStore } = await import('@/stores/tracks');
+    const silenceStore = useSilenceStore();
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(mkBuf(20), null, 'T1', 0);
+    silenceStore.addRegion(t1.id, 1, 2);
+    silenceStore.addRegion(t1.id, 5, 7);
+
+    silenceStore.shiftRegionsForTrack(t1.id, -3);
+
+    const regions = silenceStore.getRegionsForTrack(t1.id);
+    expect(regions.length).toBe(1);
+    expect(regions[0].start).toBe(2);
+    expect(regions[0].end).toBe(4);
+  });
+
+  it('adjustSilenceForCut removes, truncates, and shifts', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const { useTracksStore } = await import('@/stores/tracks');
+    const silenceStore = useSilenceStore();
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(mkBuf(20), null, 'T1', 0);
+    silenceStore.addRegion(t1.id, 1, 3);   // before cut → unchanged
+    silenceStore.addRegion(t1.id, 4, 6);   // fully inside cut → removed
+    silenceStore.addRegion(t1.id, 8, 12);  // after cut → shifted left by 4
+
+    silenceStore.adjustSilenceForCut(t1.id, 3, 7);
+
+    const regions = silenceStore.getRegionsForTrack(t1.id);
+    expect(regions.length).toBe(2);
+    expect(regions[0].start).toBe(1);
+    expect(regions[0].end).toBe(3);
+    expect(regions[1].start).toBe(4);  // 8 - 4
+    expect(regions[1].end).toBe(8);    // 12 - 4
+  });
+
+  it('adjustSilenceForDelete removes and truncates without shifting', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const { useTracksStore } = await import('@/stores/tracks');
+    const silenceStore = useSilenceStore();
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(mkBuf(20), null, 'T1', 0);
+    silenceStore.addRegion(t1.id, 2, 5);   // overlaps delete start → truncate end
+    silenceStore.addRegion(t1.id, 4, 6);   // fully inside → removed
+    silenceStore.addRegion(t1.id, 8, 10);  // after delete → unchanged
+
+    silenceStore.adjustSilenceForDelete(t1.id, 4, 7);
+
+    const regions = silenceStore.getRegionsForTrack(t1.id);
+    expect(regions.length).toBe(2);
+    expect(regions[0].start).toBe(2);
+    expect(regions[0].end).toBe(4);   // truncated
+    expect(regions[1].start).toBe(8);  // NOT shifted
+    expect(regions[1].end).toBe(10);
+  });
+
+  it('transferRegionsToTrack moves overlapping regions', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const { useTracksStore } = await import('@/stores/tracks');
+    const silenceStore = useSilenceStore();
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(mkBuf(20), null, 'T1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(mkBuf(20), null, 'T2', 0);
+
+    silenceStore.addRegion(t1.id, 2, 4);   // inside clip range → transfers
+    silenceStore.addRegion(t1.id, 8, 10);  // outside clip range → stays
+
+    silenceStore.transferRegionsToTrack(t1.id, t2.id, 1, 6, 10);
+
+    const t1Regions = silenceStore.getRegionsForTrack(t1.id);
+    const t2Regions = silenceStore.getRegionsForTrack(t2.id);
+
+    expect(t1Regions.length).toBe(1);
+    expect(t1Regions[0].start).toBe(8);
+    expect(t2Regions.length).toBe(1);
+    expect(t2Regions[0].start).toBe(12);  // 2 + 10
+    expect(t2Regions[0].end).toBe(14);    // 4 + 10
+  });
+});
+
+describe('Silence Project Load Remapping (v0.27.19 regression)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('setPerTrackSilenceRegions restores regions by trackId', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const silenceStore = useSilenceStore();
+
+    const perTrack: Record<string, { id: string; start: number; end: number; enabled: boolean }[]> = {
+      'track-abc': [
+        { id: 's1', start: 1, end: 3, enabled: true },
+        { id: 's2', start: 5, end: 7, enabled: true },
+      ],
+      'track-def': [
+        { id: 's3', start: 2, end: 4, enabled: false },
+      ],
+    };
+
+    silenceStore.setPerTrackSilenceRegions(perTrack);
+
+    expect(silenceStore.getRegionsForTrack('track-abc').length).toBe(2);
+    expect(silenceStore.getRegionsForTrack('track-def').length).toBe(1);
+    expect(silenceStore.getRegionsForTrack('track-def')[0].enabled).toBe(false);
+    expect(silenceStore.getRegionsForTrack('track-xyz').length).toBe(0);
+  });
+
+  it('remapped IDs work correctly (simulating project load)', async () => {
+    const { useSilenceStore } = await import('@/stores/silence');
+    const silenceStore = useSilenceStore();
+
+    const savedSilence: Record<string, { id: string; start: number; end: number; enabled: boolean }[]> = {
+      'old-id-1': [{ id: 's1', start: 1, end: 3, enabled: true }],
+      'old-id-2': [{ id: 's2', start: 5, end: 7, enabled: true }],
+    };
+
+    const idMap = new Map([['old-id-1', 'new-id-1'], ['old-id-2', 'new-id-2']]);
+    const remapped: Record<string, typeof savedSilence[string]> = {};
+    for (const [savedId, regions] of Object.entries(savedSilence)) {
+      const newId = idMap.get(savedId);
+      if (newId) remapped[newId] = regions;
+    }
+
+    silenceStore.setPerTrackSilenceRegions(remapped);
+
+    expect(silenceStore.getRegionsForTrack('new-id-1').length).toBe(1);
+    expect(silenceStore.getRegionsForTrack('new-id-2').length).toBe(1);
+    expect(silenceStore.getRegionsForTrack('old-id-1').length).toBe(0);
+  });
+});
