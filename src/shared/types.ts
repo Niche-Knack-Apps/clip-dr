@@ -249,6 +249,8 @@ export interface Settings {
   trackColorMode: 'auto' | 'custom';
   trackPrimaryColor: string;
   trackCustomColors: string[];
+  // Silence removal crossfade duration in milliseconds (0 = disabled)
+  silenceCrossfadeMs: number;
 }
 
 export type ExportFormat = 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -487,5 +489,9 @@ export interface ExportEDLTrack {
   /** Offset into the source file in seconds where this clip's audio begins */
   file_offset?: number;
   volume_envelope?: Array<{ time: number; value: number }>;
+  /** Linear fade-in duration in seconds at clip start (silence crossfade) */
+  fade_in?: number;
+  /** Linear fade-out duration in seconds at clip end (silence crossfade) */
+  fade_out?: number;
 }
 

@@ -226,6 +226,8 @@ export const useProjectStore = defineStore('project', () => {
 
       const baseDir = getDirectory(path);
       const errors: string[] = [];
+      // Map saved trackId → newly created trackId (import assigns fresh UUIDs)
+      const idMap = new Map<string, string>();
 
       // Import each track
       for (const pt of project.tracks) {
@@ -245,6 +247,7 @@ export const useProjectStore = defineStore('project', () => {
           // Find the just-imported track (last one added)
           const lastTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
           if (lastTrack) {
+            idMap.set(pt.id, lastTrack.id);
             // Capture the import duration as sourceDuration BEFORE overwriting with
             // saved pt.duration. This is the full source file duration — needed by
             // finalizeClipWaveforms to correctly slice the parent waveform for clips
@@ -326,8 +329,15 @@ export const useProjectStore = defineStore('project', () => {
             }
           }
         } else {
-          // v3 per-track Record
-          silenceStore.setPerTrackSilenceRegions(project.silenceRegions);
+          // v3 per-track Record — remap saved trackIds to newly-created trackIds
+          const remapped: Record<string, import('@/shared/types').SilenceRegion[]> = {};
+          for (const [savedId, regions] of Object.entries(project.silenceRegions as Record<string, import('@/shared/types').SilenceRegion[]>)) {
+            const newId = idMap.get(savedId);
+            if (newId) {
+              remapped[newId] = regions;
+            }
+          }
+          silenceStore.setPerTrackSilenceRegions(remapped);
         }
       }
 

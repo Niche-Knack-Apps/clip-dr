@@ -9,6 +9,7 @@ import { useTranscriptionStore } from './transcription';
 import { useUIStore } from './ui';
 import type { Track, TrackClip } from '@/shared/types';
 import { useHistoryStore } from './history';
+import { useSilenceStore } from './silence';
 import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { writeTempFile } from '@/shared/fs-utils';
 import { generateId } from '@/shared/utils';
@@ -570,10 +571,12 @@ export const useClipboardStore = defineStore('clipboard', () => {
         for (const trackId of trackIds) {
           transcriptionStore.adjustForDelete(trackId, inPoint, outPoint);
         }
-        // Adjust timemarks and volume envelope: remove in deleted region (no shift)
+        // Adjust timemarks, volume envelope, and silence: remove in deleted region (no shift)
+        const silenceStore = useSilenceStore();
         for (const trackId of trackIds) {
           tracksStore.adjustTimemarksForDelete(trackId, inPoint, outPoint);
           tracksStore.adjustVolumeEnvelopeForDelete(trackId, inPoint, outPoint);
+          silenceStore.adjustSilenceForDelete(trackId, inPoint, outPoint);
         }
         // Cache small-file clips for Rust playback (EDL clips already have sourceFile)
         const recachePromise = cacheClipsForPlayback();

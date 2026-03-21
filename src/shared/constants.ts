@@ -68,6 +68,8 @@ export const DEFAULT_SETTINGS = {
   trackColorMode: 'auto' as const,
   trackPrimaryColor: '#00d4ff',
   trackCustomColors: [] as string[],
+  // Silence removal crossfade: 10ms linear fade at edit points (industry standard)
+  silenceCrossfadeMs: 10,
 };
 
 export const KEYBOARD_SHORTCUTS = {

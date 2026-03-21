@@ -273,10 +273,14 @@ function handleResizeEnd(newEnd: number) {
   selectionStore.resizeSelectionEnd(newEnd);
 }
 
-// Aggregate silence regions from ALL tracks (each tagged with its trackId for edit ops)
+// Aggregate silence regions from audible tracks (each tagged with its trackId for edit ops).
+// Follows the same mute/solo filtering as timemarks — silence for muted/non-solo'd tracks is hidden.
 const allSilenceRegions = computed(() => {
+  const hasSolo = tracksStore.tracks.some(t => t.solo);
   const result: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsForTrack>[number] }[] = [];
   for (const track of tracksStore.tracks) {
+    if (hasSolo && !track.solo) continue;
+    if (!hasSolo && track.muted) continue;
     for (const region of silenceStore.getRegionsForTrack(track.id)) {
       result.push({ trackId: track.id, region });
     }
@@ -366,9 +370,10 @@ onUnmounted(() => {
         :height="props.height"
       />
 
-      <!-- Silence region overlays (z-10 to stay above waveform but below selection) -->
+      <!-- Silence region overlays (hidden during clip drag/trim, like markers) -->
       <SilenceOverlay
         v-for="{ region } in allSilenceRegions"
+        v-show="!uiStore.isClipDragActive"
         :key="region.id"
         :region="region"
         :container-width="containerWidth"
