@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { TrackTranscription, TranscriptionJob, Word, TranscriptionProgress, SearchResult, ModelInfo, TranscriptionMetadata, TimeMark, TranscriptionMetrics } from '@/shared/types';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
-import { renderTrackToTempWav } from '@/services/track-render';
+import { renderTrackToTempWav, type RenderClipMap } from '@/services/track-render';
 import { useSettingsStore } from './settings';
 import { generateId, binarySearch, isTrackPlayable } from '@/shared/utils';
 import { SEARCH_MIN_WORDS, SEARCH_STOPWORDS } from '@/shared/constants';
@@ -781,9 +781,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       await runTranscriptionFromFile(trackId, audioPath);
     } else {
       // Render arranged track content to temp WAV (handles both buffered and EDL tracks).
-      // The transcript corresponds to the rendered arranged content, not the original source timeline.
-      const tempPath = await renderTrackToTempWav(trackId);
-      await runTranscriptionFromFile(trackId, tempPath);
+      // clipMap maps rendered-WAV positions back to original timeline positions.
+      const { path: tempPath, clipMap } = await renderTrackToTempWav(trackId);
+      await runTranscriptionFromFile(trackId, tempPath, clipMap);
     }
   }
 
@@ -810,7 +810,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     });
   }
 
-  async function runTranscriptionFromFile(trackId: string, audioPath: string): Promise<void> {
+  async function runTranscriptionFromFile(trackId: string, audioPath: string, clipMap?: RenderClipMap[]): Promise<void> {
     if (trackId === tracksStore.selectedTrackId) {
       const engineLabel = settingsStore.settings.transcriptionEngine === 'moonshine' ? 'Moonshine' : 'Whisper';
       progress.value = { stage: 'transcribing', progress: 15, message: `Transcribing with ${engineLabel}...` };
@@ -824,15 +824,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     // CON-H3: discard result if the track was deleted while transcription was running
-    if (!tracksStore.tracks.find(t => t.id === trackId)) {
+    const track = tracksStore.tracks.find(t => t.id === trackId);
+    if (!track) {
       console.warn('[Transcription] Track deleted during transcription, discarding result:', trackId);
       return;
+    }
+
+    // Remap word timestamps from rendered-WAV time to track-relative time.
+    // getAdjustedWords() adds track.trackStart, so we store words as 0-based
+    // relative to the track's content start.
+    let words = result.words.map((w) => ({ ...w, id: w.id || generateId() }));
+    if (clipMap && clipMap.length > 0) {
+      const trackStart = track.trackStart ?? 0;
+      words = remapWordsFromRender(words, clipMap, trackStart);
+      console.log(`[Transcription] Remapped ${words.length} words via clipMap (${clipMap.length} clips)`);
     }
 
     logMapState(`BEFORE set in runTranscriptionFromFile(${trackId.slice(0, 8)})`);
     transcriptions.value.set(trackId, {
       trackId,
-      words: result.words.map((w) => ({ ...w, id: w.id || generateId() })),
+      words,
       fullText: result.text,
       language: result.language,
       processedAt: Date.now(),
@@ -849,6 +860,32 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     await saveTranscription(trackId);
   }
 
+
+  /**
+   * Remap word timestamps from rendered-WAV time to track-relative time.
+   * The rendered WAV may have clips rebased to start at 0 — this maps each word
+   * back to its original timeline position, then subtracts trackStart so that
+   * getAdjustedWords() (which adds trackStart) produces the correct result.
+   */
+  function remapWordsFromRender(words: Word[], clipMap: RenderClipMap[], trackStart: number): Word[] {
+    return words.map(w => {
+      // Find which rendered clip this word falls in
+      for (const cm of clipMap) {
+        if (w.start >= cm.renderStart && w.start < cm.renderEnd) {
+          const offsetInClip = w.start - cm.renderStart;
+          const timelinePos = cm.timelineStart + offsetInClip;
+          const dur = w.end - w.start;
+          return {
+            ...w,
+            start: timelinePos - trackStart,
+            end: timelinePos - trackStart + dur,
+          };
+        }
+      }
+      // Word outside any clip (e.g. in a silence gap) — keep as-is
+      return w;
+    });
+  }
 
   // ─── Export helpers ───
 
