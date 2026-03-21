@@ -12,6 +12,7 @@ import { useSettingsStore } from './settings';
 // Lazy store access (avoid circular dep with project.ts which imports tracks.ts):
 import { useProjectStore } from './project';
 import { useUIStore } from './ui';
+import { useSilenceStore } from './silence';
 import { invoke } from '@tauri-apps/api/core';
 import type { VirtualClipboardSegment } from './clipboard';
 
@@ -1541,10 +1542,12 @@ export const useTracksStore = defineStore('tracks', () => {
       }
     }
 
-    // Step 1b: Adjust timemarks and volume envelope before sliding (uses pre-slide positions for overlap check)
+    // Step 1b: Adjust timemarks, volume envelope, and silence regions before sliding
+    const silenceStore = useSilenceStore();
     for (const t of tracks.value) {
       adjustTimemarksForCut(t.id, inPoint, outPoint);
       adjustVolumeEnvelopeForCut(t.id, inPoint, outPoint);
+      silenceStore.adjustSilenceForCut(t.id, inPoint, outPoint);
     }
 
     // Step 2: Close the gap - shift everything at/after outPoint left by gapDuration

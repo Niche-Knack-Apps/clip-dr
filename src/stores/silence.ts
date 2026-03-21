@@ -624,6 +624,156 @@ export const useSilenceStore = defineStore('silence', () => {
     return (silenceRegions.value.get(trackId)?.length ?? 0) > 0;
   }
 
+  /**
+   * Shift all silence regions for a track by delta seconds.
+   * Used when a clip is dragged to a new position on the same track.
+   */
+  function shiftRegionsForTrack(trackId: string, delta: number): void {
+    const regions = silenceRegions.value.get(trackId);
+    if (!regions || regions.length === 0 || delta === 0) return;
+
+    const shifted = regions
+      .map(r => ({ ...r, start: r.start + delta, end: r.end + delta }))
+      .filter(r => r.end > 0); // drop regions shifted entirely before 0
+    // Clamp start to 0
+    for (const r of shifted) {
+      if (r.start < 0) r.start = 0;
+    }
+
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, shifted);
+    silenceRegions.value = newMap;
+  }
+
+  /**
+   * Adjust silence regions for a ripple delete (cut + close gap).
+   * Mirrors adjustTimemarksForCut in tracks.ts:
+   * - Remove regions fully inside [cutStart, cutEnd)
+   * - Truncate partially overlapping regions
+   * - Shift regions after cutEnd left by (cutEnd - cutStart)
+   */
+  function adjustSilenceForCut(trackId: string, cutStart: number, cutEnd: number): void {
+    const regions = silenceRegions.value.get(trackId);
+    if (!regions || regions.length === 0) return;
+
+    const gap = cutEnd - cutStart;
+    const adjusted: SilenceRegion[] = [];
+
+    for (const r of regions) {
+      if (r.start >= cutStart && r.end <= cutEnd) {
+        // Fully inside cut — remove
+        continue;
+      } else if (r.start < cutStart && r.end > cutEnd) {
+        // Spans the cut — shrink by gap
+        adjusted.push({ ...r, end: r.end - gap });
+      } else if (r.start < cutEnd && r.end > cutEnd) {
+        // Overlaps cut end — truncate start, shift left
+        adjusted.push({ ...r, start: cutStart, end: r.end - gap });
+      } else if (r.start < cutStart && r.end > cutStart) {
+        // Overlaps cut start — truncate end
+        adjusted.push({ ...r, end: cutStart });
+      } else if (r.start >= cutEnd) {
+        // After cut — shift left
+        adjusted.push({ ...r, start: r.start - gap, end: r.end - gap });
+      } else {
+        // Before cut — unchanged
+        adjusted.push({ ...r });
+      }
+    }
+
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, adjusted.filter(r => r.end - r.start > 0.001));
+    silenceRegions.value = newMap;
+  }
+
+  /**
+   * Adjust silence regions for a non-ripple delete (remove content, no gap close).
+   * - Remove regions fully inside [deleteStart, deleteEnd)
+   * - Truncate partially overlapping regions
+   */
+  function adjustSilenceForDelete(trackId: string, deleteStart: number, deleteEnd: number): void {
+    const regions = silenceRegions.value.get(trackId);
+    if (!regions || regions.length === 0) return;
+
+    const adjusted: SilenceRegion[] = [];
+
+    for (const r of regions) {
+      if (r.start >= deleteStart && r.end <= deleteEnd) {
+        // Fully inside — remove
+        continue;
+      } else if (r.start < deleteStart && r.end > deleteEnd) {
+        // Spans delete — split into two
+        adjusted.push({ ...r, end: deleteStart });
+        adjusted.push({ ...r, id: r.id + '_post', start: deleteEnd });
+      } else if (r.start < deleteEnd && r.end > deleteEnd) {
+        // Overlaps delete end — truncate start
+        adjusted.push({ ...r, start: deleteEnd });
+      } else if (r.start < deleteStart && r.end > deleteStart) {
+        // Overlaps delete start — truncate end
+        adjusted.push({ ...r, end: deleteStart });
+      } else {
+        // No overlap — unchanged
+        adjusted.push({ ...r });
+      }
+    }
+
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(trackId, adjusted.filter(r => r.end - r.start > 0.001));
+    silenceRegions.value = newMap;
+  }
+
+  /**
+   * Transfer silence regions that overlap a clip range from source to target track.
+   * Used for cross-track clip drag. Applies delta offset to transferred regions.
+   */
+  function transferRegionsToTrack(
+    sourceTrackId: string,
+    targetTrackId: string,
+    clipStart: number,
+    clipEnd: number,
+    delta: number,
+  ): void {
+    const sourceRegions = silenceRegions.value.get(sourceTrackId);
+    if (!sourceRegions || sourceRegions.length === 0) return;
+
+    const staying: SilenceRegion[] = [];
+    const moving: SilenceRegion[] = [];
+
+    for (const r of sourceRegions) {
+      if (r.start >= clipStart && r.end <= clipEnd) {
+        // Fully inside clip range — transfer
+        moving.push({ ...r, start: r.start + delta, end: r.end + delta });
+      } else if (r.start < clipStart && r.end > clipEnd) {
+        // Spans clip — split: keep portions outside, transfer inside
+        staying.push({ ...r, end: clipStart });
+        staying.push({ ...r, id: r.id + '_post', start: clipEnd });
+        moving.push({ ...r, start: clipStart + delta, end: clipEnd + delta });
+      } else if (r.start < clipEnd && r.end > clipStart) {
+        // Partial overlap — keep the outside portion, transfer the inside
+        if (r.start < clipStart) {
+          staying.push({ ...r, end: clipStart });
+          moving.push({ ...r, start: clipStart + delta, end: r.end + delta });
+        } else {
+          staying.push({ ...r, start: clipEnd });
+          moving.push({ ...r, start: r.start + delta, end: Math.min(r.end, clipEnd) + delta });
+        }
+      } else {
+        // No overlap — stays
+        staying.push({ ...r });
+      }
+    }
+
+    const newMap = new Map(silenceRegions.value);
+    newMap.set(sourceTrackId, staying.filter(r => r.end - r.start > 0.001));
+
+    // Merge transferred regions into target
+    const targetRegions = [...(newMap.get(targetTrackId) || []), ...moving.filter(r => r.end - r.start > 0.001)];
+    targetRegions.sort((a, b) => a.start - b.start);
+    newMap.set(targetTrackId, targetRegions);
+
+    silenceRegions.value = newMap;
+  }
+
   return {
     silenceRegions,
     compressionEnabled,
@@ -663,5 +813,10 @@ export const useSilenceStore = defineStore('silence', () => {
     setSilenceRegions,
     setPerTrackSilenceRegions,
     clearCutAudio,
+    // Clip movement adjustments
+    shiftRegionsForTrack,
+    adjustSilenceForCut,
+    adjustSilenceForDelete,
+    transferRegionsToTrack,
   };
 });

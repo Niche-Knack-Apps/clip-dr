@@ -12,6 +12,7 @@ import InfiniteKnob from '@/components/ui/InfiniteKnob.vue';
 import TimeRuler from './TimeRuler.vue';
 import { TRACK_PANEL_MIN_WIDTH, TRACK_PANEL_MAX_WIDTH, MIN_SELECTION_DURATION, TRACK_HEIGHT } from '@/shared/constants';
 import { useHistoryStore } from '@/stores/history';
+import { useSilenceStore } from '@/stores/silence';
 import type { ExportProfile } from '@/shared/types';
 
 
@@ -441,8 +442,20 @@ function handleDrop(event: DragEvent, targetTrackId: string) {
   dragOverTrackId.value = null;
 }
 
+// Silence store for moving silence regions with clips
+const silenceStore = useSilenceStore();
+
+// Track original clip position at drag start (for computing silence shift delta)
+let clipDragOriginalStart: number | null = null;
+let clipDragOriginalDuration: number | null = null;
+
 // Clip drag handlers (for moving clips on timeline)
 function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number, event?: MouseEvent) {
+  // Capture original clip position before drag modifies it
+  const clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
+  clipDragOriginalStart = clip?.clipStart ?? null;
+  clipDragOriginalDuration = clip?.duration ?? null;
+
   useHistoryStore().pushState('Move clip');
   clipDraggingTrackId.value = trackId;
   clipDraggingClipId.value = clipId;
@@ -492,10 +505,25 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
     // on source — those would commit the clip at the new position on the source track,
     // then moveClipToTrack would duplicate it onto the target)
     tracksStore.moveClipToTrack(trackId, clipId, clipDragTargetTrackId.value!, newClipStart);
+
+    // Transfer silence regions that overlap the clip's original range to the target track
+    if (clipDragOriginalStart !== null && clipDragOriginalDuration !== null) {
+      const origEnd = clipDragOriginalStart + clipDragOriginalDuration;
+      const delta = newClipStart - clipDragOriginalStart;
+      silenceStore.transferRegionsToTrack(trackId, clipDragTargetTrackId.value!, clipDragOriginalStart, origEnd, delta);
+    }
   } else {
     // Same-track drag: update position and finalize bounds
     tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
     tracksStore.finalizeClipPositions(trackId);
+
+    // Shift silence regions by the same delta as the clip moved
+    if (clipDragOriginalStart !== null) {
+      const delta = newClipStart - clipDragOriginalStart;
+      if (delta !== 0) {
+        silenceStore.shiftRegionsForTrack(trackId, delta);
+      }
+    }
   }
 
   // Stop floating ghost tracking and auto-scroll
@@ -509,6 +537,8 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
   }
 
   // Reset state
+  clipDragOriginalStart = null;
+  clipDragOriginalDuration = null;
   clipDraggingTrackId.value = null;
   clipDraggingClipId.value = null;
   clipDragTargetTrackId.value = null;
