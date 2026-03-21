@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
+use tauri::Manager;
 use super::transcribe::{TranscriptionMetrics, TranscriptionResult, Word};
 
 // ── Constants ──
@@ -225,6 +226,7 @@ fn get_models_dir() -> Result<std::path::PathBuf, String> {
 fn find_moonshine_model(
     variant: &str,
     custom_path: Option<&str>,
+    resource_dir: Option<&std::path::Path>,
 ) -> Result<std::path::PathBuf, String> {
     let subdir = format!("moonshine/{}", variant);
 
@@ -238,6 +240,27 @@ fn find_moonshine_model(
         }
     }
 
+    // Check bundled resources (Tauri resource_dir — set in release builds)
+    if let Some(res_dir) = resource_dir {
+        let dir = res_dir.join("models").join(&subdir);
+        if is_valid_moonshine_dir(&dir) {
+            log::info!("Found moonshine {} at bundled resources: {:?}", variant, dir);
+            return Ok(dir);
+        }
+    }
+
+    // Check adjacent to executable (Flatpak, portable installs)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let dir = exe_dir.join("models").join(&subdir);
+            if is_valid_moonshine_dir(&dir) {
+                log::info!("Found moonshine {} next to executable: {:?}", variant, dir);
+                return Ok(dir);
+            }
+        }
+    }
+
+    // Dev mode: check src-tauri/resources/models via CARGO_MANIFEST_DIR
     let dev_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("resources")
         .join("models")
@@ -247,6 +270,7 @@ fn find_moonshine_model(
         return Ok(dev_dir);
     }
 
+    // App data directory (user-installed models)
     if let Ok(models_dir) = get_models_dir() {
         let dir = models_dir.join(&subdir);
         if is_valid_moonshine_dir(&dir) {
@@ -267,9 +291,9 @@ fn is_valid_moonshine_dir(dir: &Path) -> bool {
         && dir.join("tokenizer.json").exists()
 }
 
-fn find_any_moonshine_model(custom_path: Option<&str>) -> Result<(String, std::path::PathBuf), String> {
+fn find_any_moonshine_model(custom_path: Option<&str>, resource_dir: Option<&std::path::Path>) -> Result<(String, std::path::PathBuf), String> {
     for (name, _, _, _) in MOONSHINE_MODELS {
-        if let Ok(path) = find_moonshine_model(name, custom_path) {
+        if let Ok(path) = find_moonshine_model(name, custom_path, resource_dir) {
             return Ok((name.to_string(), path));
         }
     }
@@ -559,14 +583,16 @@ fn estimate_word_timestamps(text: &str, start_time: f64, duration: f64) -> Vec<W
 pub async fn transcribe_moonshine(
     path: String,
     models_path: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<TranscriptionResult, String> {
     let total_start = Instant::now();
     let audio_path = Path::new(&path);
     let custom_path = models_path.as_deref();
+    let resource_dir = app.path().resource_dir().ok();
 
     log::info!("Moonshine transcribing: {}", path);
 
-    let (variant_name, model_dir) = find_any_moonshine_model(custom_path)?;
+    let (variant_name, model_dir) = find_any_moonshine_model(custom_path, resource_dir.as_deref())?;
     log::info!("Using moonshine model: {} at {:?}", variant_name, model_dir);
 
     let load_start = Instant::now();
@@ -610,21 +636,25 @@ pub async fn transcribe_moonshine(
 #[tauri::command]
 pub async fn check_moonshine_model(
     custom_path: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<String, String> {
     let path_ref = custom_path.as_deref();
-    let (_name, dir) = find_any_moonshine_model(path_ref)?;
+    let resource_dir = app.path().resource_dir().ok();
+    let (_name, dir) = find_any_moonshine_model(path_ref, resource_dir.as_deref())?;
     Ok(dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn list_moonshine_models(
     custom_path: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<MoonshineModelInfo>, String> {
     let path_ref = custom_path.as_deref();
+    let resource_dir = app.path().resource_dir().ok();
     let mut models = Vec::new();
 
     for (name, _subdir, enc_mb, dec_mb) in MOONSHINE_MODELS {
-        let found = find_moonshine_model(name, path_ref).ok();
+        let found = find_moonshine_model(name, path_ref, resource_dir.as_deref()).ok();
         models.push(MoonshineModelInfo {
             name: name.to_string(),
             available: found.is_some(),

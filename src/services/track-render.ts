@@ -14,7 +14,14 @@ import { encodeWavFloat32InWorker } from '@/workers/audio-processing-api';
 import { writeTempFile } from '@/shared/fs-utils';
 import type { ExportEDL, ExportEDLTrack } from '@/shared/types';
 
-export async function renderTrackToTempWav(trackId: string): Promise<string> {
+/** Maps rendered-WAV time → original timeline time for each clip */
+export interface RenderClipMap {
+  renderStart: number;  // position in rendered WAV (seconds)
+  renderEnd: number;
+  timelineStart: number; // original absolute timeline position
+}
+
+export async function renderTrackToTempWav(trackId: string): Promise<{ path: string; clipMap: RenderClipMap[] }> {
   const tracksStore = useTracksStore();
   const audioStore = useAudioStore();
 
@@ -24,17 +31,24 @@ export async function renderTrackToTempWav(trackId: string): Promise<string> {
   console.log(`[TrackRender] Rendering track ${trackId}, name="${track.name}", duration=${track.duration?.toFixed(2)}s, clips: ${tracksStore.getTrackClips(trackId).length}`);
 
   // Fast path: try in-memory buffer mix
+  const clips = tracksStore.getTrackClips(trackId);
   const mixedBuffer = tracksStore.mixClipsForTrack(trackId, audioStore.getAudioContext());
   if (mixedBuffer) {
+    // mixTrackClipsToBuffer preserves gaps — positions are relative to min(clipStart)
+    const timelineStart = clips.length > 0 ? Math.min(...clips.map(c => c.clipStart)) : 0;
+    const clipMap: RenderClipMap[] = clips.map(c => ({
+      renderStart: c.clipStart - timelineStart,
+      renderEnd: c.clipStart - timelineStart + c.duration,
+      timelineStart: c.clipStart,
+    }));
     console.log(`[TrackRender] Fast path: in-memory mix, buffer length=${mixedBuffer.length}, sampleRate=${mixedBuffer.sampleRate}`);
     const wavData = await encodeWavFloat32InWorker(mixedBuffer);
     const path = await writeTempFile(`render_${trackId}_${Date.now()}.wav`, wavData);
     console.log(`[TrackRender] Written temp WAV: ${path}`);
-    return path;
+    return { path, clipMap };
   }
 
   // Fallback: EDL export via Rust (handles EDL/large-file tracks)
-  const clips = tracksStore.getTrackClips(trackId);
   if (clips.length === 0) throw new Error(`Track ${trackId} has no clips to render`);
 
   const sampleRate = track.audioData.sampleRate || 44100;
@@ -62,8 +76,15 @@ export async function renderTrackToTempWav(trackId: string): Promise<string> {
 
   edlTracks.sort((a, b) => a.track_start - b.track_start);
 
-  // Rebase to zero (trim leading silence for single-track render)
+  // Build clipMap before rebasing (maps rendered position → original timeline position)
   const minStart = Math.min(...edlTracks.map(t => t.track_start));
+  const clipMap: RenderClipMap[] = edlTracks.map(t => ({
+    renderStart: t.track_start - minStart,
+    renderEnd: t.track_start - minStart + t.duration,
+    timelineStart: t.track_start,
+  }));
+
+  // Rebase to zero (trim leading silence for single-track render)
   if (minStart > 0) {
     for (const t of edlTracks) {
       t.track_start -= minStart;
@@ -86,5 +107,5 @@ export async function renderTrackToTempWav(trackId: string): Promise<string> {
   };
 
   await invoke('export_edl', { edl });
-  return outputPath;
+  return { path: outputPath, clipMap };
 }
