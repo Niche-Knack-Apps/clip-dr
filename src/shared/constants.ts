@@ -82,8 +82,11 @@ export const KEYBOARD_SHORTCUTS = {
   DELETE_TRACK: 'Delete',
   FOCUS_SEARCH: 'f',
   // New navigation shortcuts
-  JUMP_LAYER_START: 's',
   JUMP_LAYER_END: 'd',
+  // Split & trim shortcuts
+  SPLIT: 's',
+  TRIM_START: 'y',
+  TRIM_END: 'u',
   SPEED_UP: 'ArrowUp',
   SPEED_DOWN: 'ArrowDown',
   NEXT_MARKER: '>',      // Shift+.
@@ -113,6 +116,9 @@ export const ALL_SHORTCUT_HINTS = [
   { id: 'tab', keys: 'Tab', label: 'Next Track' },
   { id: 'zoom', keys: '+/-', label: 'Zoom' },
   { id: 'undo', keys: 'Ctrl+Z', label: 'Undo' },
+  { id: 'split', keys: 'S', label: 'Split' },
+  { id: 'trimStart', keys: 'Y', label: 'Trim Start' },
+  { id: 'trimEnd', keys: 'U', label: 'Trim End' },
 ] as const;
 
 export const SUPPORTED_FORMATS = [

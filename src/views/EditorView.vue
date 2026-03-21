@@ -15,6 +15,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import { useHistoryStore } from '@/stores/history';
 import { useRecordingStore } from '@/stores/recording';
 import { useExportStore } from '@/stores/export';
+import { useAudioStore } from '@/stores/audio';
 import { useProjectStore } from '@/stores/project';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useClipping } from '@/composables/useClipping';
@@ -35,6 +36,7 @@ const transcriptionStore = useTranscriptionStore();
 const historyStore = useHistoryStore();
 const recordingStore = useRecordingStore();
 const exportStore = useExportStore();
+const audioStore = useAudioStore();
 const projectStore = useProjectStore();
 const uiStore = useUIStore();
 
@@ -274,8 +276,26 @@ useKeyboardShortcuts({
   onDeleteTrack: () => clipboardStore.deleteSelected(),
   onFocusSearch: () => focusSearch?.(),
   // New shortcuts
-  onJumpLayerStart: () => playbackStore.jumpToLayerStart(),
   onJumpLayerEnd: () => playbackStore.jumpToLayerEnd(),
+  // Split & trim
+  onSplit: async () => {
+    const trackId = tracksStore.selectedTrackId;
+    if (!trackId || trackId === 'ALL') return;
+    const ctx = audioStore.getAudioContext();
+    await tracksStore.splitAtPlayhead(trackId, playbackStore.currentTime, ctx);
+  },
+  onTrimStart: async () => {
+    const trackId = tracksStore.selectedTrackId;
+    if (!trackId || trackId === 'ALL') return;
+    const ctx = audioStore.getAudioContext();
+    await tracksStore.trimStartToPlayhead(trackId, playbackStore.currentTime, ctx);
+  },
+  onTrimEnd: async () => {
+    const trackId = tracksStore.selectedTrackId;
+    if (!trackId || trackId === 'ALL') return;
+    const ctx = audioStore.getAudioContext();
+    await tracksStore.trimEndToPlayhead(trackId, playbackStore.currentTime, ctx);
+  },
   onSpeedUp: () => playbackStore.speedUp(),
   onSpeedDown: () => playbackStore.speedDown(),
   onNudge: (ms) => playbackStore.nudge(ms),
@@ -529,7 +549,7 @@ useKeyboardShortcuts({
               <div class="space-y-1">
                 <div class="flex justify-between"><span class="text-gray-400">Jump to start / end</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Home</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">End</kbd></span></div>
                 <div class="flex justify-between"><span class="text-gray-400">Jump to In / Out point</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">[</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">]</kbd></span></div>
-                <div class="flex justify-between"><span class="text-gray-400">Jump to track start / end</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">S</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">D</kbd></span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Jump to track end</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">D</kbd></div>
                 <div class="flex justify-between"><span class="text-gray-400">Previous / next marker</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&lt;</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">&gt;</kbd></span></div>
                 <div class="flex justify-between"><span class="text-gray-400">Next / previous track</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Tab</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Shift+Tab</kbd></span></div>
                 <div class="flex justify-between"><span class="text-gray-400">Nudge (10ms per digit)</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">1</kbd>&ndash;<kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">9</kbd></span></div>
@@ -554,6 +574,9 @@ useKeyboardShortcuts({
               <div class="space-y-1">
                 <div class="flex justify-between"><span class="text-gray-400">Set In / Out point</span><span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">I</kbd> / <kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">O</kbd></span></div>
                 <div class="flex justify-between"><span class="text-gray-400">Create clip</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">C</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Split at playhead</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">S</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Trim start to playhead</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Y</kbd></div>
+                <div class="flex justify-between"><span class="text-gray-400">Trim end to playhead</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">U</kbd></div>
                 <div class="flex justify-between"><span class="text-gray-400">Cut</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">X</kbd></div>
                 <div class="flex justify-between"><span class="text-gray-400">Paste</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">V</kbd></div>
                 <div class="flex justify-between"><span class="text-gray-400">Delete</span><kbd class="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded text-xs">Del</kbd></div>
