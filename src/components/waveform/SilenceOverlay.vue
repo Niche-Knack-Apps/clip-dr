@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import type { SilenceRegion } from '@/shared/types';
+import { useHistoryStore } from '@/stores/history';
 
 interface Props {
   region: SilenceRegion;
@@ -67,6 +68,7 @@ function handleMouseDown(event: MouseEvent) {
   if (!props.region.enabled) return;
   event.stopPropagation();
 
+  useHistoryStore().pushState('Move silence region');
   isDragging.value = true;
   lastX.value = event.clientX;
 
@@ -79,6 +81,7 @@ function handleResizeStartMouseDown(event: MouseEvent) {
   if (!props.region.enabled) return;
   event.stopPropagation();
 
+  useHistoryStore().pushState('Resize silence region');
   isResizingStart.value = true;
 
   document.addEventListener('mousemove', handleMouseMove);
@@ -90,6 +93,7 @@ function handleResizeEndMouseDown(event: MouseEvent) {
   if (!props.region.enabled) return;
   event.stopPropagation();
 
+  useHistoryStore().pushState('Resize silence region');
   isResizingEnd.value = true;
 
   document.addEventListener('mousemove', handleMouseMove);

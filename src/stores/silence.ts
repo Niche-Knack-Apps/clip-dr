@@ -165,7 +165,7 @@ export const useSilenceStore = defineStore('silence', () => {
     const regions = getRegionsForTrack(trackId);
     const region = regions.find(r => r.id === id);
     if (!region) return;
-    useHistoryStore().pushState('Update silence region');
+    // History captured at drag start in SilenceOverlay — not per-frame
 
     const track = tracksStore.getTrackById(trackId);
     const duration = track ? track.trackStart + track.duration : tracksStore.timelineDuration;
@@ -200,7 +200,7 @@ export const useSilenceStore = defineStore('silence', () => {
     const regions = getRegionsForTrack(trackId);
     const region = regions.find(r => r.id === id);
     if (!region) return;
-    useHistoryStore().pushState('Move silence region');
+    // History captured at drag start in SilenceOverlay — not per-frame
 
     const track = tracksStore.getTrackById(trackId);
     const duration = track ? track.trackStart + track.duration : tracksStore.timelineDuration;
