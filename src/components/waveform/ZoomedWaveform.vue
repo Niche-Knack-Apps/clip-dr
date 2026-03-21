@@ -476,9 +476,10 @@ onUnmounted(() => {
         :height="props.height"
       />
 
-      <!-- Silence region overlays (z-index below markers) -->
+      <!-- Silence region overlays (hidden during clip drag/trim, like markers) -->
       <SilenceOverlay
         v-for="{ region } in visibleSilenceRegions"
+        v-show="!uiStore.isClipDragActive"
         :key="region.id"
         :region="region"
         :container-width="containerWidth"

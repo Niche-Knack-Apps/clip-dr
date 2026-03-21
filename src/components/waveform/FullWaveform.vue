@@ -370,9 +370,10 @@ onUnmounted(() => {
         :height="props.height"
       />
 
-      <!-- Silence region overlays (z-10 to stay above waveform but below selection) -->
+      <!-- Silence region overlays (hidden during clip drag/trim, like markers) -->
       <SilenceOverlay
         v-for="{ region } in allSilenceRegions"
+        v-show="!uiStore.isClipDragActive"
         :key="region.id"
         :region="region"
         :container-width="containerWidth"
