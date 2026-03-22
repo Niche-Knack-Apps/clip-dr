@@ -12,7 +12,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile } from '@/shared/types';
 import { ALL_SHORTCUT_HINTS, DEFAULT_SETTINGS } from '@/shared/constants';
 
-const APP_VERSION = '0.27.36';
+const APP_VERSION = '0.27.37';
 
 const emit = defineEmits<{
   close: [];
@@ -337,7 +337,7 @@ onMounted(async () => {
                 title="Set as Quick Re-Export default"
                 @click="settingsStore.setFavoriteProfile(profile.id)"
               >
-                {{ profile.isFavorite ? '\u2605' : '\u2606' }}
+                {{ profile.isFavorite ? '★' : '☆' }}
               </button>
               <!-- Profile info -->
               <span class="text-gray-200 flex-1">
@@ -425,7 +425,7 @@ onMounted(async () => {
             </Button>
 
             <p class="text-[10px] text-gray-500">
-              <span class="text-yellow-400/70">\u2605</span> = default for Quick Re-Export (Ctrl+Shift+E).
+              <span class="text-yellow-400/70">★</span> = default for Quick Re-Export (Ctrl+Shift+E).
               Built-in profiles can't be deleted.
             </p>
           </div>
