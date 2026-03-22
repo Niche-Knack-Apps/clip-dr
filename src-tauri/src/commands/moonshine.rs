@@ -252,12 +252,13 @@ fn variant_config(name: &str) -> VariantConfig {
         "base" => VariantConfig {
             num_layers: 8,
             num_heads: 8,
-            head_dim: 64,
+            head_dim: 52,
         },
         _ => VariantConfig {
+            // tiny: 6 layers, 8 heads, head_dim=36 (past_element_count=288)
             num_layers: 6,
             num_heads: 8,
-            head_dim: 64,
+            head_dim: 36,
         },
     }
 }
