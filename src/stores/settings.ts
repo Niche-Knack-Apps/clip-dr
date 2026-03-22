@@ -157,6 +157,13 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings();
   }
 
+  function setLastProjectFolder(path: string): void {
+    const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    const folder = lastSlash > 0 ? path.substring(0, lastSlash) : path;
+    settings.value.lastProjectFolder = folder;
+    saveSettings();
+  }
+
   function setLastExportFolder(path: string): void {
     const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
     const folder = lastSlash > 0 ? path.substring(0, lastSlash) : path;
@@ -389,6 +396,7 @@ export const useSettingsStore = defineStore('settings', () => {
     browseModelsPath,
     resetModelsPath,
     setLastImportFolder,
+    setLastProjectFolder,
     setLastExportFolder,
     setLastExportFormat,
     resetSettings,

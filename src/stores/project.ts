@@ -3,6 +3,7 @@ import { ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save, ask } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { homeDir } from '@tauri-apps/api/path';
 import type { ProjectFile, ProjectTrack, ProjectTrackClip, Track, TrackClip } from '@/shared/types';
 import { useTracksStore } from './tracks';
 import { useSelectionStore } from './selection';
@@ -11,6 +12,7 @@ import { useHistoryStore } from './history';
 import { usePlaybackStore } from './playback';
 import { useAudioStore } from './audio';
 import { useTranscriptionStore } from './transcription';
+import { useSettingsStore } from './settings';
 
 const APP_TITLE = 'Clip Dr.';
 
@@ -170,14 +172,16 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   async function saveProjectAs(): Promise<void> {
-    const defaultDir = projectPath.value ? getDirectory(projectPath.value) : undefined;
+    const settingsStore = useSettingsStore();
+    const lastFolder = settingsStore.settings.lastProjectFolder || await homeDir();
     const defaultName = `${projectName.value}.clipdr`;
     const result = await save({
-      defaultPath: defaultDir ? `${defaultDir}/${defaultName}` : defaultName,
+      defaultPath: `${lastFolder}/${defaultName}`,
       filters: [{ name: 'Clip Dr. Project', extensions: ['clipdr'] }],
     });
     if (!result) return;
 
+    settingsStore.setLastProjectFolder(result);
     projectPath.value = result;
     projectName.value = getBaseName(result);
     await saveProject();
@@ -186,13 +190,15 @@ export const useProjectStore = defineStore('project', () => {
   // ── Open / Load ─────────────────────────────────────────────────────
 
   async function openProject(): Promise<void> {
-    const defaultDir = projectPath.value ? getDirectory(projectPath.value) : undefined;
+    const settingsStore = useSettingsStore();
+    const lastFolder = settingsStore.settings.lastProjectFolder || await homeDir();
     const result = await open({
       multiple: false,
-      defaultPath: defaultDir,
+      defaultPath: lastFolder,
       filters: [{ name: 'Clip Dr. Project', extensions: ['clipdr'] }],
     });
     if (!result || typeof result !== 'string') return;
+    settingsStore.setLastProjectFolder(result);
     await loadProject(result);
   }
 

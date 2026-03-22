@@ -217,6 +217,8 @@ export interface Settings {
   lastImportFolder: string;
   lastExportFolder: string;
   lastExportFormat: ExportFormat;
+  // Last folder used in project open/save dialogs
+  lastProjectFolder: string;
   // Project folder (recordings, exports, etc.) - empty = use app data dir
   projectFolder: string;
   // Playback controls

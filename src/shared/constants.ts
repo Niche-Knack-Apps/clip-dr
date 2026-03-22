@@ -37,6 +37,7 @@ export const DEFAULT_SETTINGS = {
   lastImportFolder: '',
   lastExportFolder: '',
   lastExportFormat: 'mp3' as const,
+  lastProjectFolder: '',
   projectFolder: '',
   // Playback controls
   holdToPlay: false,          // true = hold Space to play, false = toggle (JKL mode)

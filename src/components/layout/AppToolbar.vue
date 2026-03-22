@@ -2,6 +2,7 @@
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
+import { homeDir } from '@tauri-apps/api/path';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Slider from '@/components/ui/Slider.vue';
@@ -265,7 +266,7 @@ async function handleCutSilence() {
 
 async function handleImport() {
   try {
-    const lastFolder = settingsStore.settings.lastImportFolder || undefined;
+    const lastFolder = settingsStore.settings.lastImportFolder || await homeDir();
 
     const selected = await open({
       multiple: false,
@@ -299,10 +300,10 @@ async function handleDownloadTranscriptJSON() {
   if (!trackId || trackId === 'ALL') return;
   const json = transcriptionStore.exportAsJSON(trackId);
   if (!json) return;
-  const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+  const lastFolder = settingsStore.settings.lastExportFolder || await homeDir();
   const defaultName = `transcription_${tracksStore.selectedTrack?.name || 'track'}.json`;
   const path = await save({
-    defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+    defaultPath: `${lastFolder}/${defaultName}`,
     filters: [{ name: 'JSON', extensions: ['json'] }],
   });
   if (path) {
@@ -316,10 +317,10 @@ async function handleDownloadTranscriptTXT() {
   if (!trackId || trackId === 'ALL') return;
   const txt = transcriptionStore.exportAsText(trackId);
   if (!txt) return;
-  const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+  const lastFolder = settingsStore.settings.lastExportFolder || await homeDir();
   const defaultName = `transcription_${tracksStore.selectedTrack?.name || 'track'}.txt`;
   const path = await save({
-    defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+    defaultPath: `${lastFolder}/${defaultName}`,
     filters: [{ name: 'Text', extensions: ['txt'] }],
   });
   if (path) {
