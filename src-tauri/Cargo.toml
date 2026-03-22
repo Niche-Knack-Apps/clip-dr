@@ -1,6 +1,6 @@
 [package]
 name = "clip-dr"
-version = "0.27.27"
+version = "0.27.28"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
@@ -57,6 +57,14 @@ wasapi = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Optimize ONNX Runtime and numerics even in debug builds — unoptimized
+# ort/ndarray makes moonshine transcription 10-100x slower in dev mode
+[profile.dev.package.ort]
+opt-level = 3
+
+[profile.dev.package.ndarray]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

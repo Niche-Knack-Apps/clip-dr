@@ -35,10 +35,18 @@ fn get_or_load_sessions(model_dir: &Path) -> Result<(Session, Session), String> 
 
     let encoder_path = model_dir.join("encoder_model.onnx");
     let decoder_path = model_dir.join("decoder_model_merged.onnx");
+
+    let t0 = Instant::now();
     log::info!("Loading moonshine encoder: {:?}", encoder_path);
     let enc = init_session(&encoder_path)?;
+    log::info!("Encoder loaded in {}ms", t0.elapsed().as_millis());
+
+    let t1 = Instant::now();
     log::info!("Loading moonshine decoder: {:?}", decoder_path);
     let dec = init_session(&decoder_path)?;
+    log::info!("Decoder loaded in {}ms", t1.elapsed().as_millis());
+
+    log::info!("Total moonshine session load: {}ms", t0.elapsed().as_millis());
     Ok((enc, dec))
 }
 
