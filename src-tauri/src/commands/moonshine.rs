@@ -506,21 +506,28 @@ fn run_moonshine_inference(
 fn init_session(path: &Path) -> Result<Session, String> {
     let providers = vec![CPUExecutionProvider::default().build()];
 
-    // Disable graph optimization (models are pre-optimized) and parallel execution
-    // (ORT's thread pool deadlocks with Tokio's spawn_blocking pool).
-    // Limit intra-op threads to 4 to avoid CPU contention.
-    Session::builder()
-        .map_err(|e| format!("Session builder error: {}", e))?
-        .with_optimization_level(GraphOptimizationLevel::Disable)
+    log::info!("[ORT] Creating session builder...");
+    let t0 = Instant::now();
+    let builder = Session::builder()
+        .map_err(|e| format!("Session builder error: {}", e))?;
+    log::info!("[ORT] Builder created in {}ms", t0.elapsed().as_millis());
+
+    let mut builder = builder.with_optimization_level(GraphOptimizationLevel::Disable)
         .map_err(|e| format!("Optimization level error: {}", e))?
         .with_execution_providers(providers)
         .map_err(|e| format!("Execution provider error: {}", e))?
         .with_intra_threads(4)
         .map_err(|e| format!("Intra threads error: {}", e))?
         .with_parallel_execution(false)
-        .map_err(|e| format!("Parallel execution error: {}", e))?
-        .commit_from_file(path)
-        .map_err(|e| format!("Failed to load ONNX model {:?}: {}", path, e))
+        .map_err(|e| format!("Parallel execution error: {}", e))?;
+    log::info!("[ORT] Session options configured, committing model {:?}...", path.file_name().unwrap_or_default());
+
+    let t1 = Instant::now();
+    let session = builder.commit_from_file(path)
+        .map_err(|e| format!("Failed to load ONNX model {:?}: {}", path, e))?;
+    log::info!("[ORT] Model loaded in {}ms", t1.elapsed().as_millis());
+
+    Ok(session)
 }
 
 // ── Chunked transcription for long files ──
@@ -537,9 +544,14 @@ fn transcribe_chunked(
 
     let result = (|| -> Result<(String, Vec<Word>), String> {
         if total_duration <= 60.0 {
+            let t_inf = Instant::now();
             let tokens = run_moonshine_inference(&mut encoder, &mut decoder, variant_name, samples)?;
+            log::info!("Moonshine inference: {} tokens in {}ms", tokens.len(), t_inf.elapsed().as_millis());
+            log::info!("Moonshine tokens (first 20): {:?}", &tokens[..tokens.len().min(20)]);
             let text = tokenizer.decode(&tokens)?;
+            log::info!("Moonshine decoded text ({} chars): {:?}", text.len(), &text[..text.len().min(200)]);
             let words = estimate_word_timestamps(&text, 0.0, total_duration);
+            log::info!("Moonshine estimated {} words", words.len());
             return Ok((text, words));
         }
 
