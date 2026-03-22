@@ -170,8 +170,10 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   async function saveProjectAs(): Promise<void> {
+    const defaultDir = projectPath.value ? getDirectory(projectPath.value) : undefined;
+    const defaultName = `${projectName.value}.clipdr`;
     const result = await save({
-      defaultPath: `${projectName.value}.clipdr`,
+      defaultPath: defaultDir ? `${defaultDir}/${defaultName}` : defaultName,
       filters: [{ name: 'Clip Dr. Project', extensions: ['clipdr'] }],
     });
     if (!result) return;
@@ -184,8 +186,10 @@ export const useProjectStore = defineStore('project', () => {
   // ── Open / Load ─────────────────────────────────────────────────────
 
   async function openProject(): Promise<void> {
+    const defaultDir = projectPath.value ? getDirectory(projectPath.value) : undefined;
     const result = await open({
       multiple: false,
+      defaultPath: defaultDir,
       filters: [{ name: 'Clip Dr. Project', extensions: ['clipdr'] }],
     });
     if (!result || typeof result !== 'string') return;
