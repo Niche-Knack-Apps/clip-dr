@@ -91,7 +91,7 @@ describe('Silence Cut → EDL Track (v0.27.35 regression)', () => {
 
     const original = await tracksStore.createTrackFromBuffer(mkBuf(10), null, 'Original', 0);
     original.timemarks = [{ id: 'tm1', time: 3, label: 'Mark 1', color: '#fff', source: 'manual' as const }];
-    original.volumeEnvelope = [{ time: 2, value: 0.5 }];
+    original.volumeEnvelope = [{ id: 'vp1', time: 2, value: 0.5 }];
 
     const clone = tracksStore.cloneTrack(original.id, 'Clone');
     expect(clone).not.toBeNull();

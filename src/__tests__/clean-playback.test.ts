@@ -377,11 +377,10 @@ describe('EDL Clip Track Cleaning Regression', () => {
     expect(clips[0].buffer).toBeNull();
   });
 
-  it('cleanSelectedTrack falls back to audioData.buffer when mixClipsForTrack returns null', async () => {
-    // This is THE regression test for the silent failure bug:
-    // A clip track (created by extraction) has audioData.buffer but clips[] with null buffers.
-    // mixClipsForTrack returns null, but cleaning should fall back to audioData.buffer
-    // rather than silently returning null.
+  it('cleanSelectedTrack uses renderTrackToTempWav for EDL tracks (not audioData.buffer fallback)', async () => {
+    // Regression: EDL clip tracks (null buffers) now use renderTrackToTempWav
+    // instead of falling back to audioData.buffer (which is the full source file).
+    // The render path respects the clip arrangement.
     const { useTracksStore } = await import('@/stores/tracks');
     const { useCleaningStore } = await import('@/stores/cleaning');
     const tracksStore = useTracksStore();
@@ -423,18 +422,15 @@ describe('EDL Clip Track Cleaning Regression', () => {
     // Verify preconditions: mixClipsForTrack returns null for this track
     const ctx = new MockAudioContext() as unknown as AudioContext;
     expect(tracksStore.mixClipsForTrack('edl-fallback-track', ctx)).toBeNull();
-    // But track has audioData.buffer
-    expect(tracksStore.getTrackById('edl-fallback-track')!.audioData.buffer).not.toBeNull();
 
-    // cleanSelectedTrack will call invoke() which we mock — it will reject since
-    // the mock isn't set up for clean_audio. The key test is that it REACHES the
-    // invoke (i.e. doesn't silently return null due to mixClipsForTrack returning null).
-    // We detect this by checking that loading becomes true and the error is from the
-    // invoke call, not "no audio clips available".
+    // cleanSelectedTrack now uses renderTrackToTempWav which invokes export_edl.
+    // The mock invoke will fail, but the error should come from the render attempt,
+    // not from "no audio data available" (the old silent-failure path).
     const result = await cleaningStore.cleanSelectedTrack();
-    // The invoke mock resolves to [], which isn't a valid CleanResult.
-    // The important thing is the error is NOT "no audio data available"
-    expect(cleaningStore.error).not.toBe('Cannot clean: no audio data available');
+    // renderTrackToTempWav will fail (mock invoke returns []), but the error comes from
+    // the render attempt — not the old "no audio data available" silent-failure path.
+    // The error should mention "render" (from renderTrackToTempWav failure).
+    expect(cleaningStore.error).toMatch(/render|export/i);
   });
 
   it('cleanSelectedTrack shows error when track truly has no audio', async () => {
@@ -468,7 +464,9 @@ describe('EDL Clip Track Cleaning Regression', () => {
 
     const result = await cleaningStore.cleanSelectedTrack();
     expect(result).toBeNull();
-    expect(cleaningStore.error).toBe('Cannot clean: no audio data available');
+    // Empty track (no buffer, no clips, no sourcePath) now goes through renderTrackToTempWav
+    // which throws "no clips to render" — the error is propagated through the render catch
+    expect(cleaningStore.error).toMatch(/render|no clips/i);
   });
 });
 
