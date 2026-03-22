@@ -12,6 +12,7 @@ import { useVadStore } from './vad';
 import { useHistoryStore } from './history';
 import { usePlaybackStore } from './playback';
 import { useUIStore } from './ui';
+import { renderTrackToTempWav } from '@/services/track-render';
 
 interface CleanedAudioEntry {
   path: string;
@@ -116,25 +117,22 @@ export const useCleaningStore = defineStore('cleaning', () => {
         cleanDuration = sourceTrack.duration;
         console.log('[Clean] Using source path directly (large file):', sourcePath);
       } else {
-        // Get current buffer state (clips mixed together)
-        // mixClipsForTrack can return null when track has EDL clips with null buffers
-        // (e.g. clip tracks created by extraction). Fall back to audioData.buffer.
-        const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext())
-          ?? sourceTrack.audioData.buffer;
-        if (!mixedBuffer) {
-          error.value = 'Cannot clean: no audio data available';
-          console.log('[Clean] No audio data available for track:', sourceTrack.name);
-          useUIStore().showToast('Cannot clean: no audio data available', 'error');
+        // Render track's arranged content (respects clips, not full source).
+        // Uses the same renderTrackToTempWav pipeline as transcription —
+        // handles both in-memory buffers and EDL/large-file tracks.
+        try {
+          const { path } = await renderTrackToTempWav(sourceTrack.id);
+          sourcePath = path;
+          cleanDuration = sourceTrack.duration;
+          console.log('[Clean] Rendered track to temp WAV:', sourcePath);
+        } catch (renderErr) {
+          const msg = renderErr instanceof Error ? renderErr.message : String(renderErr);
+          error.value = `Cannot render track for cleaning: ${msg}`;
+          console.log('[Clean] Render failed for track:', sourceTrack.name, renderErr);
+          useUIStore().showToast('Cannot clean: failed to render track audio', 'error');
           loading.value = false;
           return null;
         }
-
-        // Encode to WAV and write to temp file
-        const wavData = await encodeWavFloat32InWorker(mixedBuffer);
-        sourcePath = await writeTempFile(`clean_source_${Date.now()}.wav`, wavData);
-        cleanDuration = mixedBuffer.duration;
-
-        console.log('[Clean] Using current buffer state, temp file:', sourcePath);
       }
 
       // Get temp path for output
