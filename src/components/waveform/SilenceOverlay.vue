@@ -2,6 +2,8 @@
 import { ref, computed } from 'vue';
 import type { SilenceRegion } from '@/shared/types';
 import { useHistoryStore } from '@/stores/history';
+import { useTimelineViewport } from '@/composables/useTimelineViewport';
+import { clientXToLocalX } from '@/shared/timeline-coordinates';
 
 interface Props {
   region: SilenceRegion;
@@ -28,39 +30,32 @@ const isHovered = ref(false);
 
 const visibleDuration = computed(() => props.endTime - props.startTime);
 
-const pixelsPerSecond = computed(() => {
-  if (visibleDuration.value <= 0) return 1;
-  return props.containerWidth / visibleDuration.value;
-});
+const { timeToX, xToTimeRaw, pixelsPerSecond } = useTimelineViewport(
+  () => props.startTime,
+  () => props.endTime,
+  () => props.containerWidth,
+);
 
 // Calculate visible portion of region
 const visibleStart = computed(() => Math.max(props.region.start, props.startTime));
 const visibleEnd = computed(() => Math.min(props.region.end, props.endTime));
 
 const left = computed(() => {
-  return ((visibleStart.value - props.startTime) / visibleDuration.value) * props.containerWidth;
+  return timeToX(visibleStart.value);
 });
 
 const width = computed(() => {
-  const w = ((visibleEnd.value - visibleStart.value) / visibleDuration.value) * props.containerWidth;
-  return Math.max(0, w);
+  return Math.max(0, timeToX(visibleEnd.value) - timeToX(visibleStart.value));
 });
 
 // Check if region is fully visible or clipped
 const isClippedStart = computed(() => props.region.start < props.startTime);
 const isClippedEnd = computed(() => props.region.end > props.endTime);
 
-function getContainerLeft(): number {
-  if (overlayRef.value?.parentElement) {
-    return overlayRef.value.parentElement.getBoundingClientRect().left;
-  }
-  return 0;
-}
-
 function xToTime(clientX: number): number {
-  const containerLeft = getContainerLeft();
-  const x = clientX - containerLeft;
-  return (x / props.containerWidth) * visibleDuration.value + props.startTime;
+  const el = overlayRef.value?.parentElement;
+  if (!el) return props.startTime;
+  return xToTimeRaw(clientXToLocalX(clientX, el));
 }
 
 function handleMouseDown(event: MouseEvent) {

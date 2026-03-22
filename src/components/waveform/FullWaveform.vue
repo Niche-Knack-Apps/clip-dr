@@ -12,6 +12,8 @@ import { useTracksStore } from '@/stores/tracks';
 import { useUIStore } from '@/stores/ui';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useTimemarkInteraction } from '@/composables/useTimemarkInteraction';
+import { useTimelineViewport } from '@/composables/useTimelineViewport';
+import { clientXToLocalX } from '@/shared/timeline-coordinates';
 import { formatTime } from '@/shared/utils';
 import { WAVEFORM_HEIGHT } from '@/shared/constants';
 
@@ -37,6 +39,8 @@ const containerLeft = ref(0);
 
 const duration = effectiveDuration;
 
+const { timeToX, xToTimeClamped } = useTimelineViewport(0, duration, containerWidth);
+
 // Timemark interaction (context menu + drag) — shared composable
 const {
   contextMenu,
@@ -59,12 +63,6 @@ const playheadColor = computed(() => settingsStore.settings.playheadColor);
 const inPoint = computed(() => selectionStore.inOutPoints.inPoint);
 const outPoint = computed(() => selectionStore.inOutPoints.outPoint);
 
-function timeToPixel(time: number): number {
-  const dur = duration.value;
-  if (dur <= 0 || containerWidth.value <= 0) return 0;
-  return (time / dur) * containerWidth.value;
-}
-
 // All timemarks from audible tracks with pixel positions (full timeline: 0 to duration).
 // Markers follow track audibility: if any track is solo'd, only show markers for solo'd tracks;
 // otherwise hide markers for muted tracks. This ensures markers represent content the user can hear.
@@ -85,7 +83,7 @@ const allTimemarks = computed(() => {
         trackId: track.id,
         label: mark.label,
         color: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
-        pixelLeft: (absTime / dur) * containerWidth.value,
+        pixelLeft: timeToX(absTime),
         time: mark.time,
         trackStart: track.trackStart,
       });
@@ -125,7 +123,7 @@ function handleWheel(event: WheelEvent) {
   if (newDuration === currentDuration) return;
 
   // Map mouse X to time on the full timeline (not the selection)
-  const timeUnderMouse = ((event.clientX - rect.left) / rect.width) * dur;
+  const timeUnderMouse = xToTimeClamped(event.clientX - rect.left);
 
   // Calculate the ratio of where the mouse is in the current selection view
   const mouseRatio = (timeUnderMouse - selection.value.start) / currentDuration;
@@ -251,10 +249,9 @@ function handleResize() {
 
 function handleWaveformClick(event: MouseEvent) {
   if (event.button !== 0) return;
-  const rect = containerRef.value?.getBoundingClientRect();
-  if (!rect || duration.value <= 0) return;
-  const time = ((event.clientX - rect.left) / rect.width) * duration.value;
-  playbackStore.seek(Math.max(0, Math.min(duration.value, time)));
+  if (!containerRef.value || duration.value <= 0) return;
+  const time = xToTimeClamped(clientXToLocalX(event.clientX, containerRef.value));
+  playbackStore.seek(time);
 }
 
 function handlePlayheadDrag(time: number) {
@@ -403,7 +400,7 @@ onUnmounted(() => {
         v-if="uiStore.activeTrimEdge"
         class="absolute top-0 bottom-0 w-px z-16 pointer-events-none"
         :style="{
-          left: `${timeToPixel(uiStore.activeTrimEdge.time)}px`,
+          left: `${timeToX(uiStore.activeTrimEdge.time)}px`,
           backgroundColor: uiStore.activeTrimEdge.edge === 'left' ? 'rgba(0,212,255,0.4)' : 'rgba(255,100,100,0.4)',
         }"
       />
@@ -412,14 +409,14 @@ onUnmounted(() => {
       <div
         v-if="inPoint !== null"
         class="absolute top-0 bottom-0 w-px bg-emerald-400 z-12 pointer-events-none"
-        :style="{ left: `${timeToPixel(inPoint)}px` }"
+        :style="{ left: `${timeToX(inPoint)}px` }"
       >
         <div class="absolute -top-0.5 -left-1 text-[8px] font-bold text-emerald-400">I</div>
       </div>
       <div
         v-if="outPoint !== null"
         class="absolute top-0 bottom-0 w-px bg-red-400 z-12 pointer-events-none"
-        :style="{ left: `${timeToPixel(outPoint)}px` }"
+        :style="{ left: `${timeToX(outPoint)}px` }"
       >
         <div class="absolute -top-0.5 -left-1.5 text-[8px] font-bold text-red-400">O</div>
       </div>
@@ -428,8 +425,8 @@ onUnmounted(() => {
         v-if="inPoint !== null && outPoint !== null"
         class="absolute top-0 bottom-0 bg-white/5 z-11 pointer-events-none"
         :style="{
-          left: `${timeToPixel(inPoint)}px`,
-          width: `${timeToPixel(outPoint) - timeToPixel(inPoint)}px`,
+          left: `${timeToX(inPoint)}px`,
+          width: `${timeToX(outPoint) - timeToX(inPoint)}px`,
         }"
       />
 

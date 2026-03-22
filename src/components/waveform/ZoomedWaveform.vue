@@ -12,6 +12,8 @@ import { useTracksStore } from '@/stores/tracks';
 import { useUIStore } from '@/stores/ui';
 import { useEffectiveAudio } from '@/composables/useEffectiveAudio';
 import { useTimemarkInteraction } from '@/composables/useTimemarkInteraction';
+import { useTimelineViewport } from '@/composables/useTimelineViewport';
+import { clientXToLocalX } from '@/shared/timeline-coordinates';
 import { formatTime } from '@/shared/utils';
 import { ZOOMED_HEIGHT } from '@/shared/constants';
 
@@ -33,6 +35,12 @@ const uiStore = useUIStore();
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
+
+const { timeToX, xToTimeClamped } = useTimelineViewport(
+  () => selection.value.start,
+  () => selection.value.end,
+  containerWidth,
+);
 
 // Timemark interaction (context menu + drag) — shared composable
 const {
@@ -120,7 +128,7 @@ const visibleTimemarks = computed(() => {
           trackId: track.id,
           label: mark.label,
           color: mark.color || (mark.source === 'manual' ? '#00d4ff' : '#fbbf24'),
-          pixelLeft: ((absTime - start) / range) * containerWidth.value,
+          pixelLeft: timeToX(absTime),
           time: mark.time,
           trackStart: track.trackStart,
         });
@@ -185,25 +193,14 @@ function handleResize() {
   });
 }
 
-function timeToX(time: number): number {
-  const range = selection.value.end - selection.value.start;
-  if (range <= 0) return 0;
-  return ((time - selection.value.start) / range) * containerWidth.value;
-}
-
 function xToTime(clientX: number): number {
   if (!containerRef.value) return selection.value.start;
-  const rect = containerRef.value.getBoundingClientRect();
-  const x = clientX - rect.left;
-  const range = selection.value.end - selection.value.start;
-  const time = (x / rect.width) * range + selection.value.start;
-  return Math.max(selection.value.start, Math.min(time, selection.value.end));
+  return xToTimeClamped(clientXToLocalX(clientX, containerRef.value));
 }
 
 function getClickTarget(clientX: number): DragMode {
   if (!containerRef.value) return 'select';
-  const rect = containerRef.value.getBoundingClientRect();
-  const x = clientX - rect.left;
+  const x = clientXToLocalX(clientX, containerRef.value);
 
   // Check if clicking near in point
   if (inPoint.value !== null) {
