@@ -383,6 +383,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return results;
   }
 
+  /** Clone transcription from one track to another (deep copy of words + offsets) */
+  function cloneTranscription(sourceTrackId: string, targetTrackId: string): void {
+    const source = transcriptions.value.get(sourceTrackId);
+    if (!source) return;
+
+    const cloned = {
+      trackId: targetTrackId,
+      words: source.words.map(w => ({ ...w, id: generateId() })),
+      fullText: source.fullText,
+      language: source.language,
+      processedAt: source.processedAt,
+      wordOffsets: new Map<string, number>(), // Fresh offsets (source offsets are per-word-id)
+      enableFalloff: source.enableFalloff,
+    };
+
+    transcriptions.value.set(targetTrackId, cloned);
+    triggerRef(transcriptions);
+    console.log(`[Transcription] Cloned ${cloned.words.length} words from ${sourceTrackId.slice(0, 8)} → ${targetTrackId.slice(0, 8)}`);
+  }
+
   // ─── Cut/delete adjustments ───
 
   /** Remove words in [cutStart, cutEnd] and shift remaining words left by the gap duration */
@@ -941,6 +961,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Search
     searchWords,
     // Adjustment
+    cloneTranscription,
     adjustForCut,
     adjustForDelete,
     // Persistence

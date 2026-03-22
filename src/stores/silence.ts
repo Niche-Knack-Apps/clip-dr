@@ -11,6 +11,7 @@ import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
 import { WAVEFORM_BUCKET_COUNT } from '@/shared/constants';
 import { useHistoryStore } from './history';
+import { useTranscriptionStore } from './transcription';
 import { generateId } from '@/shared/utils';
 
 interface CutAudioData {
@@ -329,6 +330,11 @@ export const useSilenceStore = defineStore('silence', () => {
   }
 
   // Cut silence and create a new track (non-destructive)
+  /**
+   * Cut silence from a track by cloning it and applying ripple deletes for each silence region.
+   * Produces an EDL track with clips, preserving markers, transcription, and volume envelope.
+   * The source track is muted (non-destructive). The new track is fully exportable and project-saveable.
+   */
   async function cutSilenceToNewTrack(trackId: string): Promise<Track | null> {
     // Reject _unassigned — must be explicitly reassigned first
     if (trackId === UNASSIGNED_TRACK_KEY) {
@@ -357,106 +363,62 @@ export const useSilenceStore = defineStore('silence', () => {
     cutError.value = null;
 
     try {
-      console.log('[CutSilence] Starting cut for track:', sourceTrack.name);
+      const historyStore = useHistoryStore();
+      historyStore.beginBatch('Cut silence');
 
-      // Get current buffer state (clips mixed together)
-      const mixedBuffer = tracksStore.mixClipsForTrack(sourceTrack.id, audioStore.getAudioContext());
-      if (!mixedBuffer) {
-        cutError.value = 'Cannot cut silence: no audio clips available';
+      console.log('[CutSilence] Starting EDL cut for track:', sourceTrack.name);
+
+      // Ensure the source track has explicit clips (promote single-buffer track)
+      tracksStore.promoteToExplicitClips(sourceTrack.id);
+
+      // 1. Clone the source track with all clips, markers, envelope
+      const cutName = `No Silence - ${sourceTrack.name}`;
+      const cutTrack = tracksStore.cloneTrack(sourceTrack.id, cutName);
+      if (!cutTrack) {
+        cutError.value = 'Failed to clone track';
+        historyStore.endBatch();
         cutting.value = false;
         return null;
       }
 
-      // Encode to WAV and write to temp file
-      const wavData = await encodeWavFloat32InWorker(mixedBuffer);
-      const sourcePath = await writeTempFile(`cut_source_${Date.now()}.wav`, wavData);
+      // 2. Clone transcription to the new track
+      const transcriptionStore = useTranscriptionStore();
+      transcriptionStore.cloneTranscription(sourceTrack.id, cutTrack.id);
 
-      console.log('[CutSilence] Using current buffer state, temp file:', sourcePath);
+      // 3. Sort silence regions descending (process from end to avoid index shifts)
+      const sorted = [...trackRegions].sort((a, b) => b.start - a.start);
 
-      // Get temp path for output
-      const outputPath = await invoke<string>('get_temp_audio_path');
-      console.log('[CutSilence] Temp output path:', outputPath);
+      const totalSilence = sorted.reduce((sum, r) => sum + (r.end - r.start), 0);
+      console.log(`[CutSilence] Removing ${sorted.length} silence regions (${totalSilence.toFixed(2)}s) from cloned track`);
 
-      // Build speech segments from gaps between active (enabled) silence regions
-      const duration = mixedBuffer.duration;
-      const sorted = [...trackRegions].sort((a, b) => a.start - b.start);
-
-      console.log('[CutSilence] Total silence regions:', getRegionsForTrack(trackId).length);
-      console.log('[CutSilence] Active (enabled) silence regions:', sorted.length);
-      console.log(`[CutSilence] Active regions: ${sorted.length} (first: ${sorted[0]?.start.toFixed(2)}-${sorted[0]?.end.toFixed(2)}, last: ${sorted[sorted.length - 1]?.start.toFixed(2)}-${sorted[sorted.length - 1]?.end.toFixed(2)})`);
-
-      // Create speech segments (inverse of silence)
-      const speechSegments: Array<{ start: number; end: number; isSpeech: boolean }> = [];
-      let prevEnd = 0;
-
+      // 4. For each silence region, ripple-delete from the cloned track
+      const audioContext = audioStore.getAudioContext();
       for (const region of sorted) {
-        if (region.start > prevEnd) {
-          speechSegments.push({
-            start: prevEnd,
-            end: region.start,
-            isSpeech: true,
-          });
-        }
-        prevEnd = region.end;
+        const gapDuration = region.end - region.start;
+
+        // Cut clips around the silence region
+        await tracksStore.cutRegionFromTrack(cutTrack.id, region.start, region.end, audioContext, { keepTrack: true });
+
+        // Adjust markers, volume envelope, transcription (same as rippleDeleteRegion)
+        tracksStore.adjustTimemarksForCut(cutTrack.id, region.start, region.end);
+        tracksStore.adjustVolumeEnvelopeForCut(cutTrack.id, region.start, region.end);
+        transcriptionStore.adjustForCut(cutTrack.id, region.start, region.end);
+
+        // Slide clips left to close the gap (only this track)
+        tracksStore.slideTracksLeft(region.end, gapDuration, cutTrack.id);
       }
 
-      // Add final segment if there's speech after last silence
-      if (prevEnd < duration) {
-        speechSegments.push({
-          start: prevEnd,
-          end: duration,
-          isSpeech: true,
-        });
-      }
-
-      console.log('[CutSilence] Speech segments:', speechSegments.length);
-      console.log(`[CutSilence] Speech segments (KEEPING): ${speechSegments.length}`);
-
-      const totalSpeechDuration = speechSegments.reduce((sum, s) => sum + (s.end - s.start), 0);
-      console.log('[CutSilence] Original duration:', duration.toFixed(2), 'New duration:', totalSpeechDuration.toFixed(2), 'Removing:', (duration - totalSpeechDuration).toFixed(2));
-
-      // Call backend to create the cut audio
-      console.log('[CutSilence] Calling backend export_without_silence...');
-      await invoke('export_without_silence', {
-        sourcePath,
-        outputPath,
-        speechSegments,
-      });
-      console.log('[CutSilence] Backend completed');
-
-      // Load the cut audio file into a buffer
-      console.log('[CutSilence] Loading cut audio buffer...');
-      const cutAudioEntry = await loadCutAudio(outputPath);
-      console.log('[CutSilence] Loaded cut audio, duration:', cutAudioEntry.duration);
-
-      // Create a new track from the cut audio
-      console.log('[CutSilence] Creating new track...');
-      const cutName = `No Silence - ${sourceTrack.name}`;
-      const cutTrack = await tracksStore.createTrackFromBuffer(
-        cutAudioEntry.buffer,
-        cutAudioEntry.waveformData,
-        cutName,
-        0
-      );
-      console.log('[CutSilence] Created track:', cutTrack.id, cutTrack.name);
-
-      // Store the cut audio data mapped to the new track's ID
-      const newMap = new Map(cutAudioFiles.value);
-      newMap.set(cutTrack.id, {
-        ...cutAudioEntry,
-        cutRegions: sorted.map(r => ({ start: r.start, end: r.end })),
-      });
-      cutAudioFiles.value = newMap;
-
-      // MUTE the source track (non-destructive)
+      // 5. Mute the source track (non-destructive)
       tracksStore.setTrackMuted(sourceTrack.id, true);
 
-      // Switch to 'clip' loop mode to loop on the new track
+      // 6. Switch to clip loop mode
       const playbackStore = usePlaybackStore();
       playbackStore.setLoopMode('clip');
 
-      console.log('[CutSilence] Silence cut successfully, new track added');
-      console.log('[CutSilence] Total tracks now:', tracksStore.tracks.length);
+      historyStore.endBatch();
+
+      const newClips = tracksStore.getTrackClips(cutTrack.id);
+      console.log(`[CutSilence] Complete: ${newClips.length} clips, duration ${cutTrack.duration.toFixed(2)}s`);
       return cutTrack;
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);

@@ -207,6 +207,66 @@ export const useTracksStore = defineStore('tracks', () => {
     return track;
   }
 
+  /**
+   * Clone a track: deep copy metadata, clips, markers, envelope.
+   * Audio buffers are SHARED (not cloned) per memory convention.
+   * The new track gets fresh IDs and is added to the track list.
+   */
+  function cloneTrack(trackId: string, newName: string): Track | null {
+    const source = getTrackById(trackId);
+    if (!source) return null;
+
+    const newTrackId = generateId();
+
+    // Deep copy clips with new IDs, sharing buffers
+    const clonedClips: TrackClip[] | undefined = source.clips?.map(c => ({
+      ...c,
+      id: generateId(),
+      // Share buffer reference (not cloned per convention)
+    }));
+
+    // Deep copy timemarks with new IDs
+    const clonedTimemarks = source.timemarks?.map(m => ({
+      ...m,
+      id: generateId(),
+    }));
+
+    // Deep copy volume envelope
+    const clonedEnvelope = source.volumeEnvelope?.map(p => ({ ...p }));
+
+    const newTrack: Track = {
+      id: newTrackId,
+      name: newName,
+      audioData: {
+        ...source.audioData,
+        // Share buffer reference
+      },
+      trackStart: source.trackStart,
+      duration: source.duration,
+      color: getNextColor(),
+      muted: false,
+      solo: false,
+      volume: source.volume,
+      tag: source.tag,
+      sourcePath: source.sourcePath,
+      cachedAudioPath: source.cachedAudioPath,
+      clips: clonedClips,
+      timemarks: clonedTimemarks,
+      volumeEnvelope: clonedEnvelope,
+      importStatus: source.importStatus,
+      hasPeakPyramid: source.hasPeakPyramid,
+    };
+
+    tracks.value = [...tracks.value, newTrack];
+    selectedTrackId.value = newTrackId;
+    viewMode.value = 'selected';
+    focusedClipId.value = null;
+    bumpSyncEpoch();
+
+    console.log(`[Tracks] Cloned track "${source.name}" → "${newName}" (${newTrackId})`);
+    return newTrack;
+  }
+
   // Insert a track at a specific position in the track list
   function insertTrackAtIndex(track: Track, index: number): void {
     const newTracks = [...tracks.value];
@@ -3152,6 +3212,7 @@ export const useTracksStore = defineStore('tracks', () => {
     timelineDuration,
     hasAudio,
     createTrackFromBuffer,
+    cloneTrack,
     insertTrackAtIndex,
     deleteTrack,
     clearTrackAudio,
