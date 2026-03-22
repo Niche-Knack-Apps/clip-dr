@@ -7,10 +7,55 @@ use ort::value::TensorRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use tauri::Manager;
 use super::transcribe::{TranscriptionMetrics, TranscriptionResult, Word};
+
+/// Cached ONNX sessions to avoid reloading models on every transcription (~10s load time).
+/// Key: model directory path string. Value: (encoder, decoder) sessions.
+static SESSION_CACHE: std::sync::OnceLock<Mutex<Option<(String, Session, Session)>>> = std::sync::OnceLock::new();
+
+fn get_or_load_sessions(model_dir: &Path) -> Result<(Session, Session), String> {
+    let cache = SESSION_CACHE.get_or_init(|| Mutex::new(None));
+    let model_key = model_dir.to_string_lossy().to_string();
+
+    let mut guard = cache.lock().expect("SESSION_CACHE mutex poisoned");
+    if let Some((ref key, _, _)) = *guard {
+        if key == &model_key {
+            let (_, enc, dec) = guard.take().expect("just checked Some");
+            log::info!("Reusing cached moonshine sessions");
+            return Ok((enc, dec));
+        }
+        // Different model — drop old cache
+        guard.take();
+    }
+    drop(guard);
+
+    let encoder_path = model_dir.join("encoder_model.onnx");
+    let decoder_path = model_dir.join("decoder_model_merged.onnx");
+
+    let t0 = Instant::now();
+    log::info!("Loading moonshine encoder: {:?}", encoder_path);
+    let enc = init_session(&encoder_path)?;
+    log::info!("Encoder loaded in {}ms", t0.elapsed().as_millis());
+
+    let t1 = Instant::now();
+    log::info!("Loading moonshine decoder: {:?}", decoder_path);
+    let dec = init_session(&decoder_path)?;
+    log::info!("Decoder loaded in {}ms", t1.elapsed().as_millis());
+
+    log::info!("Total moonshine session load: {}ms", t0.elapsed().as_millis());
+    Ok((enc, dec))
+}
+
+fn return_sessions_to_cache(model_dir: &Path, encoder: Session, decoder: Session) {
+    let cache = SESSION_CACHE.get_or_init(|| Mutex::new(None));
+    let model_key = model_dir.to_string_lossy().to_string();
+    let mut guard = cache.lock().expect("SESSION_CACHE mutex poisoned");
+    *guard = Some((model_key, encoder, decoder));
+}
 
 // ── Constants ──
 
@@ -207,12 +252,13 @@ fn variant_config(name: &str) -> VariantConfig {
         "base" => VariantConfig {
             num_layers: 8,
             num_heads: 8,
-            head_dim: 64,
+            head_dim: 52,
         },
         _ => VariantConfig {
+            // tiny: 6 layers, 8 heads, head_dim=36 (past_element_count=288)
             num_layers: 6,
             num_heads: 8,
-            head_dim: 64,
+            head_dim: 36,
         },
     }
 }
@@ -303,7 +349,8 @@ fn find_any_moonshine_model(custom_path: Option<&str>, resource_dir: Option<&std
 // ── Inference ──
 
 fn run_moonshine_inference(
-    model_dir: &Path,
+    encoder: &mut Session,
+    decoder: &mut Session,
     variant_name: &str,
     samples: &[f32],
 ) -> Result<Vec<i64>, String> {
@@ -316,14 +363,6 @@ fn run_moonshine_inference(
             duration_secs
         ));
     }
-
-    let encoder_path = model_dir.join("encoder_model.onnx");
-    let decoder_path = model_dir.join("decoder_model_merged.onnx");
-
-    log::info!("Loading moonshine encoder: {:?}", encoder_path);
-    let mut encoder = init_session(&encoder_path)?;
-    log::info!("Loading moonshine decoder: {:?}", decoder_path);
-    let mut decoder = init_session(&decoder_path)?;
 
     let encoder_input_names: Vec<String> =
         encoder.inputs().iter().map(|i| i.name().to_string()).collect();
@@ -468,16 +507,28 @@ fn run_moonshine_inference(
 fn init_session(path: &Path) -> Result<Session, String> {
     let providers = vec![CPUExecutionProvider::default().build()];
 
-    Session::builder()
-        .map_err(|e| format!("Session builder error: {}", e))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
+    log::info!("[ORT] Creating session builder...");
+    let t0 = Instant::now();
+    let builder = Session::builder()
+        .map_err(|e| format!("Session builder error: {}", e))?;
+    log::info!("[ORT] Builder created in {}ms", t0.elapsed().as_millis());
+
+    let mut builder = builder.with_optimization_level(GraphOptimizationLevel::Disable)
         .map_err(|e| format!("Optimization level error: {}", e))?
         .with_execution_providers(providers)
         .map_err(|e| format!("Execution provider error: {}", e))?
-        .with_parallel_execution(true)
-        .map_err(|e| format!("Parallel execution error: {}", e))?
-        .commit_from_file(path)
-        .map_err(|e| format!("Failed to load ONNX model {:?}: {}", path, e))
+        .with_intra_threads(4)
+        .map_err(|e| format!("Intra threads error: {}", e))?
+        .with_parallel_execution(false)
+        .map_err(|e| format!("Parallel execution error: {}", e))?;
+    log::info!("[ORT] Session options configured, committing model {:?}...", path.file_name().unwrap_or_default());
+
+    let t1 = Instant::now();
+    let session = builder.commit_from_file(path)
+        .map_err(|e| format!("Failed to load ONNX model {:?}: {}", path, e))?;
+    log::info!("[ORT] Model loaded in {}ms", t1.elapsed().as_millis());
+
+    Ok(session)
 }
 
 // ── Chunked transcription for long files ──
@@ -490,58 +541,71 @@ fn transcribe_chunked(
     let total_duration = samples.len() as f64 / SAMPLE_RATE as f64;
 
     let tokenizer = MoonshineTokenizer::load(model_dir)?;
+    let (mut encoder, mut decoder) = get_or_load_sessions(model_dir)?;
 
-    if total_duration <= 60.0 {
-        let tokens = run_moonshine_inference(model_dir, variant_name, samples)?;
-        let text = tokenizer.decode(&tokens)?;
-        let words = estimate_word_timestamps(&text, 0.0, total_duration);
-        return Ok((text, words));
-    }
-
-    let chunk_samples = 30 * SAMPLE_RATE as usize;
-    let overlap_samples = SAMPLE_RATE as usize;
-    let mut all_text = String::new();
-    let mut all_words: Vec<Word> = Vec::new();
-    let mut offset = 0usize;
-
-    while offset < samples.len() {
-        let end = (offset + chunk_samples).min(samples.len());
-        let chunk = &samples[offset..end];
-        let chunk_duration = chunk.len() as f64 / SAMPLE_RATE as f64;
-        let chunk_start_time = offset as f64 / SAMPLE_RATE as f64;
-
-        if chunk_duration < 0.1 {
-            break;
+    let result = (|| -> Result<(String, Vec<Word>), String> {
+        if total_duration <= 60.0 {
+            let t_inf = Instant::now();
+            let tokens = run_moonshine_inference(&mut encoder, &mut decoder, variant_name, samples)?;
+            log::info!("Moonshine inference: {} tokens in {}ms", tokens.len(), t_inf.elapsed().as_millis());
+            log::info!("Moonshine tokens (first 20): {:?}", &tokens[..tokens.len().min(20)]);
+            let text = tokenizer.decode(&tokens)?;
+            log::info!("Moonshine decoded text ({} chars): {:?}", text.len(), &text[..text.len().min(200)]);
+            let words = estimate_word_timestamps(&text, 0.0, total_duration);
+            log::info!("Moonshine estimated {} words", words.len());
+            return Ok((text, words));
         }
 
-        log::info!(
-            "Moonshine chunk: {:.1}s - {:.1}s ({:.1}s)",
-            chunk_start_time,
-            chunk_start_time + chunk_duration,
-            chunk_duration
-        );
+        let chunk_samples = 30 * SAMPLE_RATE as usize;
+        let overlap_samples = SAMPLE_RATE as usize;
+        let mut all_text = String::new();
+        let mut all_words: Vec<Word> = Vec::new();
+        let mut offset = 0usize;
 
-        let tokens = run_moonshine_inference(model_dir, variant_name, chunk)?;
-        let chunk_text = tokenizer.decode(&tokens)?;
+        while offset < samples.len() {
+            let end = (offset + chunk_samples).min(samples.len());
+            let chunk = &samples[offset..end];
+            let chunk_duration = chunk.len() as f64 / SAMPLE_RATE as f64;
+            let chunk_start_time = offset as f64 / SAMPLE_RATE as f64;
 
-        if !chunk_text.is_empty() {
-            if !all_text.is_empty() {
-                all_text.push(' ');
+            if chunk_duration < 0.1 {
+                break;
             }
-            all_text.push_str(&chunk_text);
 
-            let chunk_words =
-                estimate_word_timestamps(&chunk_text, chunk_start_time, chunk_duration);
-            all_words.extend(chunk_words);
+            log::info!(
+                "Moonshine chunk: {:.1}s - {:.1}s ({:.1}s)",
+                chunk_start_time,
+                chunk_start_time + chunk_duration,
+                chunk_duration
+            );
+
+            let tokens = run_moonshine_inference(&mut encoder, &mut decoder, variant_name, chunk)?;
+            let chunk_text = tokenizer.decode(&tokens)?;
+
+            if !chunk_text.is_empty() {
+                if !all_text.is_empty() {
+                    all_text.push(' ');
+                }
+                all_text.push_str(&chunk_text);
+
+                let chunk_words =
+                    estimate_word_timestamps(&chunk_text, chunk_start_time, chunk_duration);
+                all_words.extend(chunk_words);
+            }
+
+            if end >= samples.len() {
+                break;
+            }
+            offset = end - overlap_samples;
         }
 
-        if end >= samples.len() {
-            break;
-        }
-        offset = end - overlap_samples;
-    }
+        Ok((all_text, all_words))
+    })();
 
-    Ok((all_text, all_words))
+    // Return sessions to cache regardless of success/failure
+    return_sessions_to_cache(model_dir, encoder, decoder);
+
+    result
 }
 
 /// Estimate word-level timestamps by distributing duration proportionally by character count.

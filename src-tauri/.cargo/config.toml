@@ -1,0 +1,5 @@
+# Dev-machine ORT library path for moonshine ONNX inference.
+# The ort crate with load-dynamic needs libonnxruntime.so at runtime.
+# This points to the Python onnxruntime package's bundled library.
+[env]
+ORT_DYLIB_PATH = "/home/batteajd/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.1"

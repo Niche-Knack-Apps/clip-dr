@@ -299,11 +299,16 @@ async function handleDownloadTranscriptJSON() {
   if (!trackId || trackId === 'ALL') return;
   const json = transcriptionStore.exportAsJSON(trackId);
   if (!json) return;
+  const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+  const defaultName = `transcription_${tracksStore.selectedTrack?.name || 'track'}.json`;
   const path = await save({
-    defaultPath: `transcription_${tracksStore.selectedTrack?.name || 'track'}.json`,
+    defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
     filters: [{ name: 'JSON', extensions: ['json'] }],
   });
-  if (path) await writeTextFile(path, json);
+  if (path) {
+    settingsStore.setLastExportFolder(path);
+    await writeTextFile(path, json);
+  }
 }
 
 async function handleDownloadTranscriptTXT() {
@@ -311,11 +316,16 @@ async function handleDownloadTranscriptTXT() {
   if (!trackId || trackId === 'ALL') return;
   const txt = transcriptionStore.exportAsText(trackId);
   if (!txt) return;
+  const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+  const defaultName = `transcription_${tracksStore.selectedTrack?.name || 'track'}.txt`;
   const path = await save({
-    defaultPath: `transcription_${tracksStore.selectedTrack?.name || 'track'}.txt`,
+    defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
     filters: [{ name: 'Text', extensions: ['txt'] }],
   });
-  if (path) await writeTextFile(path, txt);
+  if (path) {
+    settingsStore.setLastExportFolder(path);
+    await writeTextFile(path, txt);
+  }
 }
 
 function formatScheduleRemaining(seconds: number): string {
