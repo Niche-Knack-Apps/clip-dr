@@ -37,6 +37,7 @@ export const DEFAULT_SETTINGS = {
   lastImportFolder: '',
   lastExportFolder: '',
   lastExportFormat: 'mp3' as const,
+  lastProjectFolder: '',
   projectFolder: '',
   // Playback controls
   holdToPlay: false,          // true = hold Space to play, false = toggle (JKL mode)
@@ -59,7 +60,7 @@ export const DEFAULT_SETTINGS = {
   // Transcription engine: whisper (default) or moonshine
   transcriptionEngine: 'whisper' as const,
   // Bottom bar shortcut hints
-  shortcutHints: ['help', 'jkl', 'cut', 'delete'],
+  shortcutHints: ['help', 'jkl', 'split', 'cut', 'delete'],
   // Quick Session Mode: auto-start new session when all tracks are deleted
   quickSessionMode: false,
   // Time display format

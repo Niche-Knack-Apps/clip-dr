@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
+import { homeDir } from '@tauri-apps/api/path';
 import { writeTempFile } from '@/shared/fs-utils';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
@@ -312,7 +313,7 @@ export const useExportStore = defineStore('export', () => {
     const format = profile.format;
     const trackName = activeTracks.value[0]?.name || 'audio';
     const defaultName = `${trackName.replace(/[^a-zA-Z0-9]/g, '_')}_export.${format}`;
-    const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+    const lastFolder = settingsStore.settings.lastExportFolder || await homeDir();
 
     // Single filter matching the profile format — fixes GTK extension issue
     const filter = {
@@ -322,7 +323,7 @@ export const useExportStore = defineStore('export', () => {
 
     try {
       const outputPathRaw = await save({
-        defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+        defaultPath: `${lastFolder}/${defaultName}`,
         filters: [filter],
       });
 
@@ -620,7 +621,7 @@ export const useExportStore = defineStore('export', () => {
 
     const format = profile.format;
     const defaultName = `${track.name.replace(/[^a-zA-Z0-9]/g, '_')}.${format}`;
-    const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+    const lastFolder = settingsStore.settings.lastExportFolder || await homeDir();
 
     const filter = {
       name: FORMAT_LABELS[format] || format.toUpperCase(),
@@ -629,7 +630,7 @@ export const useExportStore = defineStore('export', () => {
 
     try {
       const outputPathRaw = await save({
-        defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+        defaultPath: `${lastFolder}/${defaultName}`,
         filters: [filter],
       });
 
@@ -840,11 +841,11 @@ export const useExportStore = defineStore('export', () => {
 
     const trackName = tracksStore.tracks[0]?.name || 'audio';
     const defaultName = `${trackName.replace(/[^a-zA-Z0-9]/g, '_')}_no_silence.${format}`;
-    const lastFolder = settingsStore.settings.lastExportFolder || undefined;
+    const lastFolder = settingsStore.settings.lastExportFolder || await homeDir();
 
     try {
       const outputPath = await save({
-        defaultPath: lastFolder ? `${lastFolder}/${defaultName}` : defaultName,
+        defaultPath: `${lastFolder}/${defaultName}`,
         filters: [
           { name: FORMAT_LABELS[format] || format.toUpperCase(), extensions: [format] },
         ],
