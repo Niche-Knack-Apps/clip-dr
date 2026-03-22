@@ -506,13 +506,18 @@ fn run_moonshine_inference(
 fn init_session(path: &Path) -> Result<Session, String> {
     let providers = vec![CPUExecutionProvider::default().build()];
 
+    // Disable graph optimization (models are pre-optimized) and parallel execution
+    // (ORT's thread pool deadlocks with Tokio's spawn_blocking pool).
+    // Limit intra-op threads to 4 to avoid CPU contention.
     Session::builder()
         .map_err(|e| format!("Session builder error: {}", e))?
-        .with_optimization_level(GraphOptimizationLevel::Level1)
+        .with_optimization_level(GraphOptimizationLevel::Disable)
         .map_err(|e| format!("Optimization level error: {}", e))?
         .with_execution_providers(providers)
         .map_err(|e| format!("Execution provider error: {}", e))?
-        .with_parallel_execution(true)
+        .with_intra_threads(4)
+        .map_err(|e| format!("Intra threads error: {}", e))?
+        .with_parallel_execution(false)
         .map_err(|e| format!("Parallel execution error: {}", e))?
         .commit_from_file(path)
         .map_err(|e| format!("Failed to load ONNX model {:?}: {}", path, e))
