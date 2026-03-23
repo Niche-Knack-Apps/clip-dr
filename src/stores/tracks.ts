@@ -414,6 +414,7 @@ export const useTracksStore = defineStore('tracks', () => {
       id: generateId(),
       channelIndex: 0,
       kind: 'left',
+      volume: track.volume,
       clips: parentClips.map(c => {
         const groupId = generateId();
         return { ...c, linkedClipGroupId: groupId };
@@ -423,6 +424,7 @@ export const useTracksStore = defineStore('tracks', () => {
       id: generateId(),
       channelIndex: 1,
       kind: 'right',
+      volume: track.volume,
       clips: parentClips.map((c, i) => ({
         ...c,
         id: generateId(),
@@ -2999,6 +3001,49 @@ export const useTracksStore = defineStore('tracks', () => {
     return a.value + (b.value - a.value) * t;
   }
 
+  // ── Per-lane volume methods ──
+
+  function getChannelLane(trackId: string, channelIndex: number): import('@/shared/types').ChannelLane | undefined {
+    const track = getTrackById(trackId);
+    return track?.channelLanes?.find(l => l.channelIndex === channelIndex);
+  }
+
+  function setChannelLaneVolume(trackId: string, channelIndex: number, volume: number): void {
+    const lane = getChannelLane(trackId, channelIndex);
+    if (!lane) return;
+    lane.volume = volume;
+    triggerRef(tracks);
+  }
+
+  function addChannelLaneVolumePoint(trackId: string, channelIndex: number, time: number, value: number): void {
+    const lane = getChannelLane(trackId, channelIndex);
+    if (!lane) return;
+    useHistoryStore().pushState('Add volume point');
+    if (!lane.volumeEnvelope) lane.volumeEnvelope = [];
+    lane.volumeEnvelope.push({ id: generateId(), time, value });
+    lane.volumeEnvelope.sort((a, b) => a.time - b.time);
+    triggerRef(tracks);
+  }
+
+  function updateChannelLaneVolumePoint(trackId: string, channelIndex: number, pointId: string, time: number, value: number): void {
+    const lane = getChannelLane(trackId, channelIndex);
+    if (!lane?.volumeEnvelope) return;
+    const point = lane.volumeEnvelope.find(p => p.id === pointId);
+    if (!point) return;
+    point.time = time;
+    point.value = value;
+    lane.volumeEnvelope.sort((a, b) => a.time - b.time);
+    triggerRef(tracks);
+  }
+
+  function removeChannelLaneVolumePoint(trackId: string, channelIndex: number, pointId: string): void {
+    const lane = getChannelLane(trackId, channelIndex);
+    if (!lane?.volumeEnvelope) return;
+    useHistoryStore().pushState('Remove volume point');
+    lane.volumeEnvelope = lane.volumeEnvelope.filter(p => p.id !== pointId);
+    triggerRef(tracks);
+  }
+
   /** Add a keyframe to a track's volume envelope. */
   function addVolumePoint(trackId: string, time: number, value: number): void {
     const idx = tracks.value.findIndex((t) => t.id === trackId);
@@ -3425,6 +3470,11 @@ export const useTracksStore = defineStore('tracks', () => {
     addVolumePoint,
     updateVolumePoint,
     removeVolumePoint,
+    getChannelLane,
+    setChannelLaneVolume,
+    addChannelLaneVolumePoint,
+    updateChannelLaneVolumePoint,
+    removeChannelLaneVolumePoint,
     getVolumeAtTime,
     adjustVolumeEnvelopeForCut,
     adjustVolumeEnvelopeForDelete,

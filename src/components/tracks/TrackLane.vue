@@ -514,6 +514,22 @@ function handleVolumeDbChange(db: number) {
   emit('setVolume', props.track.id, linear, volumeDragging.value);
 }
 
+// Per-lane volume
+function laneVolumeDb(ch: number): number {
+  const lane = tracksStore.getChannelLane(props.track.id, ch);
+  const vol = lane?.volume ?? props.track.volume;
+  if (vol <= 0) return MIN_VOLUME_DB;
+  return linearToDb(vol);
+}
+function laneVolumeDbLabel(ch: number): string {
+  const lane = tracksStore.getChannelLane(props.track.id, ch);
+  return formatDb(lane?.volume ?? props.track.volume);
+}
+function handleLaneVolumeDbChange(ch: number, db: number) {
+  const linear = db <= MIN_VOLUME_DB ? 0 : dbToLinear(db);
+  tracksStore.setChannelLaneVolume(props.track.id, ch, linear);
+}
+
 // Draw static waveform for importing tracks (progressive fill-in)
 function drawImportWaveform() {
   const canvas = importWaveformRef.value;
@@ -748,8 +764,35 @@ onUnmounted(() => {
       </div>
 
       <!-- Bottom row: meter + volume slider (dB scale, only when expanded) -->
+      <!-- Stereo view: per-lane volume controls -->
+      <template v-if="showVolumeSlider && isStereoView">
+        <div
+          v-for="ch in [0, 1]"
+          :key="`vol-${ch}`"
+          class="flex items-center gap-1"
+          :class="ch === 0 ? 'mt-auto' : ''"
+          @mousedown.stop
+          @dragstart.prevent
+        >
+          <span class="text-[8px] font-mono text-gray-500 w-2 shrink-0">{{ ch === 0 ? 'L' : 'R' }}</span>
+          <TrackMeter v-if="!track.muted" :track-id="track.id" :channel="ch" class="shrink-0" />
+          <InfiniteKnob
+            :model-value="laneVolumeDb(ch)"
+            :min="MIN_VOLUME_DB"
+            :max="MAX_VOLUME_DB"
+            :step="0.5"
+            :default-value="0"
+            :format-value="() => laneVolumeDbLabel(ch)"
+            class="flex-1"
+            @update:model-value="(db: number) => handleLaneVolumeDbChange(ch, db)"
+            @drag-start="handleVolumeDragStart"
+            @drag-end="handleVolumeDragEnd"
+          />
+        </div>
+      </template>
+      <!-- Mono view: single volume control -->
       <div
-        v-if="showVolumeSlider"
+        v-else-if="showVolumeSlider"
         class="flex items-center gap-1 mt-auto"
         @mousedown.stop
         @dragstart.prevent
@@ -829,6 +872,14 @@ onUnmounted(() => {
             @drag-start="handleClipDragStart"
             @trim-start="handleTrimStart"
           />
+          <!-- Per-lane volume envelope -->
+          <VolumeEnvelope
+            v-if="!isImporting && containerWidth > 0 && track.channelLanes?.[ch]"
+            :track="track"
+            :channel-lane="track.channelLanes[ch]"
+            :container-width="containerWidth"
+            :duration="duration"
+          />
         </div>
       </template>
       <!-- Mono view: single lane (existing behavior) -->
@@ -850,9 +901,9 @@ onUnmounted(() => {
         />
       </template>
 
-      <!-- Volume automation envelope overlay -->
+      <!-- Volume automation envelope overlay (mono view only — stereo has per-lane envelopes in sub-lanes) -->
       <VolumeEnvelope
-        v-if="!isImporting && containerWidth > 0"
+        v-if="!isImporting && containerWidth > 0 && !isStereoView"
         :track="track"
         :container-width="containerWidth"
         :duration="duration"

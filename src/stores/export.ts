@@ -410,14 +410,15 @@ export const useExportStore = defineStore('export', () => {
           for (const clip of lane.clips) {
             const sourcePath = clip.sourceFile || t.cachedAudioPath || t.sourcePath!;
             const envelopeOffset = clip.clipStart - (t.trackStart ?? 0);
-            const clipEnvelope = t.volumeEnvelope
+            const laneEnvelope = lane.volumeEnvelope ?? t.volumeEnvelope;
+            const clipEnvelope = laneEnvelope
               ?.map(p => ({ time: p.time - envelopeOffset, value: p.value }))
               .filter(p => p.time >= 0 && p.time <= clip.duration);
             edlTracks.push({
               source_path: sourcePath,
               track_start: clip.clipStart,
               duration: clip.duration,
-              volume: t.volume,
+              volume: lane.volume ?? t.volume,
               file_offset: clip.sourceOffset ?? 0,
               volume_envelope: clipEnvelope,
               source_channel: lane.channelIndex,

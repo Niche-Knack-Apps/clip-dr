@@ -198,6 +198,10 @@ export interface ChannelLane {
   kind: LaneKind;
   clips: TrackClip[];
   waveformData?: number[];
+  /** Per-lane linear gain (default 1.0 = 0dB). Overrides track.volume for this channel. */
+  volume?: number;
+  /** Per-lane volume automation envelope. Overrides track.volumeEnvelope for this channel. */
+  volumeEnvelope?: VolumeAutomationPoint[];
 }
 
 
