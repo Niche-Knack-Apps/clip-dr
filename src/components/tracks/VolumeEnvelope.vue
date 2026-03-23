@@ -82,8 +82,24 @@ const clipRects = computed(() => {
 const unityY = computed(() => valueToY(1.0));
 
 // Get points for the polyline — use lane envelope if provided, otherwise track-level
-const effectiveVolume = computed(() => props.channelLane?.volume ?? props.track.volume);
-const effectiveEnvelope = computed(() => props.channelLane?.volumeEnvelope ?? props.track.volumeEnvelope);
+// Touch tracksStore.tracks to react to triggerRef(tracks) after volume changes
+const effectiveVolume = computed(() => {
+  void tracksStore.tracks;
+  // Re-read lane from store for fresh data (prop may be stale after shallowRef mutation)
+  if (props.channelLane) {
+    const freshLane = tracksStore.getChannelLane(props.track.id, props.channelLane.channelIndex);
+    return freshLane?.volume ?? props.track.volume;
+  }
+  return props.track.volume;
+});
+const effectiveEnvelope = computed(() => {
+  void tracksStore.tracks;
+  if (props.channelLane) {
+    const freshLane = tracksStore.getChannelLane(props.track.id, props.channelLane.channelIndex);
+    return freshLane?.volumeEnvelope ?? props.track.volumeEnvelope;
+  }
+  return props.track.volumeEnvelope;
+});
 
 const envelopePoints = computed(() => {
   const env = effectiveEnvelope.value;
