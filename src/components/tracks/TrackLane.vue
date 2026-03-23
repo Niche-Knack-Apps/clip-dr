@@ -529,14 +529,24 @@ function handleVolumeDbChange(db: number) {
   emit('setVolume', props.track.id, linear, volumeDragging.value);
 }
 
-// Per-lane volume
-function laneVolumeDb(ch: number): number {
-  const lane = tracksStore.getChannelLane(props.track.id, ch);
+// Per-lane volume (reactive computeds so sliders update when volume changes)
+const laneVolumeDbL = computed(() => {
+  void tracksStore.tracks;
+  const lane = tracksStore.getChannelLane(props.track.id, 0);
   const vol = lane?.volume ?? props.track.volume;
-  if (vol <= 0) return MIN_VOLUME_DB;
-  return linearToDb(vol);
+  return vol <= 0 ? MIN_VOLUME_DB : linearToDb(vol);
+});
+const laneVolumeDbR = computed(() => {
+  void tracksStore.tracks;
+  const lane = tracksStore.getChannelLane(props.track.id, 1);
+  const vol = lane?.volume ?? props.track.volume;
+  return vol <= 0 ? MIN_VOLUME_DB : linearToDb(vol);
+});
+function laneVolumeDb(ch: number): number {
+  return ch === 0 ? laneVolumeDbL.value : laneVolumeDbR.value;
 }
 function laneVolumeDbLabel(ch: number): string {
+  void tracksStore.tracks;
   const lane = tracksStore.getChannelLane(props.track.id, ch);
   return formatDb(lane?.volume ?? props.track.volume);
 }
