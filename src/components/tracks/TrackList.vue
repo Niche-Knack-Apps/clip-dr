@@ -451,8 +451,21 @@ let clipDragOriginalDuration: number | null = null;
 
 // Clip drag handlers (for moving clips on timeline)
 function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number, event?: MouseEvent) {
+  // Auto-materialize channel lanes for unlinked stereo tracks on first drag
+  const dragTrack = tracksStore.getTrackById(trackId);
+  if (dragTrack && dragTrack.channelLinked === false && !dragTrack.channelLanes) {
+    tracksStore.materializeChannelLanes(trackId);
+  }
+
   // Capture original clip position before drag modifies it
-  const clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
+  // Search both parent clips and lane clips
+  let clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
+  if (!clip && dragTrack?.channelLanes) {
+    for (const lane of dragTrack.channelLanes) {
+      clip = lane.clips.find(c => c.id === clipId);
+      if (clip) break;
+    }
+  }
   clipDragOriginalStart = clip?.clipStart ?? null;
   clipDragOriginalDuration = clip?.duration ?? null;
 

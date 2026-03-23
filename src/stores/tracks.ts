@@ -1497,11 +1497,24 @@ export const useTracksStore = defineStore('tracks', () => {
       return;
     }
 
-    // Find the clip being moved
-    const clipIndex = track.clips.findIndex((c) => c.id === clipId);
+    // Find the clip being moved — check parent clips first, then channel lanes
+    let clipIndex = track.clips.findIndex((c) => c.id === clipId);
+    let targetClips = track.clips;
+
+    // If not found in parent clips, search channel lanes
+    if (clipIndex === -1 && track.channelLanes) {
+      for (const lane of track.channelLanes) {
+        const idx = lane.clips.findIndex(c => c.id === clipId);
+        if (idx !== -1) {
+          clipIndex = idx;
+          targetClips = lane.clips;
+          break;
+        }
+      }
+    }
     if (clipIndex === -1) return;
 
-    const clip = track.clips[clipIndex];
+    const clip = targetClips[clipIndex];
 
     // Calculate snapped position (with overlap prevention)
     const snappedStart = getSnappedClipPosition(
@@ -1514,8 +1527,8 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Only update the clip's position, don't recalculate track bounds
     // This prevents timeline duration from changing during drag
-    track.clips[clipIndex] = {
-      ...track.clips[clipIndex],
+    targetClips[clipIndex] = {
+      ...targetClips[clipIndex],
       clipStart: snappedStart,
     };
 

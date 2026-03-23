@@ -124,6 +124,16 @@ const trackClips = computed(() => {
   return tracksStore.getTrackClips(props.track.id);
 });
 
+/** Get clips for a specific channel lane. Uses materialized lane clips if available, otherwise parent clips. */
+function getLaneClips(channelIndex: number) {
+  const lanes = props.track.channelLanes;
+  if (lanes) {
+    const lane = lanes.find(l => l.channelIndex === channelIndex);
+    if (lane) return lane.clips;
+  }
+  return trackClips.value;
+}
+
 // Track timemarks with pixel positions
 // Read through tracksStore.tracks shallowRef so triggerRef(tracks) invalidates this computed
 const trackTimemarks = computed(() => {
@@ -783,9 +793,9 @@ onUnmounted(() => {
           </span>
           <!-- Lane divider (between L and R) -->
           <div v-if="ch === 1" class="absolute top-0 left-0 right-0 h-px bg-gray-700/60 z-10 pointer-events-none" />
-          <!-- Clips for this channel -->
+          <!-- Clips for this channel (use lane clips if materialized, otherwise parent clips) -->
           <ClipRegion
-            v-for="clip in trackClips"
+            v-for="clip in getLaneClips(ch)"
             :key="`${clip.id}-ch${ch}`"
             :track="track"
             :clip="clip"
