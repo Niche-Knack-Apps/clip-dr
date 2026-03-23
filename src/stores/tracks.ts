@@ -3009,9 +3009,23 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function setChannelLaneVolume(trackId: string, channelIndex: number, volume: number): void {
-    const lane = getChannelLane(trackId, channelIndex);
-    if (!lane) return;
+    const track = getTrackById(trackId);
+    if (!track) return;
+    const lane = track.channelLanes?.find(l => l.channelIndex === channelIndex);
+    if (!lane) {
+      // No lanes materialized — fall back to track-level volume
+      track.volume = volume;
+      triggerRef(tracks);
+      return;
+    }
     lane.volume = volume;
+    // When linked, set both lanes + track volume together
+    if (track.channelLinked !== false && track.channelLanes) {
+      for (const otherLane of track.channelLanes) {
+        otherLane.volume = volume;
+      }
+      track.volume = volume;
+    }
     triggerRef(tracks);
   }
 
