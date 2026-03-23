@@ -423,6 +423,8 @@ export const useTracksStore = defineStore('tracks', () => {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex !== -1) {
       tracks.value[trackIndex] = { ...track, channelLanes: [laneL, laneR] };
+      // Invalidate cached trackMap so getTrackById returns the new object during drag
+      _cachedTrackMap = null;
       triggerRef(tracks);
     }
     console.log(`[Tracks] Materialized channel lanes for ${tracks.value[trackIndex]?.name}: L=${laneL.clips.length} clips (IDs kept), R=${laneR.clips.length} clips (new IDs)`);
@@ -1862,6 +1864,8 @@ export const useTracksStore = defineStore('tracks', () => {
       trackStart: firstClipStart,
       duration: newDuration,
     };
+    // Invalidate cached trackMap so getTrackById returns the new object
+    _cachedTrackMap = null;
 
     // Shift envelope points to match new track bounds
     adjustEnvelopeForBoundsChange(trackIndex, oldTrackStart, firstClipStart, newDuration);
