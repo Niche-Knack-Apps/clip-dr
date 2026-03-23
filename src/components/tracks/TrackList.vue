@@ -451,14 +451,7 @@ let clipDragOriginalDuration: number | null = null;
 
 // Clip drag handlers (for moving clips on timeline)
 function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number, event?: MouseEvent) {
-  // Auto-materialize channel lanes for unlinked stereo tracks on first drag
-  const dragTrack = tracksStore.getTrackById(trackId);
-  if (dragTrack && dragTrack.channelLinked === false && !dragTrack.channelLanes) {
-    tracksStore.materializeChannelLanes(trackId);
-  }
-
-  // After materialization, resolve the effective clip ID.
-  // Re-read track (materializeChannelLanes may have replaced the object).
+  // Lane materialization now happens eagerly in toggleChannelLinked (not here).
   // Search lane clips FIRST (they have priority), then parent clips.
   const currentTrack = tracksStore.getTrackById(trackId);
   let effectiveClipId = clipId;

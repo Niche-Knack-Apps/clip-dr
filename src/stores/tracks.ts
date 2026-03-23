@@ -367,13 +367,24 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   function toggleChannelLinked(trackId: string): void {
-    const track = getTrackById(trackId);
+    let track = getTrackById(trackId);
     if (!track) return;
     // Accept stereo tracks by channelMode OR by actual channel count
     const isStereo = track.channelMode === 'stereo' || (track.audioData.channels ?? 1) >= 2;
     if (!isStereo) return;
     useHistoryStore().pushState('Toggle channel link');
-    track.channelLinked = track.channelLinked === false ? true : false;
+    const newLinked = track.channelLinked === false ? true : false;
+
+    // Materialize lanes eagerly on unlink (not lazily during drag).
+    // Lazy materialization during drag replaces the track object mid-drag,
+    // causing Vue to destroy/recreate ClipRegion components and orphan mouse listeners.
+    if (!newLinked && !track.channelLanes) {
+      materializeChannelLanes(trackId);
+      // Re-read track — materializeChannelLanes replaced the object
+      track = getTrackById(trackId)!;
+    }
+
+    track.channelLinked = newLinked;
     triggerRef(tracks);
     console.log(`[Tracks] Channel ${track.channelLinked ? 'linked' : 'unlinked'}: ${track.name}`);
   }
@@ -1518,22 +1529,27 @@ export const useTracksStore = defineStore('tracks', () => {
 
     let targetLane: import('@/shared/types').ChannelLane | null = null;
     if (track.channelLanes) {
+      console.warn(`[setClipStart] Track has ${track.channelLanes.length} lanes, searching for clip ${clipId.slice(0,8)}`);
       for (const lane of track.channelLanes) {
         const idx = lane.clips.findIndex(c => c.id === clipId);
         if (idx !== -1) {
           clipIndex = idx;
           targetClips = lane.clips;
           targetLane = lane;
+          console.warn(`[setClipStart] FOUND in ${lane.kind} lane at idx ${idx}`);
           break;
         }
       }
+    } else {
+      console.warn(`[setClipStart] Track has NO channelLanes, clip ${clipId.slice(0,8)}`);
     }
     // Fall back to parent clips if not found in lanes
     if (clipIndex === -1) {
       clipIndex = track.clips.findIndex((c) => c.id === clipId);
       targetClips = track.clips;
+      console.warn(`[setClipStart] Fell back to parent clips, found at idx ${clipIndex}`);
     }
-    if (clipIndex === -1) return;
+    if (clipIndex === -1) { console.warn('[setClipStart] CLIP NOT FOUND ANYWHERE'); return; }
 
     const clip = targetClips[clipIndex];
 
@@ -1548,6 +1564,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Only update the clip's position, don't recalculate track bounds
     // This prevents timeline duration from changing during drag
+    console.warn(`[setClipStart] ${targetLane ? 'LANE' : 'PARENT'} clip: ${clip.clipStart.toFixed(2)} → ${snappedStart.toFixed(2)}`);
     targetClips[clipIndex] = {
       ...targetClips[clipIndex],
       clipStart: snappedStart,
