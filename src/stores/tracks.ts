@@ -1516,12 +1516,14 @@ export const useTracksStore = defineStore('tracks', () => {
     let clipIndex = -1;
     let targetClips = track.clips;
 
+    let targetLane: import('@/shared/types').ChannelLane | null = null;
     if (track.channelLanes) {
       for (const lane of track.channelLanes) {
         const idx = lane.clips.findIndex(c => c.id === clipId);
         if (idx !== -1) {
           clipIndex = idx;
           targetClips = lane.clips;
+          targetLane = lane;
           break;
         }
       }
@@ -1546,12 +1548,16 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Only update the clip's position, don't recalculate track bounds
     // This prevents timeline duration from changing during drag
-    const isLaneClip = targetClips !== track.clips;
-    console.log(`[setClipStart] ${isLaneClip ? 'LANE' : 'PARENT'} clip ${clipId.slice(0,8)}: ${clip.clipStart.toFixed(2)} → ${snappedStart.toFixed(2)}`);
     targetClips[clipIndex] = {
       ...targetClips[clipIndex],
       clipStart: snappedStart,
     };
+
+    // For lane clips: replace the lane's clips array reference so Vue computeds
+    // detect the change (same array ref = computed short-circuits = no re-render)
+    if (targetLane) {
+      targetLane.clips = [...targetLane.clips];
+    }
 
     // Expand minTimelineDuration if dragging extends the timeline
     const newExtent = snappedStart + clip.duration;
