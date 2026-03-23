@@ -69,7 +69,7 @@ function xToTime(x: number): number {
 
 // Clip regions in pixel coordinates — used to mask envelope to clip bounds only
 const clipRects = computed(() => {
-  const clips = tracksStore.getTrackClips(props.track.id);
+  const clips = props.channelLane?.clips ?? tracksStore.getTrackClips(props.track.id);
   return clips.map(clip => {
     const trackRelativeStart = clip.clipStart - props.track.trackStart;
     const x = timeToX(trackRelativeStart);
@@ -250,7 +250,7 @@ onUnmounted(() => {
       </clipPath>
     </defs>
 
-    <g :clip-path="`url(#envelope-clip-${track.id})`">
+    <g :clip-path="`url(#envelope-clip-${envelopeId})`">
     <!-- Semi-transparent fill below the curve -->
     <polygon
       v-if="polygonPoints"
