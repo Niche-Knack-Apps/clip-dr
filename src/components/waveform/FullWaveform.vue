@@ -66,7 +66,10 @@ const outPoint = computed(() => selectionStore.inOutPoints.outPoint);
 // All timemarks from audible tracks with pixel positions (full timeline: 0 to duration).
 // Markers follow track audibility: if any track is solo'd, only show markers for solo'd tracks;
 // otherwise hide markers for muted tracks. This ensures markers represent content the user can hear.
+// Cached during drag — hidden via v-show anyway, skip recomputation
+let _cachedTimemarks: { id: string; trackId: string; label: string; color: string; pixelLeft: number; time: number; trackStart: number }[] = [];
 const allTimemarks = computed(() => {
+  if (uiStore.isClipDragActive && _cachedTimemarks.length > 0) return _cachedTimemarks;
   const dur = duration.value;
   if (dur <= 0 || containerWidth.value <= 0) return [];
   const hasSolo = tracksStore.tracks.some(t => t.solo);
@@ -89,6 +92,7 @@ const allTimemarks = computed(() => {
       });
     }
   }
+  _cachedTimemarks = marks;
   return marks;
 });
 
@@ -272,7 +276,10 @@ function handleResizeEnd(newEnd: number) {
 
 // Aggregate silence regions from audible tracks (each tagged with its trackId for edit ops).
 // Follows the same mute/solo filtering as timemarks — silence for muted/non-solo'd tracks is hidden.
+// Cached during drag — hidden via v-show anyway
+let _cachedSilenceRegions: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsForTrack>[number] }[] = [];
 const allSilenceRegions = computed(() => {
+  if (uiStore.isClipDragActive && _cachedSilenceRegions.length > 0) return _cachedSilenceRegions;
   const hasSolo = tracksStore.tracks.some(t => t.solo);
   const result: { trackId: string; region: ReturnType<typeof silenceStore.getRegionsForTrack>[number] }[] = [];
   for (const track of tracksStore.tracks) {
@@ -282,6 +289,7 @@ const allSilenceRegions = computed(() => {
       result.push({ trackId: track.id, region });
     }
   }
+  _cachedSilenceRegions = result;
   return result;
 });
 

@@ -32,11 +32,15 @@ export const useTracksStore = defineStore('tracks', () => {
   function bumpSyncEpoch() { syncEpoch.value++; }
 
   // PERF-06: O(1) track lookup by ID — rebuilt when tracks array reference changes
+  // Cached during clip drag (no tracks added/removed during drag)
+  let _cachedTrackMap: Map<string, Track> | null = null;
   const trackMap = computed(() => {
+    if (useUIStore().isClipDragActive && _cachedTrackMap) return _cachedTrackMap;
     const map = new Map<string, Track>();
     for (const t of tracks.value) {
       map.set(t.id, t);
     }
+    _cachedTrackMap = map;
     return map;
   });
 
@@ -116,8 +120,12 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Computed: Timeline duration is the max end time of all tracks
   // Uses minTimelineDuration as a floor to prevent shrinking when dragging clips left
+  // During drag: skip O(tracks) scan, return floor (maintained by setClipStart)
   const timelineDuration = computed(() => {
     if (tracks.value.length === 0) return minTimelineDuration.value;
+    if (useUIStore().isClipDragActive && minTimelineDuration.value > 0) {
+      return minTimelineDuration.value;
+    }
     const actualDuration = Math.max(...tracks.value.map((t) => t.trackStart + t.duration));
     return Math.max(actualDuration, minTimelineDuration.value);
   });
@@ -656,7 +664,7 @@ export const useTracksStore = defineStore('tracks', () => {
     if (!movingClip) return false;
 
     const historyStore = useHistoryStore();
-    historyStore.beginBatch('Move clip to track');
+    historyStore.beginBatch('Move clip to track', { skipTranscriptions: true });
     try {
       // Build the clip for the target (propagate sourceIn/sourceDuration for edge trim recovery)
       const newClip: TrackClip = {

@@ -5,6 +5,7 @@ import { useSelectionStore } from './selection';
 import { useTracksStore } from './tracks';
 import { useSilenceStore } from './silence';
 import { useMeterStore } from './meter';
+import { useUIStore } from './ui';
 import type { LoopMode } from '@/shared/constants';
 import type { Track } from '@/shared/types';
 import { isTrackPlayable, filterActiveTracks } from '@/shared/utils';
@@ -531,9 +532,11 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   // Watch for track volume changes during playback — sync to Rust engine live
   // Uses hash-based approach (matching mute/solo watcher) to avoid deep comparison overhead
+  // Guarded during clip drag — volume never changes during drag, avoid O(tracks) per frame
   let lastVolumeKey = 0;
   watch(
     () => {
+      if (useUIStore().isClipDragActive) return lastVolumeKey;
       const tracks = tracksStore.tracks;
       let key = tracks.length;
       for (const t of tracks) {
@@ -554,9 +557,11 @@ export const usePlaybackStore = defineStore('playback', () => {
 
   // Watch for volume envelope changes during playback — sync to Rust engine live
   // Uses numeric hash instead of string concatenation to avoid O(tracks*points) string ops per frame
+  // Guarded during clip drag — envelopes never change during drag
   watch(
     () => {
       if (!isPlaying.value) return 0;
+      if (useUIStore().isClipDragActive) return 0;
       const tracks = tracksStore.tracks;
       let hash = tracks.length;
       for (const t of tracks) {
@@ -584,9 +589,11 @@ export const usePlaybackStore = defineStore('playback', () => {
   );
 
   // Watch for track mute/solo changes during playback — sync to Rust engine
+  // Guarded during clip drag — mute/solo never change during drag
   let lastTracksKey = 0;
   watch(
     () => {
+      if (useUIStore().isClipDragActive) return lastTracksKey;
       const tracks = tracksStore.tracks;
       let key = tracks.length;
       for (const t of tracks) {
