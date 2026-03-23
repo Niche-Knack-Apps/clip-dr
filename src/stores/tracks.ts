@@ -1444,7 +1444,13 @@ export const useTracksStore = defineStore('tracks', () => {
       if (d0 < bestSnapDist) { bestSnapDist = d0; snappedStart = 0; }
 
       for (const t of tracks.value) {
-        const clips = getTrackClips(t.id);
+        // Use lane clips when materialized, otherwise parent clips
+        let clips: TrackClip[];
+        if (t.channelLanes && t.channelLanes.length > 0) {
+          clips = t.channelLanes.flatMap(lane => lane.clips);
+        } else {
+          clips = getTrackClips(t.id);
+        }
         for (const other of clips) {
           if (t.id === trackId && other.id === clipId) continue;
           const otherEnd = other.clipStart + other.duration;
@@ -1465,7 +1471,21 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     // Get same-track clips for overlap prevention
-    const allClips = getTrackClips(trackId);
+    // Use lane clips when materialized to avoid false overlaps with parent clips
+    let allClips: TrackClip[];
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      // Find which lane this clip is in and only check overlap within that lane
+      let laneClips: TrackClip[] | null = null;
+      for (const lane of track.channelLanes) {
+        if (lane.clips.some(c => c.id === clipId)) {
+          laneClips = lane.clips;
+          break;
+        }
+      }
+      allClips = laneClips ?? getTrackClips(trackId);
+    } else {
+      allClips = getTrackClips(trackId);
+    }
     const otherClips = allClips.filter((c) => c.id !== clipId);
     const sortedClips = [...otherClips].sort((a, b) => a.clipStart - b.clipStart);
 
