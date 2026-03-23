@@ -518,5 +518,7 @@ export interface ExportEDLTrack {
   fade_in?: number;
   /** Linear fade-out duration in seconds at clip end (silence crossfade) */
   fade_out?: number;
+  /** Source channel to extract (undefined = all channels, 0 = left, 1 = right) */
+  source_channel?: number;
 }
 

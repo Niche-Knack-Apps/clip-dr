@@ -368,11 +368,52 @@ export const useTracksStore = defineStore('tracks', () => {
 
   function toggleChannelLinked(trackId: string): void {
     const track = getTrackById(trackId);
-    if (!track || track.channelMode !== 'stereo') return;
+    if (!track) return;
+    // Accept stereo tracks by channelMode OR by actual channel count
+    const isStereo = track.channelMode === 'stereo' || (track.audioData.channels ?? 1) >= 2;
+    if (!isStereo) return;
     useHistoryStore().pushState('Toggle channel link');
-    track.channelLinked = !track.channelLinked;
+    track.channelLinked = track.channelLinked === false ? true : false;
     triggerRef(tracks);
     console.log(`[Tracks] Channel ${track.channelLinked ? 'linked' : 'unlinked'}: ${track.name}`);
+  }
+
+  /**
+   * Materialize channel lanes for a stereo track.
+   * Clones parent clips into L and R lanes with shared linkedClipGroupIds.
+   * Called on first independent edit after unlinking.
+   */
+  function materializeChannelLanes(trackId: string): void {
+    const track = getTrackById(trackId);
+    if (!track) return;
+    const isStereo = track.channelMode === 'stereo' || (track.audioData.channels ?? 1) >= 2;
+    if (!isStereo) return;
+    if (track.channelLanes) return; // already materialized
+
+    const parentClips = getTrackClips(trackId);
+    const laneL: import('@/shared/types').ChannelLane = {
+      id: generateId(),
+      channelIndex: 0,
+      kind: 'left',
+      clips: parentClips.map(c => {
+        const groupId = c.linkedClipGroupId || generateId();
+        return { ...c, id: generateId(), linkedClipGroupId: groupId };
+      }),
+    };
+    const laneR: import('@/shared/types').ChannelLane = {
+      id: generateId(),
+      channelIndex: 1,
+      kind: 'right',
+      clips: parentClips.map((c, i) => ({
+        ...c,
+        id: generateId(),
+        linkedClipGroupId: laneL.clips[i].linkedClipGroupId,
+      })),
+    };
+
+    track.channelLanes = [laneL, laneR];
+    triggerRef(tracks);
+    console.log(`[Tracks] Materialized channel lanes for ${track.name}: L=${laneL.clips.length} clips, R=${laneR.clips.length} clips`);
   }
 
   function setTrackMuted(trackId: string, muted: boolean): void {
@@ -3240,6 +3281,7 @@ export const useTracksStore = defineStore('tracks', () => {
     clearClipSelection,
     setTrackMuted,
     toggleChannelLinked,
+    materializeChannelLanes,
     setTrackSolo,
     setTrackVolume,
     renameTrack,
