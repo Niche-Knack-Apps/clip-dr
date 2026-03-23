@@ -12,7 +12,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import type { ExportFormat, ExportProfile } from '@/shared/types';
 import { ALL_SHORTCUT_HINTS, DEFAULT_SETTINGS } from '@/shared/constants';
 
-const APP_VERSION = '0.27.40';
+const APP_VERSION = '0.27.43';
 
 const emit = defineEmits<{
   close: [];
@@ -310,7 +310,7 @@ onMounted(async () => {
               <label class="block text-xs text-gray-400 mb-1">Default Source</label>
               <select
                 :value="settingsStore.settings.defaultRecordingSource"
-                class="w-full h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                class="w-full py-1.5 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
                 @change="settingsStore.setDefaultRecordingSource(($event.target as HTMLSelectElement).value as any)"
               >
                 <option value="microphone">Microphone</option>
@@ -477,7 +477,7 @@ onMounted(async () => {
               <label class="block text-xs text-gray-400 mb-1">ASR Model</label>
               <select
                 :value="settingsStore.settings.asrModel"
-                class="w-full h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                class="w-full py-1.5 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
                 @change="settingsStore.setASRModel(($event.target as HTMLSelectElement).value as any)"
               >
                 <option value="whisper-tiny">Whisper Tiny (Fastest)</option>

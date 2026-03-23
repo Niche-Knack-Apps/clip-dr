@@ -17,6 +17,19 @@ defineEmits<{
 const recordingStore = useRecordingStore();
 const settingsStore = useSettingsStore();
 
+// Refresh sources state
+const refreshing = ref(false);
+const refreshLabel = ref('Refresh');
+
+async function handleRefresh() {
+  refreshing.value = true;
+  refreshLabel.value = 'Scanning...';
+  await recordingStore.refreshAllDevices();
+  refreshing.value = false;
+  refreshLabel.value = 'Done';
+  setTimeout(() => { refreshLabel.value = 'Refresh'; }, 1500);
+}
+
 // Timemark UI state
 const triggerPhrasesInput = ref('');
 const showTriggerPhrases = ref(false);
@@ -315,6 +328,22 @@ onUnmounted(() => {
           @click="recordingStore.removeScheduleEndTime()"
         >No limit</button>
       </div>
+    </div>
+
+    <!-- ========== Refresh Sources ========== -->
+    <div class="flex justify-end px-1 mb-1">
+      <button
+        class="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] transition-colors"
+        :class="refreshing ? 'text-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50'"
+        :disabled="refreshing"
+        title="Rescan audio devices"
+        @click="handleRefresh"
+      >
+        <svg class="w-3 h-3" :class="{ 'animate-spin': refreshing }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        {{ refreshLabel }}
+      </button>
     </div>
 
     <!-- ========== Microphones Section ========== -->

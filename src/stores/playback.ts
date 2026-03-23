@@ -643,6 +643,10 @@ export const usePlaybackStore = defineStore('playback', () => {
     if (isPlaying.value) {
       syncTracksToRust();
       syncMuteSoloToRust();
+      // Re-sync loop bounds when track geometry changes (e.g. edge trim, clip move)
+      if (loopEnabled.value) {
+        syncLoopToRust();
+      }
     }
   }, { flush: 'post' });
 
