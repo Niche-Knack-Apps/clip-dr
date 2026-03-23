@@ -1846,10 +1846,15 @@ export const useTracksStore = defineStore('tracks', () => {
       return;
     }
 
-    // Recalculate track bounds based on all clips
+    // Recalculate track bounds based on all clips (including channel lanes if materialized)
     const oldTrackStart = track.trackStart;
-    const firstClipStart = Math.min(...track.clips.map(c => c.clipStart));
-    const lastClipEnd = Math.max(...track.clips.map(c => c.clipStart + c.duration));
+    let allClips = track.clips;
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      // Use all clips from all lanes for bounds calculation
+      allClips = track.channelLanes.flatMap(lane => lane.clips);
+    }
+    const firstClipStart = Math.min(...allClips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
     const newDuration = lastClipEnd - firstClipStart;
 
     tracks.value[trackIndex] = {
