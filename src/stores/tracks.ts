@@ -384,14 +384,17 @@ export const useTracksStore = defineStore('tracks', () => {
    * Called on first independent edit after unlinking.
    */
   function materializeChannelLanes(trackId: string): void {
-    const track = getTrackById(trackId);
+    let track = getTrackById(trackId);
     if (!track) return;
     const isStereo = track.channelMode === 'stereo' || (track.audioData.channels ?? 1) >= 2;
     if (!isStereo) return;
     if (track.channelLanes) return; // already materialized
 
     // Promote to explicit clips first so we have stable IDs
+    // Note: promoteToExplicitClips replaces the track object via spread,
+    // so we must re-fetch the reference afterward.
     promoteToExplicitClips(trackId);
+    track = getTrackById(trackId)!;
 
     const parentClips = getTrackClips(trackId);
     // Each lane gets a COPY of the parent clips with same IDs initially.
