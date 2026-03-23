@@ -1546,6 +1546,8 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Only update the clip's position, don't recalculate track bounds
     // This prevents timeline duration from changing during drag
+    const isLaneClip = targetClips !== track.clips;
+    console.log(`[setClipStart] ${isLaneClip ? 'LANE' : 'PARENT'} clip ${clipId.slice(0,8)}: ${clip.clipStart.toFixed(2)} → ${snappedStart.toFixed(2)}`);
     targetClips[clipIndex] = {
       ...targetClips[clipIndex],
       clipStart: snappedStart,

@@ -458,15 +458,19 @@ function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: numb
   }
 
   // After materialization, resolve the effective clip ID.
-  // L lane keeps original IDs; for R lane clips (or any lane clip),
-  // search all lanes to find the clip.
+  // Re-read track (materializeChannelLanes may have replaced the object).
+  // Search lane clips FIRST (they have priority), then parent clips.
+  const currentTrack = tracksStore.getTrackById(trackId);
   let effectiveClipId = clipId;
-  let clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
-  if (!clip && dragTrack?.channelLanes) {
-    for (const lane of dragTrack.channelLanes) {
+  let clip: import('@/shared/types').TrackClip | undefined;
+  if (currentTrack?.channelLanes) {
+    for (const lane of currentTrack.channelLanes) {
       clip = lane.clips.find(c => c.id === clipId);
       if (clip) { effectiveClipId = clip.id; break; }
     }
+  }
+  if (!clip) {
+    clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
   }
   clipDragOriginalStart = clip?.clipStart ?? null;
   clipDragOriginalDuration = clip?.duration ?? null;

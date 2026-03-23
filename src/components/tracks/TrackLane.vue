@@ -275,8 +275,19 @@ const formattedDuration = computed(() => {
 function handleClipDragStart(clipId: string, event: MouseEvent) {
   if (event.button !== 0) return;
 
-  // Find the clip being dragged to get its original position
-  const clip = trackClips.value.find(c => c.id === clipId);
+  // Find the clip being dragged — search lane clips first (they have priority after materialization),
+  // then fall back to parent clips. This ensures we get the correct clipStart baseline for drag.
+  let clip: import('@/shared/types').TrackClip | undefined;
+  const t = tracksStore.getTrackById(props.track.id);
+  if (t?.channelLanes) {
+    for (const lane of t.channelLanes) {
+      clip = lane.clips.find(c => c.id === clipId);
+      if (clip) break;
+    }
+  }
+  if (!clip) {
+    clip = trackClips.value.find(c => c.id === clipId);
+  }
   if (!clip) return;
 
   // Don't start drag immediately - wait for threshold
