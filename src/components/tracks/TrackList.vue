@@ -457,13 +457,15 @@ function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: numb
     tracksStore.materializeChannelLanes(trackId);
   }
 
-  // Capture original clip position before drag modifies it
-  // Search both parent clips and lane clips
+  // After materialization, resolve the effective clip ID.
+  // L lane keeps original IDs; for R lane clips (or any lane clip),
+  // search all lanes to find the clip.
+  let effectiveClipId = clipId;
   let clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
   if (!clip && dragTrack?.channelLanes) {
     for (const lane of dragTrack.channelLanes) {
       clip = lane.clips.find(c => c.id === clipId);
-      if (clip) break;
+      if (clip) { effectiveClipId = clip.id; break; }
     }
   }
   clipDragOriginalStart = clip?.clipStart ?? null;
@@ -471,7 +473,7 @@ function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: numb
 
   useHistoryStore().pushState('Move clip', { skipTranscriptions: true });
   clipDraggingTrackId.value = trackId;
-  clipDraggingClipId.value = clipId;
+  clipDraggingClipId.value = effectiveClipId;
   clipDragTargetTrackId.value = trackId;
   dragGhostMouseOffsetX.value = mouseOffsetX;
   clipDragStartY.value = event?.clientY ?? 0;

@@ -390,14 +390,19 @@ export const useTracksStore = defineStore('tracks', () => {
     if (!isStereo) return;
     if (track.channelLanes) return; // already materialized
 
+    // Promote to explicit clips first so we have stable IDs
+    promoteToExplicitClips(trackId);
+
     const parentClips = getTrackClips(trackId);
+    // Each lane gets a COPY of the parent clips with same IDs initially.
+    // L lane keeps original IDs; R lane gets new IDs with shared linkedClipGroupId.
     const laneL: import('@/shared/types').ChannelLane = {
       id: generateId(),
       channelIndex: 0,
       kind: 'left',
       clips: parentClips.map(c => {
-        const groupId = c.linkedClipGroupId || generateId();
-        return { ...c, id: generateId(), linkedClipGroupId: groupId };
+        const groupId = generateId();
+        return { ...c, linkedClipGroupId: groupId };
       }),
     };
     const laneR: import('@/shared/types').ChannelLane = {
@@ -413,7 +418,7 @@ export const useTracksStore = defineStore('tracks', () => {
 
     track.channelLanes = [laneL, laneR];
     triggerRef(tracks);
-    console.log(`[Tracks] Materialized channel lanes for ${track.name}: L=${laneL.clips.length} clips, R=${laneR.clips.length} clips`);
+    console.log(`[Tracks] Materialized channel lanes for ${track.name}: L=${laneL.clips.length} clips (IDs kept), R=${laneR.clips.length} clips (new IDs)`);
   }
 
   function setTrackMuted(trackId: string, muted: boolean): void {
