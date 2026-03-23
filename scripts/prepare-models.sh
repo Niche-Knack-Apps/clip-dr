@@ -10,11 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEST_DIR="$PROJECT_ROOT/src-tauri/resources/models"
 
-# --cleanup mode: remove copied models after build
+# --cleanup mode: no-op (models stay in resources permanently, gitignored)
 if [[ "${1:-}" == "--cleanup" ]]; then
-    rm -f "$DEST_DIR/ggml-tiny.bin"
-    rm -rf "$DEST_DIR/moonshine"
-    echo "[prepare-models] Cleaned up copied models."
+    echo "[prepare-models] Cleanup is a no-op — models stay in resources (gitignored)."
     exit 0
 fi
 
