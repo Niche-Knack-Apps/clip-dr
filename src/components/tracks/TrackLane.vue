@@ -124,14 +124,22 @@ const trackClips = computed(() => {
   return tracksStore.getTrackClips(props.track.id);
 });
 
-/** Get clips for a specific channel lane. Uses materialized lane clips if available, otherwise parent clips. */
+/** Reactive lane clips: re-reads from store when tracks ref is triggered (including during drag) */
+const laneClipsL = computed(() => {
+  // Touch tracks shallowRef to react to triggerRef(tracks) calls
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  const lane = t?.channelLanes?.find(l => l.channelIndex === 0);
+  return lane ? lane.clips : trackClips.value;
+});
+const laneClipsR = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  const lane = t?.channelLanes?.find(l => l.channelIndex === 1);
+  return lane ? lane.clips : trackClips.value;
+});
 function getLaneClips(channelIndex: number) {
-  const lanes = props.track.channelLanes;
-  if (lanes) {
-    const lane = lanes.find(l => l.channelIndex === channelIndex);
-    if (lane) return lane.clips;
-  }
-  return trackClips.value;
+  return channelIndex === 0 ? laneClipsL.value : laneClipsR.value;
 }
 
 // Track timemarks with pixel positions

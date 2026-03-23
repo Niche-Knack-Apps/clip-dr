@@ -419,9 +419,13 @@ export const useTracksStore = defineStore('tracks', () => {
       })),
     };
 
-    track.channelLanes = [laneL, laneR];
-    triggerRef(tracks);
-    console.log(`[Tracks] Materialized channel lanes for ${track.name}: L=${laneL.clips.length} clips (IDs kept), R=${laneR.clips.length} clips (new IDs)`);
+    // Replace the track object to trigger Vue reactivity (shallowRef won't detect deep mutation)
+    const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+    if (trackIndex !== -1) {
+      tracks.value[trackIndex] = { ...track, channelLanes: [laneL, laneR] };
+      triggerRef(tracks);
+    }
+    console.log(`[Tracks] Materialized channel lanes for ${tracks.value[trackIndex]?.name}: L=${laneL.clips.length} clips (IDs kept), R=${laneR.clips.length} clips (new IDs)`);
   }
 
   function setTrackMuted(trackId: string, muted: boolean): void {
