@@ -142,6 +142,21 @@ function getLaneClips(channelIndex: number) {
   return channelIndex === 0 ? laneClipsL.value : laneClipsR.value;
 }
 
+/** Reactive channel lane objects (for VolumeEnvelope and volume controls) */
+const channelLaneL = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  return t?.channelLanes?.find(l => l.channelIndex === 0);
+});
+const channelLaneR = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  return t?.channelLanes?.find(l => l.channelIndex === 1);
+});
+function getChannelLane(channelIndex: number) {
+  return channelIndex === 0 ? channelLaneL.value : channelLaneR.value;
+}
+
 // Track timemarks with pixel positions
 // Read through tracksStore.tracks shallowRef so triggerRef(tracks) invalidates this computed
 const trackTimemarks = computed(() => {
@@ -874,9 +889,9 @@ onUnmounted(() => {
           />
           <!-- Per-lane volume envelope -->
           <VolumeEnvelope
-            v-if="!isImporting && containerWidth > 0 && tracksStore.getChannelLane(track.id, ch)"
+            v-if="!isImporting && containerWidth > 0 && getChannelLane(ch)"
             :track="track"
-            :channel-lane="tracksStore.getChannelLane(track.id, ch)!"
+            :channel-lane="getChannelLane(ch)!"
             :container-width="containerWidth"
             :duration="duration"
           />
