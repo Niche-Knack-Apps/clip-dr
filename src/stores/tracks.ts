@@ -200,6 +200,7 @@ export const useTracksStore = defineStore('tracks', () => {
       volume: 1,
       sourcePath,
       autoMuted: soloActive,
+      channelMode: buffer.numberOfChannels >= 2 ? 'stereo' : 'mono',
     };
 
     tracks.value = [...tracks.value, track];

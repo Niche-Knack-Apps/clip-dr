@@ -175,6 +175,8 @@ export interface Track {
   editEpoch?: number;
   /** True when this track was auto-muted (e.g., by solo) rather than explicitly muted by user */
   autoMuted?: boolean;
+  /** Channel structure: derived from audioData.channels on import. */
+  channelMode?: 'mono' | 'stereo';
 }
 
 

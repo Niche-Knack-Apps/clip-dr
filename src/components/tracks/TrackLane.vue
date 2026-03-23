@@ -13,7 +13,7 @@ import { useUIStore } from '@/stores/ui';
 import { useHistoryStore } from '@/stores/history';
 import { useTimelineViewport } from '@/composables/useTimelineViewport';
 import { clientXToLocalX } from '@/shared/timeline-coordinates';
-import { TRACK_HEIGHT, TRACK_PANEL_MIN_WIDTH, MAX_VOLUME_DB, MIN_VOLUME_DB } from '@/shared/constants';
+import { TRACK_HEIGHT, TRACK_SUBLANE_HEIGHT, TRACK_PANEL_MIN_WIDTH, MAX_VOLUME_DB, MIN_VOLUME_DB } from '@/shared/constants';
 import { linearToDb, dbToLinear, formatDb } from '@/shared/utils';
 
 interface Props {
@@ -53,6 +53,15 @@ const playbackStore = usePlaybackStore();
 const settingsStore = useSettingsStore();
 const tracksStore = useTracksStore();
 const uiStore = useUIStore();
+
+// Stereo view: whether this track should show L/R sub-lanes
+const isStereoView = computed(() =>
+  uiStore.showChannelLanes && (props.track.channelMode === 'stereo' || (props.track.audioData.channels ?? 1) >= 2)
+);
+const effectiveTrackHeight = computed(() =>
+  isStereoView.value ? TRACK_SUBLANE_HEIGHT * 2 : TRACK_HEIGHT
+);
+
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
 let containerResizeObserver: ResizeObserver | null = null;
@@ -569,7 +578,7 @@ onUnmounted(() => {
         : 'bg-track-bg hover:bg-track-hover border-gray-800',
     ]"
     :style="{
-      height: `${TRACK_HEIGHT}px`,
+      height: `${effectiveTrackHeight}px`,
       borderLeftColor: isSelected ? track.color : 'transparent',
       '--ring-color': isSelected ? track.color : undefined,
     }"
@@ -742,22 +751,57 @@ onUnmounted(() => {
         :style="{ width: `${(track.importDecodeProgress || 0) * 100}%` }"
       />
 
-      <!-- Render each clip in the track (only when not importing) -->
-      <ClipRegion
-        v-for="clip in trackClips"
-        :key="clip.id"
-        :track="track"
-        :clip="clip"
-        :container-width="containerWidth"
-        :duration="duration"
-        :is-dragging="isClipDragging"
-        :dragging-clip-id="draggingClipId"
-        :is-selected="tracksStore.selectedTrackClipIds.includes(clip.id)"
-        :is-cross-track-drag="isCrossTrackDrag"
-        :is-active-trim="isTrimming && trimClipId === clip.id"
-        @drag-start="handleClipDragStart"
-        @trim-start="handleTrimStart"
-      />
+      <!-- Stereo view: two stacked channel sub-lanes -->
+      <template v-if="isStereoView">
+        <div
+          v-for="ch in [0, 1]"
+          :key="ch"
+          class="absolute left-0 right-0 overflow-hidden"
+          :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
+        >
+          <!-- Lane label -->
+          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-20 pointer-events-none select-none">
+            {{ ch === 0 ? 'L' : 'R' }}
+          </span>
+          <!-- Lane divider (between L and R) -->
+          <div v-if="ch === 1" class="absolute top-0 left-0 right-0 h-px bg-gray-700/60 z-10 pointer-events-none" />
+          <!-- Clips for this channel -->
+          <ClipRegion
+            v-for="clip in trackClips"
+            :key="`${clip.id}-ch${ch}`"
+            :track="track"
+            :clip="clip"
+            :container-width="containerWidth"
+            :duration="duration"
+            :is-dragging="isClipDragging"
+            :dragging-clip-id="draggingClipId"
+            :is-selected="tracksStore.selectedTrackClipIds.includes(clip.id)"
+            :is-cross-track-drag="isCrossTrackDrag"
+            :is-active-trim="isTrimming && trimClipId === clip.id"
+            :channel-index="ch"
+            @drag-start="handleClipDragStart"
+            @trim-start="handleTrimStart"
+          />
+        </div>
+      </template>
+      <!-- Mono view: single lane (existing behavior) -->
+      <template v-else>
+        <ClipRegion
+          v-for="clip in trackClips"
+          :key="clip.id"
+          :track="track"
+          :clip="clip"
+          :container-width="containerWidth"
+          :duration="duration"
+          :is-dragging="isClipDragging"
+          :dragging-clip-id="draggingClipId"
+          :is-selected="tracksStore.selectedTrackClipIds.includes(clip.id)"
+          :is-cross-track-drag="isCrossTrackDrag"
+          :is-active-trim="isTrimming && trimClipId === clip.id"
+          @drag-start="handleClipDragStart"
+          @trim-start="handleTrimStart"
+        />
+      </template>
 
       <!-- Volume automation envelope overlay -->
       <VolumeEnvelope

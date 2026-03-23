@@ -972,6 +972,31 @@ function handleClipSelect(trackId: string, clipId: string) {
             <path d="m15,0v11.807c0,1.638-1.187,3.035-2.701,3.179-.858.083-1.684-.189-2.316-.765-.625-.568-.983-1.377-.983-2.221V0H0v11.652c0,6.689,5,12.348,12.003,12.348,3.164,0,6.142-1.216,8.404-3.437,2.316-2.275,3.593-5.316,3.593-8.563V0h-9Zm6,12c0,2.435-.957,4.716-2.695,6.422-1.736,1.706-4.039,2.618-6.474,2.576-4.869-.089-8.831-4.282-8.831-9.347v-5.652h3v6c0,1.687.716,3.305,1.965,4.44,1.248,1.135,2.932,1.695,4.62,1.532,3.037-.29,5.416-2.998,5.416-6.166v-5.807h3v6Z"/>
           </svg>
         </button>
+        <!-- Show channel lanes toggle (stereo tracks expand to L/R sub-lanes) -->
+        <button
+          type="button"
+          :class="[
+            'p-1 rounded transition-colors',
+            uiStore.showChannelLanes
+              ? 'bg-cyan-600 text-white'
+              : 'bg-gray-700 text-gray-400 hover:bg-gray-600',
+          ]"
+          :title="uiStore.showChannelLanes ? 'Collapse to single lane' : 'Show channel lanes (stereo → L/R)'"
+          @click="uiStore.toggleChannelLanes()"
+        >
+          <!-- Two stacked waveforms (channels visible) / one waveform (collapsed) -->
+          <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <template v-if="uiStore.showChannelLanes">
+              <!-- Two waveform lines -->
+              <path d="M1 5 L3 3 L5 6 L7 2 L9 6 L11 4 L13 5.5 L15 4" />
+              <path d="M1 11 L3 9 L5 12 L7 8 L9 12 L11 10 L13 11.5 L15 10" />
+            </template>
+            <template v-else>
+              <!-- One waveform line -->
+              <path d="M1 8 L3 5 L5 10 L7 4 L9 11 L11 6 L13 9 L15 7" />
+            </template>
+          </svg>
+        </button>
         <!-- Add empty track button -->
         <button
           type="button"
