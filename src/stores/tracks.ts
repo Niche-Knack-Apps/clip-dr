@@ -3019,20 +3019,19 @@ export const useTracksStore = defineStore('tracks', () => {
     const lane = getChannelLane(trackId, channelIndex);
     if (!lane) return;
     useHistoryStore().pushState('Add volume point');
-    if (!lane.volumeEnvelope) lane.volumeEnvelope = [];
-    lane.volumeEnvelope.push({ id: generateId(), time, value });
-    lane.volumeEnvelope.sort((a, b) => a.time - b.time);
+    const points = [...(lane.volumeEnvelope ?? []), { id: generateId(), time, value }];
+    points.sort((a, b) => a.time - b.time);
+    lane.volumeEnvelope = points; // New array reference so Vue detects the change
     triggerRef(tracks);
   }
 
   function updateChannelLaneVolumePoint(trackId: string, channelIndex: number, pointId: string, time: number, value: number): void {
     const lane = getChannelLane(trackId, channelIndex);
     if (!lane?.volumeEnvelope) return;
-    const point = lane.volumeEnvelope.find(p => p.id === pointId);
-    if (!point) return;
-    point.time = time;
-    point.value = value;
-    lane.volumeEnvelope.sort((a, b) => a.time - b.time);
+    // Create new array with updated point (new reference for Vue reactivity)
+    lane.volumeEnvelope = lane.volumeEnvelope.map(p =>
+      p.id === pointId ? { ...p, time, value } : p
+    ).sort((a, b) => a.time - b.time);
     triggerRef(tracks);
   }
 
