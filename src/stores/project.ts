@@ -13,6 +13,7 @@ import { usePlaybackStore } from './playback';
 import { useAudioStore } from './audio';
 import { useTranscriptionStore } from './transcription';
 import { useSettingsStore } from './settings';
+import { useUIStore } from './ui';
 
 const APP_TITLE = 'Clip Dr.';
 
@@ -129,6 +130,7 @@ export const useProjectStore = defineStore('project', () => {
       }
     }
 
+    const uiStore = useUIStore();
     const now = new Date().toISOString();
     return {
       version: 3,
@@ -141,6 +143,7 @@ export const useProjectStore = defineStore('project', () => {
         outPoint: selectionStore.inOutPoints.outPoint,
       },
       silenceRegions: silenceMap,
+      showChannelLanes: uiStore.showChannelLanes || undefined,
     };
   }
 
@@ -349,6 +352,11 @@ export const useProjectStore = defineStore('project', () => {
           }
           silenceStore.setPerTrackSilenceRegions(remapped);
         }
+      }
+
+      // Restore UI state
+      if (project.showChannelLanes) {
+        useUIStore().showChannelLanes = true;
       }
 
       // Auto-load transcription sidecars for each track (fire-and-forget)

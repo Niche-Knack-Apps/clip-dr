@@ -496,6 +496,8 @@ export interface ProjectFile {
   selection: { inPoint: number | null; outPoint: number | null };
   /** v1-v2: flat array; v3: per-track Record<trackId, SilenceRegion[]> */
   silenceRegions: SilenceRegion[] | Record<string, SilenceRegion[]>;
+  /** UI state: whether channel lanes are expanded */
+  showChannelLanes?: boolean;
 }
 
 export interface ExportEDL {

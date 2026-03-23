@@ -889,9 +889,9 @@ onUnmounted(() => {
           />
           <!-- Per-lane volume envelope -->
           <VolumeEnvelope
-            v-if="!isImporting && containerWidth > 0 && getChannelLane(ch)"
+            v-if="!isImporting && containerWidth > 0"
             :track="track"
-            :channel-lane="getChannelLane(ch)!"
+            :channel-lane="getChannelLane(ch)"
             :container-width="containerWidth"
             :duration="duration"
           />
