@@ -640,6 +640,24 @@ onUnmounted(() => {
 
         <!-- Control buttons -->
         <div class="flex items-center gap-0.5 shrink-0">
+          <!-- Channel link toggle (stereo tracks only, visible in stereo view) -->
+          <button
+            v-if="isStereoView"
+            type="button"
+            :class="[
+              'w-5 h-5 flex items-center justify-center rounded transition-colors',
+              track.channelLinked !== false
+                ? 'bg-cyan-700 text-cyan-200'
+                : 'bg-gray-700 text-gray-500 hover:bg-gray-600',
+            ]"
+            :title="track.channelLinked !== false ? 'Channels linked — unlink for independent editing' : 'Channels unlinked — click to relink'"
+            @click.stop="tracksStore.toggleChannelLinked(track.id)"
+          >
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
+              <path v-if="track.channelLinked !== false" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
+            </svg>
+          </button>
           <button
             type="button"
             :class="[

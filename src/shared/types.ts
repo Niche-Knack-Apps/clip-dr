@@ -71,6 +71,8 @@ export interface TrackClip {
   sourceIn?: number;
   /** Total available duration from sourceIn in source file (immutable). Defines full recoverable range. */
   sourceDuration?: number;
+  /** Clip pairing identity across channel lanes. Shared between L/R counterparts when lanes diverge. */
+  linkedClipGroupId?: string;
 }
 
 /** A keyframe point on a volume automation envelope */
@@ -177,6 +179,25 @@ export interface Track {
   autoMuted?: boolean;
   /** Channel structure: derived from audioData.channels on import. */
   channelMode?: 'mono' | 'stereo';
+  /** Whether channel lanes are linked (default true). When linked, edits apply to both lanes. */
+  channelLinked?: boolean;
+  /** Per-lane state. Only present when lanes have diverged from parent EDL via independent editing. */
+  channelLanes?: ChannelLane[];
+}
+
+/** Source channel index (0=first/left, 1=second/right, etc.) */
+export type SourceChannel = number;
+
+/** Lane display kind */
+export type LaneKind = 'mono' | 'left' | 'right';
+
+/** Per-channel lane (only materialized when lanes diverge from parent EDL) */
+export interface ChannelLane {
+  id: string;
+  channelIndex: SourceChannel;
+  kind: LaneKind;
+  clips: TrackClip[];
+  waveformData?: number[];
 }
 
 

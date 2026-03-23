@@ -201,6 +201,7 @@ export const useTracksStore = defineStore('tracks', () => {
       sourcePath,
       autoMuted: soloActive,
       channelMode: buffer.numberOfChannels >= 2 ? 'stereo' : 'mono',
+      channelLinked: true,
     };
 
     tracks.value = [...tracks.value, track];
@@ -363,6 +364,15 @@ export const useTracksStore = defineStore('tracks', () => {
       }
       return t;
     });
+  }
+
+  function toggleChannelLinked(trackId: string): void {
+    const track = getTrackById(trackId);
+    if (!track || track.channelMode !== 'stereo') return;
+    useHistoryStore().pushState('Toggle channel link');
+    track.channelLinked = !track.channelLinked;
+    triggerRef(tracks);
+    console.log(`[Tracks] Channel ${track.channelLinked ? 'linked' : 'unlinked'}: ${track.name}`);
   }
 
   function setTrackMuted(trackId: string, muted: boolean): void {
@@ -3229,6 +3239,7 @@ export const useTracksStore = defineStore('tracks', () => {
     selectClip,
     clearClipSelection,
     setTrackMuted,
+    toggleChannelLinked,
     setTrackSolo,
     setTrackVolume,
     renameTrack,
