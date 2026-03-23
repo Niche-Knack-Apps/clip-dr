@@ -488,8 +488,16 @@ function handleClipDrag(trackId: string, clipId: string, newClipStart: number, m
   // Update clip position in real-time for visual feedback (with snap if enabled)
   tracksStore.setClipStart(trackId, clipId, newClipStart, snapEnabled.value);
 
-  // Update snap visualization
-  const clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
+  // Update snap visualization — search lane clips first, then parent
+  let clip: import('@/shared/types').TrackClip | undefined;
+  const dragTrack = tracksStore.getTrackById(trackId);
+  if (dragTrack?.channelLanes) {
+    for (const lane of dragTrack.channelLanes) {
+      clip = lane.clips.find(c => c.id === clipId);
+      if (clip) break;
+    }
+  }
+  if (!clip) clip = tracksStore.getTrackClips(trackId).find(c => c.id === clipId);
   if (clip) {
     activeSnapTarget.value = tracksStore.getSnapTarget(trackId, clipId, newClipStart, clip.duration, snapEnabled.value);
   }

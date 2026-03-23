@@ -1529,27 +1529,22 @@ export const useTracksStore = defineStore('tracks', () => {
 
     let targetLane: import('@/shared/types').ChannelLane | null = null;
     if (track.channelLanes) {
-      console.warn(`[setClipStart] Track has ${track.channelLanes.length} lanes, searching for clip ${clipId.slice(0,8)}`);
       for (const lane of track.channelLanes) {
         const idx = lane.clips.findIndex(c => c.id === clipId);
         if (idx !== -1) {
           clipIndex = idx;
           targetClips = lane.clips;
           targetLane = lane;
-          console.warn(`[setClipStart] FOUND in ${lane.kind} lane at idx ${idx}`);
           break;
         }
       }
-    } else {
-      console.warn(`[setClipStart] Track has NO channelLanes, clip ${clipId.slice(0,8)}`);
     }
     // Fall back to parent clips if not found in lanes
     if (clipIndex === -1) {
       clipIndex = track.clips.findIndex((c) => c.id === clipId);
       targetClips = track.clips;
-      console.warn(`[setClipStart] Fell back to parent clips, found at idx ${clipIndex}`);
     }
-    if (clipIndex === -1) { console.warn('[setClipStart] CLIP NOT FOUND ANYWHERE'); return; }
+    if (clipIndex === -1) return;
 
     const clip = targetClips[clipIndex];
 
@@ -1564,11 +1559,25 @@ export const useTracksStore = defineStore('tracks', () => {
 
     // Only update the clip's position, don't recalculate track bounds
     // This prevents timeline duration from changing during drag
-    console.warn(`[setClipStart] ${targetLane ? 'LANE' : 'PARENT'} clip: ${clip.clipStart.toFixed(2)} → ${snappedStart.toFixed(2)}`);
     targetClips[clipIndex] = {
       ...targetClips[clipIndex],
       clipStart: snappedStart,
     };
+
+    // When track is linked and clip is in a lane, also move the paired clip in the other lane
+    if (targetLane && track.channelLinked !== false && track.channelLanes) {
+      const groupId = targetClips[clipIndex].linkedClipGroupId;
+      if (groupId) {
+        for (const otherLane of track.channelLanes) {
+          if (otherLane === targetLane) continue;
+          const pairedIdx = otherLane.clips.findIndex(c => c.linkedClipGroupId === groupId);
+          if (pairedIdx !== -1) {
+            otherLane.clips[pairedIdx] = { ...otherLane.clips[pairedIdx], clipStart: snappedStart };
+            otherLane.clips = [...otherLane.clips];
+          }
+        }
+      }
+    }
 
     // For lane clips: replace the lane's clips array reference so Vue computeds
     // detect the change (same array ref = computed short-circuits = no re-render)
