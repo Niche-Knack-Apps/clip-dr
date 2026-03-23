@@ -110,12 +110,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // ─── Debug: log Map state ───
   function logMapState(context: string): void {
+    if (typeof console.debug !== 'function') return;
     const keys = Array.from(transcriptions.value.keys());
     const sizes = keys.map(k => {
       const t = transcriptions.value.get(k);
       return `${k.slice(0, 8)}(${t?.words.length ?? 0}w)`;
     });
-    console.log(`[Transcription][MAP] ${context} — ${keys.length} entries: [${sizes.join(', ')}]`);
+    console.debug(`[Transcription][MAP] ${context} — ${keys.length} entries: [${sizes.join(', ')}]`);
   }
 
   // ─── Per-track getters ───

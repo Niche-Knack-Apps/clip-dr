@@ -456,7 +456,7 @@ function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: numb
   clipDragOriginalStart = clip?.clipStart ?? null;
   clipDragOriginalDuration = clip?.duration ?? null;
 
-  useHistoryStore().pushState('Move clip');
+  useHistoryStore().pushState('Move clip', { skipTranscriptions: true });
   clipDraggingTrackId.value = trackId;
   clipDraggingClipId.value = clipId;
   clipDragTargetTrackId.value = trackId;

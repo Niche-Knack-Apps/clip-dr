@@ -135,15 +135,28 @@ export const useHistoryStore = defineStore('history', () => {
   const canRedo = computed(() => redoStack.value.length > 0);
 
   // ── Capture current state from all stores ──
-  function captureSnapshot(label: string): Snapshot {
+  interface SnapshotOptions {
+    /** Skip deep-cloning transcriptions — reuse previous snapshot's ref.
+     *  Safe for operations that never modify transcription (e.g. clip move/drag). */
+    skipTranscriptions?: boolean;
+  }
+
+  function captureSnapshot(label: string, options?: SnapshotOptions): Snapshot {
     const tracksStore = useTracksStore();
     const transcriptionStore = useTranscriptionStore();
     const selectionStore = useSelectionStore();
     const silenceStore = useSilenceStore();
 
-    const clonedTranscriptions = cloneTranscriptions(transcriptionStore.transcriptions);
-    const transKeys = Array.from(clonedTranscriptions.keys()).map(k => k.slice(0, 8));
-    console.log(`[History] captureSnapshot("${label}"): transcriptions Map keys: [${transKeys}]`);
+    // When skipTranscriptions is set, reuse previous snapshot's transcription ref
+    // (transcriptions never change during clip move/drag operations)
+    let clonedTranscriptions: Map<string, any>;
+    if (options?.skipTranscriptions && undoStack.value.length > 0) {
+      clonedTranscriptions = undoStack.value[undoStack.value.length - 1].transcription.transcriptions;
+    } else {
+      clonedTranscriptions = cloneTranscriptions(transcriptionStore.transcriptions);
+    }
+
+    console.debug(`[History] captureSnapshot("${label}"): ${clonedTranscriptions.size} transcriptions${options?.skipTranscriptions ? ' (shared)' : ''}`);
 
     return {
       label,
@@ -202,11 +215,11 @@ export const useHistoryStore = defineStore('history', () => {
   // ── Public API ──────────────────────────────────────────────────
 
   /** Capture current state before a mutation. No-op inside a batch. */
-  function pushState(label: string): void {
+  function pushState(label: string, options?: SnapshotOptions): void {
     if (isRestoring.value) return;
     if (batchDepth.value > 0) return;   // batch's beginBatch already captured
 
-    const snapshot = captureSnapshot(label);
+    const snapshot = captureSnapshot(label, options);
     const snapshotBytes = estimateSnapshotBytes(snapshot);
     undoStack.value.push(snapshot);
     estimatedHistoryBytes += snapshotBytes;
@@ -265,11 +278,11 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   /** Begin a batch — captures a snapshot on first call, increments depth. */
-  function beginBatch(label: string): void {
+  function beginBatch(label: string, options?: SnapshotOptions): void {
     if (isRestoring.value) return;
     if (batchDepth.value === 0) {
       batchLabel.value = label;
-      const snapshot = captureSnapshot(label);
+      const snapshot = captureSnapshot(label, options);
       undoStack.value.push(snapshot);
       estimatedHistoryBytes += estimateSnapshotBytes(snapshot);
       while (undoStack.value.length > MAX_HISTORY) {
