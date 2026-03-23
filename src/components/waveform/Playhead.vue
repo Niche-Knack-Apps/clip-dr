@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
+import { useTimelineViewport } from '@/composables/useTimelineViewport';
+import { clientXToLocalX } from '@/shared/timeline-coordinates';
 
 interface Props {
   position: number;
@@ -30,29 +32,24 @@ const playheadRef = ref<HTMLDivElement | null>(null);
 let dragRafId: number | null = null;
 let pendingDragClientX: number | null = null;
 
+const { timeToX, xToTimeClamped } = useTimelineViewport(
+  () => props.startTime,
+  () => props.endTime,
+  () => props.containerWidth,
+);
+
 const xPosition = computed(() => {
-  const range = props.endTime - props.startTime;
-  if (range <= 0) return 0;
-  return ((props.position - props.startTime) / range) * props.containerWidth;
+  return timeToX(props.position);
 });
 
 const isVisible = computed(() => {
   return props.position >= props.startTime && props.position <= props.endTime;
 });
 
-function getContainerLeft(): number {
-  if (playheadRef.value?.parentElement) {
-    return playheadRef.value.parentElement.getBoundingClientRect().left;
-  }
-  return 0;
-}
-
 function xToTime(clientX: number): number {
-  const containerLeft = getContainerLeft();
-  const x = clientX - containerLeft;
-  const range = props.endTime - props.startTime;
-  const time = (x / props.containerWidth) * range + props.startTime;
-  return Math.max(props.startTime, Math.min(time, props.endTime));
+  const el = playheadRef.value?.parentElement;
+  if (!el) return props.startTime;
+  return xToTimeClamped(clientXToLocalX(clientX, el));
 }
 
 function handleMouseDown(event: MouseEvent) {

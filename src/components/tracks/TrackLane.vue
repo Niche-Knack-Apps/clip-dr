@@ -11,6 +11,8 @@ import { useTracksStore } from '@/stores/tracks';
 import { useSettingsStore } from '@/stores/settings';
 import { useUIStore } from '@/stores/ui';
 import { useHistoryStore } from '@/stores/history';
+import { useTimelineViewport } from '@/composables/useTimelineViewport';
+import { clientXToLocalX } from '@/shared/timeline-coordinates';
 import { TRACK_HEIGHT, TRACK_PANEL_MIN_WIDTH, MAX_VOLUME_DB, MIN_VOLUME_DB } from '@/shared/constants';
 import { linearToDb, dbToLinear, formatDb } from '@/shared/utils';
 
@@ -81,6 +83,9 @@ const inputRef = ref<HTMLInputElement | null>(null);
 const duration = computed(() => tracksStore.timelineDuration);
 const currentTime = computed(() => playbackStore.currentTime);
 const panelWidth = computed(() => uiStore.trackPanelWidth);
+
+// Shared time↔pixel mapper for timemark positioning and timeline clicks (NOT clip/trim math)
+const { timeToX: timelineTimeToX, xToTimeClamped: timelineXToTimeClamped } = useTimelineViewport(0, duration, containerWidth);
 const showVolumeSlider = computed(() => panelWidth.value > TRACK_PANEL_MIN_WIDTH + 40);
 
 // Import state
@@ -118,7 +123,7 @@ const trackTimemarks = computed(() => {
   if (!track?.timemarks || track.timemarks.length === 0 || duration.value <= 0) return [];
   return track.timemarks.map(mark => ({
     ...mark,
-    pixelLeft: ((track.trackStart + mark.time) / duration.value) * containerWidth.value,
+    pixelLeft: timelineTimeToX(track.trackStart + mark.time),
   }));
 });
 
@@ -126,10 +131,9 @@ function handleTimelineClick(event: MouseEvent) {
   if (event.button !== 0) return;
   if (isClipDragging.value || clipDragPending.value) return;
   timemarkPopup.value = null;
-  const rect = containerRef.value?.getBoundingClientRect();
-  if (!rect || duration.value <= 0) return;
-  const time = ((event.clientX - rect.left) / rect.width) * duration.value;
-  playbackStore.seek(Math.max(0, Math.min(duration.value, time)));
+  if (!containerRef.value || duration.value <= 0) return;
+  const time = timelineXToTimeClamped(clientXToLocalX(event.clientX, containerRef.value));
+  playbackStore.seek(time);
   console.log('[TrackLane] seek via timeline click:', time.toFixed(3));
 }
 
@@ -177,9 +181,8 @@ function flushTimemarkDrag() {
   const event = pendingTimemarkDragEvent;
   pendingTimemarkDragEvent = null;
 
-  const rect = containerRef.value.getBoundingClientRect();
-  const relX = event.clientX - rect.left;
-  const newTime = (relX / rect.width) * duration.value;
+  const localX = clientXToLocalX(event.clientX, containerRef.value);
+  const newTime = timelineXToTimeClamped(localX);
   // Convert to track-relative: newTime is absolute, subtract trackStart
   const trackRelative = newTime - props.track.trackStart;
   const clamped = Math.max(0, Math.min(props.track.duration, trackRelative));

@@ -1,158 +1,194 @@
-# Clip Dr. v0.20.0 — Waveform Sync, Dynamics, Export Trim, Clean Playback, Transcription Slider
+# Refactor: Unified Timeline Viewport Coordinate Mapping (v0.27.38)
 
 ## Context
 
-Five interlinked issues need holistic fixes to ensure rock-solid synchronization project-wide:
-1. Waveform desync across the three views (FullWaveform, ZoomedWaveform, TrackLane) and audio playback
-2. Volume increase sounds tinny — needs intelligent dynamics processing instead of simple gain
-3. Single-track export includes leading/trailing silence instead of trimming to audio boundaries
-4. Cleaned audio track is not playable; needs to also auto-mute all other tracks and reposition playhead
-5. Transcription global offset slider is broken (no-ops when no track explicitly selected)
+Six components independently implement timeline↔pixel coordinate conversion. This refactor unifies **timeline/view** coordinate conversion across panels. It does **not** replace clip/source/buffer coordinate logic — those are separate semantic spaces.
 
-## Git Workflow
+### Coordinate spaces in Clip Dr.
 
-1. Merge any pending work into `main` (currently clean — nothing unmerged)
-2. Create branch `dev/v0.20-sync-dynamics` from `main`
-3. Bump version to `0.20.0` in `package.json` and `src-tauri/tauri.conf.json`
-4. Implement each fix as a separate commit, incrementing bugfix version (0.20.1, 0.20.2, etc.)
-5. Run ALL regression tests after each change (`npx vue-tsc --noEmit 2>&1 | grep -v TS6133` + `npm test` + `cargo build` for Rust changes)
-6. Write NEW regression tests for each feature
-7. Pause after each commit for user manual testing before proceeding
+1. **timelineTime** — absolute seconds on the global timeline
+2. **viewportTime** — the visible zoomed window (start..end)
+3. **contentX** — pixel position within scrollable timeline content
+4. **clientX** — mouse event screen coordinates
+5. **clipTime** — position within a clip's visible extent
+6. **sourceTime** — position within the original audio file
+7. **bufferTime** — position/sample index within an AudioBuffer
 
----
+This refactor addresses spaces 1-4. Spaces 5-7 must remain separate.
 
-## Fix 6: selectedTrack auto-resolve + Settings version → v0.20.5
+## Design
 
-**Problem 1 — selectedTrack**: `tracksStore.selectedTrack` (computed, `tracks.ts:96-101`) returns `null` when `selectedTrackId === 'ALL'` (the default). This breaks every operation that depends on it:
-- **Cleaning**: `canClean` is false, `cleanSelectedTrack()` early-returns with "No track selected"
-- **Silence detection**: `detectSilence()` falls back to `tracks[0]` silently (non-obvious)
-- **Silence cutting**: `cutSilenceToNewTrack()` falls back to `tracks[0]`
+### Layer 1: Pure mapper — `src/shared/timeline-coordinates.ts`
 
-Same root cause as Fix 5 (transcription slider), but Fix 5 was component-local. This fix goes to the source.
-
-**Problem 2 — Settings version**: `src/views/SettingsView.vue` line 15 has `APP_VERSION = '0.19.38'` hardcoded.
-
-### Fix approach — selectedTrack auto-resolve
-
-Modify the `selectedTrack` computed in `src/stores/tracks.ts` (lines 96-101) to auto-resolve when exactly one track exists:
+No Vue dependency. No `this`. Frozen for immutability.
 
 ```typescript
-const selectedTrack = computed(() => {
-  if (selectedTrackId.value === 'ALL' || selectedTrackId.value === null) {
-    // Auto-resolve: if exactly one track exists, use it
-    if (tracks.value.length === 1) return tracks.value[0];
-    return null;
-  }
-  return getTrackById(selectedTrackId.value) ?? null;
-});
+export interface TimeAxisMapper {
+  timeToX(time: number): number;
+  xToTimeRaw(x: number): number;
+  xToTimeClamped(x: number): number;
+  pixelsPerSecond(): number;
+}
+
+export function createTimeAxisMapper(
+  startTime: number,
+  endTime: number,
+  width: number,
+): TimeAxisMapper {
+  const range = endTime - startTime;
+
+  const timeToX = (time: number): number => {
+    if (range <= 0 || width <= 0) return 0;
+    return ((time - startTime) / range) * width;
+  };
+
+  const xToTimeRaw = (x: number): number => {
+    if (width <= 0) return startTime;
+    return (x / width) * range + startTime;
+  };
+
+  const xToTimeClamped = (x: number): number => {
+    const t = xToTimeRaw(x);  // no `this` — direct closure reference
+    return Math.max(startTime, Math.min(t, endTime));
+  };
+
+  const pixelsPerSecond = (): number => {
+    return range > 0 ? width / range : 1;
+  };
+
+  return Object.freeze({ timeToX, xToTimeRaw, xToTimeClamped, pixelsPerSecond });
+}
+
+// DOM helper — separate from time math
+export function clientXToLocalX(clientX: number, el: HTMLElement): number {
+  return clientX - el.getBoundingClientRect().left;
+}
 ```
 
-**Why `tracks.length === 1` and not per-feature filtering**: Unlike the transcription slider (which filters for "tracks with transcription"), cleaning and silence detection work on *any* track. The unambiguous case is simply "there's only one track." With multiple tracks, the user must explicitly select one — this matches DAW convention.
+**Key decisions:**
+- Arrow functions → no `this` dependency → safe to destructure
+- `Object.freeze` → guarantees purity, prevents accidental mutation
+- `clientXToLocalX` is a standalone DOM utility, not part of the mapper
 
-**No changes needed** to `cleaning.ts`, `vad.ts`, or `silence.ts` — they all read `tracksStore.selectedTrack`, so the fix propagates automatically.
+### Layer 2: Vue composable — `src/composables/useTimelineViewport.ts`
 
-### Files to modify
-- **`src/stores/tracks.ts`** (line 96-101): Auto-resolve `selectedTrack` when single track
-- **`src/views/SettingsView.vue`** (line 15): Update `APP_VERSION` to `'0.20.5'`
+Thin reactive wrapper over the pure mapper.
+
+```typescript
+export function useTimelineViewport(
+  startTime: MaybeRefOrGetter<number>,
+  endTime: MaybeRefOrGetter<number>,
+  containerWidth: MaybeRefOrGetter<number>,
+) {
+  const mapper = computed(() =>
+    createTimeAxisMapper(toValue(startTime), toValue(endTime), toValue(containerWidth))
+  );
+  const pixelsPerSecond = computed(() => mapper.value.pixelsPerSecond());
+
+  return {
+    timeToX: (time: number) => mapper.value.timeToX(time),
+    xToTimeRaw: (x: number) => mapper.value.xToTimeRaw(x),
+    xToTimeClamped: (x: number) => mapper.value.xToTimeClamped(x),
+    pixelsPerSecond,
+  };
+}
+```
+
+### Layer 3: Layout transform — `useTimelineViewportTransform`
+
+Separate from the mapper — this is a **layout transform**, not time math. Only used by TrackList where scroll + panel offset apply.
+
+```typescript
+export function useTimelineViewportTransform(
+  startTime: MaybeRefOrGetter<number>,
+  endTime: MaybeRefOrGetter<number>,
+  contentWidth: MaybeRefOrGetter<number>,
+  scrollLeft: MaybeRefOrGetter<number>,
+  panelWidth: MaybeRefOrGetter<number>,
+) {
+  const mapper = computed(() =>
+    createTimeAxisMapper(toValue(startTime), toValue(endTime), toValue(contentWidth))
+  );
+  // content-space → viewport-space
+  const timeToViewportX = (time: number): number =>
+    mapper.value.timeToX(time) - toValue(scrollLeft) + toValue(panelWidth);
+  // viewport-space → content-space → time
+  const viewportXToTimeRaw = (x: number): number =>
+    mapper.value.xToTimeRaw(x + toValue(scrollLeft) - toValue(panelWidth));
+
+  return { mapper, timeToViewportX, viewportXToTimeRaw };
+}
+```
+
+## Migration
+
+| Component | Replace | With |
+|-----------|---------|------|
+| **FullWaveform.vue** | `timeToPixel()` | `useTimelineViewport(0, duration, containerWidth)` |
+| **ZoomedWaveform.vue** | `timeToX()`, `xToTime()` | `useTimelineViewport(selection.start, selection.end, containerWidth)` |
+| **SilenceOverlay.vue** | `pixelsPerSecond`, `xToTime()` | `useTimelineViewport(startTime, endTime, containerWidth)` |
+| **SelectionWindow.vue** | `pixelsPerSecond`, `xToTime()` | `useTimelineViewport(0, duration, containerWidth)` |
+| **Playhead.vue** | `xPosition`, `xToTime()` | `useTimelineViewport(startTime, endTime, containerWidth)` |
+| **TrackLane.vue** | inline time-axis math only | `useTimelineViewport(0, duration, containerWidth)` |
+
+### TrackLane caution
+Only use the shared mapper for **time-axis calculations**. Layout geometry (panel width offsets, scroll position, clip drag hit-testing, ghost positioning, snap guides) stays local.
+
+### What NOT to migrate
+- `ClipRegion.vue` source/buffer offset math (clipTime/sourceTime space)
+- `useWaveform.ts` bucket indexing (bufferTime space)
+- `getClipAwareBucketsForLayer` source offset math (sourceTime space)
+- Any `sourceOffset`, `sourceIn`, `clipStart - trackStart` calculations
+
+## Tests
+
+### Round-trip invariants (most valuable)
+- `timeToX(xToTimeRaw(x)) ≈ x` for arbitrary x
+- `xToTimeRaw(timeToX(t)) ≈ t` for arbitrary t
+- Precision holds at large durations (>1 hour, >10000px width)
 
 ### Edge cases
-- Single track + 'ALL' selection: auto-resolves → cleaning/silence work
-- Multiple tracks + 'ALL' selection: returns null → user must select (correct, avoids wrong-track cleaning)
-- Explicit track selection: unchanged behavior
-- Zero tracks: returns null → operations correctly disabled
+- Zero width → `xToTimeRaw` returns startTime, `timeToX` returns 0
+- Zero range (start == end) → `timeToX` returns 0
+- Negative x → raw returns before startTime, clamped returns startTime
+- x > width → raw returns past endTime, clamped returns endTime
 
-### New tests (add to existing `src/__tests__/clean-playback.test.ts`)
-- `selectedTrack` auto-resolves to single track when selection is 'ALL'
-- `selectedTrack` returns null when multiple tracks and selection is 'ALL'
+### Behavioral
+- `pixelsPerSecond` matches expected ratio
+- `clientXToLocalX` correctly subtracts bounding rect
+- Destructured functions work (no `this` dependency)
+- Frozen mapper can't be mutated
 
----
+## Files to Modify
 
-## Fix 2: Intelligent Dynamics Processing (Volume/Loudness) → v0.20.6+
+| File | Change |
+|------|--------|
+| `src/shared/timeline-coordinates.ts` | **New** — pure `createTimeAxisMapper` + `clientXToLocalX` |
+| `src/composables/useTimelineViewport.ts` | **New** — Vue reactive wrapper + `useTimelineViewportTransform` |
+| `src/components/waveform/FullWaveform.vue` | Replace `timeToPixel` |
+| `src/components/waveform/ZoomedWaveform.vue` | Replace `timeToX`/`xToTime` |
+| `src/components/waveform/SilenceOverlay.vue` | Replace `pixelsPerSecond`/`xToTime` |
+| `src/components/waveform/SelectionWindow.vue` | Replace `pixelsPerSecond`/`xToTime` |
+| `src/components/waveform/Playhead.vue` | Replace `xPosition`/`xToTime` |
+| `src/components/tracks/TrackLane.vue` | Replace time-axis inline math only |
+| `src/__tests__/timeline-coordinates.test.ts` | **New** — round-trip, edge, precision, destructure tests |
+| Version files (4) | 0.27.37 → 0.27.38 |
 
-**Problem**: Cleaning pipeline is purely subtractive (5 gain-reduction stages). No loudness compensation. Simple gain boost creates tinny, over-processed sound.
+## Scope statement
 
-**This fix is split into two stages** due to implementation scope and verification risk.
+> This refactor unifies **timeline/view** coordinate conversion across panels. It does **not** replace clip/source/buffer coordinate logic.
+>
+> **Architectural rule:**
+> - **Timeline/view coordinates** → `createTimeAxisMapper` / `useTimelineViewport`
+> - **Layout transforms** (scroll, panel offset) → `useTimelineViewportTransform`
+> - **Clip/source/buffer coordinates** → separate mappers (existing code, future `ClipCoordinateMapper`)
+> - **Never mix spaces implicitly**
 
-### Stage A (v0.20.6): Conservative gain compensation + simple compressor/limiter
+## Verification
 
-A simpler post-clean processing stage that addresses the core complaint without requiring full LUFS measurement infrastructure.
-
-**New file: `src-tauri/src/audio_clean/dynamics.rs`**:
-- `RmsLoudness` struct: measure RMS loudness of signal (simple, well-understood)
-- `UpwardCompressor` struct: envelope follower with configurable attack/release, threshold, ratio. Boosts quiet passages while leaving loud passages untouched
-- `PeakLimiter` struct: sample-accurate brickwall limiter with fast attack and slow release. Prevents clipping after gain compensation. No oversampling in this stage (keeps implementation straightforward)
-- `DynamicsProcessor` struct: orchestrates the flow:
-  1. Measure pre-processing RMS
-  2. Apply upward compression
-  3. Apply makeup gain to restore loudness
-  4. Run peak limiter to prevent clipping
-
-**Pipeline integration** (`src-tauri/src/audio_clean/pipeline.rs`):
-- Add to `CleaningOptions`: `dynamics_enabled: bool`, `upward_compression_threshold_db: f32`, `upward_compression_ratio: f32`
-- Defaults: `dynamics_enabled: true, threshold: -25 dB, ratio: 2.0`
-- Stage 6 runs after stages 1-5 as a full-signal pass (not chunked, since it needs pre/post RMS comparison)
-
-**Frontend changes**:
-- `src/shared/types.ts`: Add dynamics fields to `CleaningOptions`
-- `src/shared/constants.ts`: Add defaults, update presets (podcast/interview: dynamics on, hum-only: dynamics off)
-- `src/stores/cleaning.ts`: Pass new fields in `backendOptions`
-- `src/components/cleaning/CleaningPanel.vue`: Add "Dynamics" toggle + threshold/ratio sliders
-
-**Rust tests**:
-- Upward compressor: quiet signal boosted, loud signal unchanged
-- Peak limiter: output never exceeds ceiling
-- Full pipeline: cleaned audio is fuller, no clipping
-
-### Stage B (future milestone): LUFS + true-peak + polished UI
-
-Deferred to a dedicated feature milestone after v0.20.x stabilizes:
-- LUFS measurement per ITU-R BS.1770-4 with K-weighting and gating
-- True-peak limiter with 4x oversampling (inter-sample peak detection)
-- Target LUFS selection (-23 broadcast, -16 podcast, -14 YouTube)
-- Multi-band dynamics (optional)
-- Stricter DSP reference testing with known calibration signals
-
----
-
-## Implementation Order
-
-| Step | Fix | Version | Description | Status |
-|------|-----|---------|-------------|--------|
-| 0 | Setup | 0.20.0 | Create dev branch, bump version | DONE |
-| 1 | Fix 5 | 0.20.1 | Transcription slider auto-resolve | DONE |
-| 2 | Fix 3 | 0.20.2 | Export trim (rebaseEdlToZero) | DONE |
-| 3 | Fix 4 | 0.20.3 | Clean playback + mute-all + playhead | DONE |
-| 4 | Fix 1 | 0.20.4 | Sync epoch (5 files) | DONE |
-| 5 | Fix 6 | 0.20.5 | selectedTrack auto-resolve + settings version | **NEXT** |
-| 6 | Fix 2A | 0.20.6 | Conservative dynamics (Rust + TS/Vue) | Pending |
-| — | Stop | — | Validate entire train thoroughly | — |
-| 7 | Fix 4+ | 0.20.7 | Clip-level cleaning (deferred) | Pending |
-| 8 | Fix 2B | future | Full LUFS + true-peak | Deferred |
-
-**Current state**: 214 tests passing, version 0.20.4, branch `dev/v0.20-sync-dynamics`.
-
-## Verification After Each Step
-
-1. `npx vue-tsc --noEmit 2>&1 | grep -v TS6133` — type check
-2. `npm test` — all regression tests pass (currently 214)
-3. `cargo build` (in src-tauri) — for any Rust changes
-4. Manual testing by user before proceeding to next step
-
-## Key Files Reference
-
-| File | Role |
-|------|------|
-| `src/components/transcription/WordTimeline.vue` | Fix 5: slider auto-resolve |
-| `src/stores/export.ts` | Fix 3: EDL rebase for single-track |
-| `src/stores/cleaning.ts` | Fix 4: sourcePath, mute-all, playhead |
-| `src/stores/tracks.ts` | Fix 4: muteAllExcept; Fix 1: syncEpoch; Fix 6: selectedTrack |
-| `src/composables/useCompositeWaveform.ts` | Fix 1: waveformVersion + epoch |
-| `src/stores/playback.ts` | Fix 1: live re-sync watcher |
-| `src/components/tracks/ClipRegion.vue` | Fix 1: epoch-aware cache invalidation |
-| `src/composables/useWaveform.ts` | Fix 1: tile cache epoch |
-| `src/views/SettingsView.vue` | Fix 6: APP_VERSION update |
-| `src-tauri/src/audio_clean/dynamics.rs` | Fix 2A: new dynamics module |
-| `src-tauri/src/audio_clean/pipeline.rs` | Fix 2A: stage 6 integration |
-| `src/shared/types.ts` | Fix 2A: CleaningOptions extension |
-| `src/shared/constants.ts` | Fix 2A: defaults + presets |
-| `src/components/cleaning/CleaningPanel.vue` | Fix 2A: dynamics UI |
+1. `npx vue-tsc --noEmit` — type check
+2. `npm test` — all tests pass (existing + new round-trip/edge tests)
+3. **Runtime: Visual** — playhead, selection, markers, silence overlays align across all three views
+4. **Runtime: Interaction** — click-to-seek, drag selection, drag overlays land at correct times
+5. **Runtime: Multi-track** — two tracks at different positions → all overlays align
+6. **Runtime: Zoom** — extreme zoom in/out → no precision drift

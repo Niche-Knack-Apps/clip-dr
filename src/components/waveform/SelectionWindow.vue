@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
+import { useTimelineViewport } from '@/composables/useTimelineViewport';
+import { clientXToLocalX } from '@/shared/timeline-coordinates';
 
 interface Props {
   start: number;
@@ -31,30 +33,24 @@ const lastX = ref(0);
 let moveRafId: number | null = null;
 let pendingMoveEvent: MouseEvent | null = null;
 
-const pixelsPerSecond = computed(() => {
-  if (props.duration <= 0) return 1;
-  return props.containerWidth / props.duration;
-});
+const { timeToX, xToTimeClamped, pixelsPerSecond } = useTimelineViewport(
+  0,
+  () => props.duration,
+  () => props.containerWidth,
+);
 
 const left = computed(() => {
-  return (props.start / props.duration) * props.containerWidth;
+  return timeToX(props.start);
 });
 
 const width = computed(() => {
-  return ((props.end - props.start) / props.duration) * props.containerWidth;
+  return timeToX(props.end) - timeToX(props.start);
 });
 
-function getContainerLeft(): number {
-  if (windowRef.value?.parentElement) {
-    return windowRef.value.parentElement.getBoundingClientRect().left;
-  }
-  return props.containerLeft;
-}
-
 function xToTime(clientX: number): number {
-  const containerLeft = getContainerLeft();
-  const x = clientX - containerLeft;
-  return Math.max(0, Math.min((x / props.containerWidth) * props.duration, props.duration));
+  const el = windowRef.value?.parentElement;
+  if (!el) return 0;
+  return xToTimeClamped(clientXToLocalX(clientX, el));
 }
 
 function handleMouseDown(event: MouseEvent) {

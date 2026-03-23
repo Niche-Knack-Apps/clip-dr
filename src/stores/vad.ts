@@ -99,7 +99,7 @@ export const useVadStore = defineStore('vad', () => {
 
     try {
       // Render track content to temp WAV (handles both buffered and EDL tracks)
-      const tempPath = await renderTrackToTempWav(trackId);
+      const { path: tempPath } = await renderTrackToTempWav(trackId);
       console.log('[VAD] Detecting from rendered track content, temp file:', tempPath);
 
       const vadResult = await invoke<VadResult>('detect_speech_segments', {
