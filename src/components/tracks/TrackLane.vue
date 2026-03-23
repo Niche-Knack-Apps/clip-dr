@@ -56,7 +56,7 @@ const uiStore = useUIStore();
 
 // Stereo view: whether this track should show L/R sub-lanes
 const isStereoView = computed(() =>
-  uiStore.channelViewMode === 'stereo' && (props.track.channelMode === 'stereo' || (props.track.audioData.channels ?? 1) >= 2)
+  uiStore.showChannelLanes && (props.track.channelMode === 'stereo' || (props.track.audioData.channels ?? 1) >= 2)
 );
 const effectiveTrackHeight = computed(() =>
   isStereoView.value ? TRACK_SUBLANE_HEIGHT * 2 : TRACK_HEIGHT

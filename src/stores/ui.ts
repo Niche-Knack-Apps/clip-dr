@@ -154,9 +154,10 @@ export const useUIStore = defineStore('ui', () => {
   // Active trim edge position — ghost line shown in waveform views during trim (transient, not serialized)
   const activeTrimEdge = ref<{ time: number; edge: 'left' | 'right' } | null>(null);
 
-  // Channel view mode: 'mono' = single lane per track, 'stereo' = L/R sub-lanes for stereo tracks
-  const channelViewMode = ref<'mono' | 'stereo'>('mono');
-  function setChannelViewMode(mode: 'mono' | 'stereo') { channelViewMode.value = mode; }
+  // Show channel lanes: when true, tracks expand to show per-channel sub-lanes based on actual channel count
+  // Mono tracks always stay single-lane. Stereo tracks show L/R lanes. Multichannel shows N lanes (future).
+  const showChannelLanes = ref(false);
+  function toggleChannelLanes() { showChannelLanes.value = !showChannelLanes.value; }
 
   return {
     trackPanelWidth,
@@ -192,7 +193,7 @@ export const useUIStore = defineStore('ui', () => {
     clearHoveredTimemark,
     isClipDragActive,
     activeTrimEdge,
-    channelViewMode,
-    setChannelViewMode,
+    showChannelLanes,
+    toggleChannelLanes,
   };
 });
