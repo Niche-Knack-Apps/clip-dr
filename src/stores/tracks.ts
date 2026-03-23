@@ -1509,12 +1509,12 @@ export const useTracksStore = defineStore('tracks', () => {
       return;
     }
 
-    // Find the clip being moved — check parent clips first, then channel lanes
-    let clipIndex = track.clips.findIndex((c) => c.id === clipId);
+    // Find the clip being moved — check channel lanes FIRST (they have priority when materialized),
+    // then fall back to parent clips
+    let clipIndex = -1;
     let targetClips = track.clips;
 
-    // If not found in parent clips, search channel lanes
-    if (clipIndex === -1 && track.channelLanes) {
+    if (track.channelLanes) {
       for (const lane of track.channelLanes) {
         const idx = lane.clips.findIndex(c => c.id === clipId);
         if (idx !== -1) {
@@ -1523,6 +1523,11 @@ export const useTracksStore = defineStore('tracks', () => {
           break;
         }
       }
+    }
+    // Fall back to parent clips if not found in lanes
+    if (clipIndex === -1) {
+      clipIndex = track.clips.findIndex((c) => c.id === clipId);
+      targetClips = track.clips;
     }
     if (clipIndex === -1) return;
 
