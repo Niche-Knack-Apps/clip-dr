@@ -154,6 +154,10 @@ export const useUIStore = defineStore('ui', () => {
   // Active trim edge position — ghost line shown in waveform views during trim (transient, not serialized)
   const activeTrimEdge = ref<{ time: number; edge: 'left' | 'right' } | null>(null);
 
+  // Channel view mode: 'mono' = single lane per track, 'stereo' = L/R sub-lanes for stereo tracks
+  const channelViewMode = ref<'mono' | 'stereo'>('mono');
+  function setChannelViewMode(mode: 'mono' | 'stereo') { channelViewMode.value = mode; }
+
   return {
     trackPanelWidth,
     waveformHeight,
@@ -188,5 +192,7 @@ export const useUIStore = defineStore('ui', () => {
     clearHoveredTimemark,
     isClipDragActive,
     activeTrimEdge,
+    channelViewMode,
+    setChannelViewMode,
   };
 });

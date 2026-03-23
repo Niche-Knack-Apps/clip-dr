@@ -89,8 +89,10 @@ export function extractHiResPeaksForRange(
   rangeStartSec: number,
   rangeEndSec: number,
   targetBuckets: number,
+  channelIndex = 0,
 ): WaveformBucket[] {
-  const channelData = buffer.getChannelData(0);
+  const ch = Math.min(channelIndex, buffer.numberOfChannels - 1);
+  const channelData = buffer.getChannelData(ch);
   const sampleRate = buffer.sampleRate;
   const startSample = Math.max(0, Math.floor(rangeStartSec * sampleRate));
   const endSample = Math.min(channelData.length, Math.ceil(rangeEndSec * sampleRate));

@@ -15,6 +15,8 @@ interface Props {
   isSelected?: boolean;
   isCrossTrackDrag?: boolean;
   isActiveTrim?: boolean;
+  /** Source channel index for waveform rendering (0=left, 1=right). Default 0. */
+  channelIndex?: number;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -23,6 +25,7 @@ const props = withDefaults(defineProps<Props>(), {
   isSelected: false,
   isCrossTrackDrag: false,
   isActiveTrim: false,
+  channelIndex: 0,
 });
 
 const emit = defineEmits<{
@@ -156,10 +159,11 @@ let hiResCache: { key: string; data: number[] } | null = null;
  * Only called when zoomed in beyond the stored bucket resolution.
  */
 function extractHiResPeaks(buffer: AudioBuffer, targetBuckets: number): number[] {
-  const cacheKey = `${buffer.length}_${targetBuckets}`;
+  const cacheKey = `${buffer.length}_${targetBuckets}_ch${props.channelIndex}`;
   if (hiResCache?.key === cacheKey) return hiResCache.data;
 
-  const channelData = buffer.getChannelData(0);
+  const ch = Math.min(props.channelIndex, buffer.numberOfChannels - 1);
+  const channelData = buffer.getChannelData(ch);
   const samplesPerBucket = Math.ceil(channelData.length / targetBuckets);
   const waveform: number[] = new Array(targetBuckets * 2);
 

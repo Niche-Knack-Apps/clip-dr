@@ -134,6 +134,7 @@ export const SUPPORTED_FORMATS = [
 ];
 
 export const TRACK_HEIGHT = 60;
+export const TRACK_SUBLANE_HEIGHT = 36; // per-channel lane height in stereo view
 export const WORD_HEIGHT = 24;
 export const TITLEBAR_HEIGHT = 36;
 export const TOOLBAR_ROW_HEIGHT = 40;
