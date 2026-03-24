@@ -368,6 +368,14 @@ export const useProjectStore = defineStore('project', () => {
               }
             }
           }
+          // Diagnostic: verify mute/solo survived all downstream operations
+          const verifyTrack = tracksStore.tracks.find(t => t.id === importedTrackId);
+          if (verifyTrack && verifyTrack.muted !== pt.muted) {
+            console.warn(`[Project] MUTED LOST for ${pt.name}: expected ${pt.muted}, got ${verifyTrack.muted}`);
+          }
+          if (verifyTrack && verifyTrack.solo !== pt.solo) {
+            console.warn(`[Project] SOLO LOST for ${pt.name}: expected ${pt.solo}, got ${verifyTrack.solo}`);
+          }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           errors.push(`Track "${pt.name}" (${absPath}): ${msg}`);

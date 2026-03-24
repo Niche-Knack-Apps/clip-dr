@@ -2000,7 +2000,9 @@ export const useTracksStore = defineStore('tracks', () => {
       sourceDuration: track.audioData.sourceDuration ?? track.duration,
     };
 
-    tracks.value[trackIndex] = { ...track, clips: [clip] };
+    // FRESH READ: spread from tracks.value[trackIndex] to preserve any concurrent metadata changes
+    tracks.value[trackIndex] = { ...tracks.value[trackIndex], clips: [clip] };
+    _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
     return clipId;
@@ -2141,7 +2143,8 @@ export const useTracksStore = defineStore('tracks', () => {
         const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
         const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
         const newDuration = lastClipEnd - firstClipStart;
-        tracks.value[trackIndex] = { ...track, clips: newClips, trackStart: firstClipStart, duration: newDuration };
+        tracks.value[trackIndex] = { ...tracks.value[trackIndex], clips: newClips, trackStart: firstClipStart, duration: newDuration };
+        _cachedTrackMap = null;
         adjustEnvelopeForBoundsChange(trackIndex, oldTrackStart, firstClipStart, newDuration);
         triggerRef(tracks); bumpSyncEpoch();
         if (focusedClipId.value === clipId) focusedClipId.value = null;
@@ -2766,8 +2769,9 @@ export const useTracksStore = defineStore('tracks', () => {
       waveform[offset + i] = chunk.waveform[i];
     }
     track.importProgress = chunk.progress;
-    // Single shallow trigger — replace just this slot
-    tracks.value[idx] = { ...track };
+    // Single shallow trigger — replace just this slot (fresh read to preserve concurrent state)
+    tracks.value[idx] = { ...tracks.value[idx], importProgress: chunk.progress };
+    _cachedTrackMap = null;
   }
 
   // Finalize waveform after Rust decode completes (corrects VBR duration estimates)
@@ -2825,6 +2829,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
     tracks.value[idx] = { ...tracks.value[idx], clips };
+    _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
     // Fill waveforms immediately if parent waveform already available
@@ -2857,20 +2862,20 @@ export const useTracksStore = defineStore('tracks', () => {
     const buckets = parentWaveform.length / 2;
 
     const idx = tracks.value.findIndex(t => t.id === trackId);
-    tracks.value[idx] = {
-      ...track,
-      clips: track.clips.map(clip => {
-        // Skip source-offset slicing for clips with in-memory buffer (small-file)
-        if (clip.buffer) return clip;
-
-        const srcOffset = clip.sourceOffset ?? 0;
-        const startFrac = srcOffset / srcDuration;
-        const endFrac = Math.min((srcOffset + clip.duration) / srcDuration, 1.0);
-        const startBucket = Math.floor(startFrac * buckets);
-        const endBucket = Math.ceil(endFrac * buckets);
-        return { ...clip, waveformData: parentWaveform.slice(startBucket * 2, endBucket * 2) };
-      }),
-    };
+    // Compute new clips using captured track data (for waveform slicing)
+    const newClips = track.clips.map(clip => {
+      if (clip.buffer) return clip;
+      const srcOffset = clip.sourceOffset ?? 0;
+      const startFrac = srcOffset / srcDuration;
+      const endFrac = Math.min((srcOffset + clip.duration) / srcDuration, 1.0);
+      const startBucket = Math.floor(startFrac * buckets);
+      const endBucket = Math.ceil(endFrac * buckets);
+      return { ...clip, waveformData: parentWaveform.slice(startBucket * 2, endBucket * 2) };
+    });
+    // FRESH READ: spread from tracks.value[idx] (not captured `track`) to preserve
+    // any metadata changes (muted, solo, etc.) applied between capture and now.
+    tracks.value[idx] = { ...tracks.value[idx], clips: newClips };
+    _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
   }
