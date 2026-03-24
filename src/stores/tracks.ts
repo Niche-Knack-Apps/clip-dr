@@ -3449,7 +3449,10 @@ export const useTracksStore = defineStore('tracks', () => {
       const trackEnd = track.trackStart + track.duration;
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-      const clips = getTrackClips(track.id);
+      // Use lane clips when materialized (reflects independent channel positions)
+      const clips = (track.channelLanes && track.channelLanes.length > 0)
+        ? track.channelLanes.flatMap(lane => lane.clips)
+        : getTrackClips(track.id);
       for (const clip of clips) {
         const clipEnd = clip.clipStart + clip.duration;
         if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;

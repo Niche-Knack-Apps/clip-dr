@@ -106,6 +106,7 @@ export function useClipping() {
           volume: 1,
           clips,
           sourcePath: segments[0]?.sourceFile,
+          channelMode: channels >= 2 ? 'stereo' : 'mono',
         };
 
         console.log(`[Clipping] Created EDL clip "${clipName}" (${totalDuration.toFixed(2)}s) with ${segments.length} segment(s)`);
@@ -152,6 +153,7 @@ export function useClipping() {
         const contributingTrack = tracksStore.tracks.find(t =>
           t.trackStart < outPoint && t.trackStart + t.duration > inPoint
         );
+        const numChannels = extracted.buffer.numberOfChannels;
         newTrack = {
           id: generateId(),
           name: clipName,
@@ -159,7 +161,7 @@ export function useClipping() {
             buffer: extracted.buffer,
             waveformData: waveform,
             sampleRate: extracted.buffer.sampleRate,
-            channels: extracted.buffer.numberOfChannels,
+            channels: numChannels,
           },
           trackStart: inPoint,
           duration: totalDuration,
@@ -169,6 +171,7 @@ export function useClipping() {
           volume: 1,
           clips: clips.length > 0 ? clips : undefined,
           sourcePath: segments[0]?.sourceFile || contributingTrack?.sourcePath || contributingTrack?.cachedAudioPath,
+          channelMode: numChannels >= 2 ? 'stereo' : 'mono',
         };
       }
 
