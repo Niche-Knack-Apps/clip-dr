@@ -413,18 +413,16 @@ export const useTracksStore = defineStore('tracks', () => {
     // Accept stereo tracks by channelMode OR by actual channel count
     const isStereo = track.channelMode === 'stereo' || (track.audioData.channels ?? 1) >= 2;
     if (!isStereo) return;
-    useHistoryStore().pushState('Toggle channel link');
     const newLinked = track.channelLinked === false ? true : false;
 
     // Materialize lanes eagerly on unlink (not lazily during drag).
-    // Lazy materialization during drag replaces the track object mid-drag,
-    // causing Vue to destroy/recreate ClipRegion components and orphan mouse listeners.
     if (!newLinked && !track.channelLanes) {
       materializeChannelLanes(trackId);
-      // Re-read track — materializeChannelLanes replaced the object
       track = getTrackById(trackId)!;
     }
 
+    // Push history AFTER materialization so the snapshot includes channelLanes
+    useHistoryStore().pushState('Toggle channel link');
     track.channelLinked = newLinked;
     triggerRef(tracks);
     console.log(`[Tracks] Channel ${track.channelLinked ? 'linked' : 'unlinked'}: ${track.name}`);
