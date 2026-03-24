@@ -8,6 +8,8 @@ interface Props {
   color?: string;
   backgroundColor?: string;
   height?: number;
+  /** Channel index for per-channel rendering (0=L, 1=R). Undefined = composite/default. */
+  channelIndex?: number;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -43,7 +45,7 @@ function render() {
     // Layered rendering: each track in its own color with alpha blending
     const layerBuckets = layers.map(layer => ({
       color: layer.color,
-      buckets: getBucketsForRangeForLayer(layer, props.startTime, props.endTime, width.value),
+      buckets: getBucketsForRangeForLayer(layer, props.startTime, props.endTime, width.value, props.channelIndex ?? 0),
     }));
 
     renderLayeredWaveform(ctx, layerBuckets, {
