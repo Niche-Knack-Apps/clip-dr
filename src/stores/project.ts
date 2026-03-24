@@ -276,6 +276,7 @@ export const useProjectStore = defineStore('project', () => {
             lastTrack.volume = pt.volume;
             lastTrack.muted = pt.muted;
             lastTrack.solo = pt.solo;
+            lastTrack.autoMuted = false; // Saved state is explicit, not auto-derived
             if (pt.tag) lastTrack.tag = pt.tag;
             if (pt.timemarks) lastTrack.timemarks = pt.timemarks;
             if (pt.volumeEnvelope) lastTrack.volumeEnvelope = pt.volumeEnvelope;
