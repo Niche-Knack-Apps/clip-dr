@@ -2674,18 +2674,31 @@ export const useTracksStore = defineStore('tracks', () => {
       return p;
     });
 
+    // Detect channel count from pasted buffer — empty tracks start as mono (channels: 1)
+    // but pasting a stereo clip should upgrade the track to stereo
+    const maxChannels = Math.max(
+      track.audioData.channels ?? 1,
+      ...currentClips.filter(c => c.buffer).map(c => c.buffer!.numberOfChannels)
+    );
+    const updatedAudioData = maxChannels !== (track.audioData.channels ?? 1)
+      ? { ...track.audioData, channels: maxChannels }
+      : track.audioData;
+
     tracks.value[trackIndex] = {
-      ...track,
+      ...tracks.value[trackIndex],  // Fresh read to preserve concurrent metadata
       clips: currentClips,
       timemarks: newTimemarks,
       volumeEnvelope: newEnvelope,
       trackStart: firstClipStart,
       duration: lastClipEnd - firstClipStart,
+      audioData: updatedAudioData,
+      channelMode: maxChannels >= 2 ? 'stereo' : (track.channelMode ?? 'mono'),
     };
+    _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
 
-    console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip at playhead ${playheadTime.toFixed(2)}s in track ${track.name}`);
+    console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip (${maxChannels}ch) at playhead ${playheadTime.toFixed(2)}s in track ${track.name}`);
     return true;
   }
 
@@ -2828,7 +2841,12 @@ export const useTracksStore = defineStore('tracks', () => {
   function setTrackClips(trackId: string, clips: TrackClip[]): void {
     const idx = tracks.value.findIndex(t => t.id === trackId);
     if (idx === -1) return;
+    const before = tracks.value[idx];
     tracks.value[idx] = { ...tracks.value[idx], clips };
+    const after = tracks.value[idx];
+    if (before.muted !== after.muted || before.solo !== after.solo) {
+      console.warn(`[Tracks] setTrackClips CHANGED mute/solo! before: m=${before.muted}/s=${before.solo}, after: m=${after.muted}/s=${after.solo}`);
+    }
     _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
@@ -2874,7 +2892,12 @@ export const useTracksStore = defineStore('tracks', () => {
     });
     // FRESH READ: spread from tracks.value[idx] (not captured `track`) to preserve
     // any metadata changes (muted, solo, etc.) applied between capture and now.
+    const beforeFCW = tracks.value[idx];
     tracks.value[idx] = { ...tracks.value[idx], clips: newClips };
+    const afterFCW = tracks.value[idx];
+    if (beforeFCW.muted !== afterFCW.muted || beforeFCW.solo !== afterFCW.solo) {
+      console.warn(`[Tracks] finalizeClipWaveforms CHANGED mute/solo! before: m=${beforeFCW.muted}/s=${beforeFCW.solo}, after: m=${afterFCW.muted}/s=${afterFCW.solo}`);
+    }
     _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();

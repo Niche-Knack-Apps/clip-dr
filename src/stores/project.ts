@@ -368,17 +368,24 @@ export const useProjectStore = defineStore('project', () => {
               }
             }
           }
-          // Diagnostic: verify mute/solo survived all downstream operations
-          const verifyTrack = tracksStore.tracks.find(t => t.id === importedTrackId);
-          if (verifyTrack && verifyTrack.muted !== pt.muted) {
-            console.warn(`[Project] MUTED LOST for ${pt.name}: expected ${pt.muted}, got ${verifyTrack.muted}`);
-          }
-          if (verifyTrack && verifyTrack.solo !== pt.solo) {
-            console.warn(`[Project] SOLO LOST for ${pt.name}: expected ${pt.solo}, got ${verifyTrack.solo}`);
+          // Diagnostic: log ALL tracks' muted/solo after each track's metadata + clips are restored
+          console.warn(`[Project] After restoring ${pt.name}: ALL tracks state:`);
+          for (const t of tracksStore.tracks) {
+            console.warn(`  [${t.name}] muted=${t.muted} solo=${t.solo} autoMuted=${t.autoMuted}`);
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           errors.push(`Track "${pt.name}" (${absPath}): ${msg}`);
+        }
+      }
+
+      // Diagnostic: final mute/solo state after all tracks loaded
+      for (const pt of project.tracks) {
+        const newId = idMap.get(pt.id);
+        if (!newId) continue;
+        const finalTrack = tracksStore.tracks.find(t => t.id === newId);
+        if (finalTrack && (finalTrack.muted !== pt.muted || finalTrack.solo !== pt.solo)) {
+          console.warn(`[Project] FINAL STATE MISMATCH for ${pt.name}: saved muted=${pt.muted}/solo=${pt.solo}, actual muted=${finalTrack.muted}/solo=${finalTrack.solo}`);
         }
       }
 
