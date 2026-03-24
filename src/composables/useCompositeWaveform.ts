@@ -192,17 +192,23 @@ export function useCompositeWaveform() {
       }
 
       // Multi-clip track: build per-track bucket array
+      // Use lane clips when materialized (reflects independent lane positions)
+      const effectiveClips = (track.channelLanes && track.channelLanes.length > 0)
+        ? track.channelLanes.flatMap(lane => lane.clips)
+        : tracksStore.getTrackClips(track.id);
       const trackBuckets = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
-      const clips = tracksStore.getTrackClips(track.id);
-      for (const clip of clips) {
+      for (const clip of effectiveClips) {
         addClipToComposite(trackBuckets, clip, timelineDuration, bucketDuration);
       }
 
       // Build WaveformLayerClip array for ALL multi-clip tracks:
       // EDL clips have sourceFile; small-file clips have buffer
+      const sourceClips = (track.channelLanes && track.channelLanes.length > 0)
+        ? track.channelLanes.flatMap(lane => lane.clips)
+        : (track.clips ?? []);
       const layerClips: WaveformLayerClip[] = [];
       let hasAnyHiRes = false;
-      for (const c of track.clips!) {
+      for (const c of sourceClips) {
         if (c.buffer) {
           // Small-file clip: hi-res from AudioBuffer (shared ref, not cloned)
           layerClips.push({
