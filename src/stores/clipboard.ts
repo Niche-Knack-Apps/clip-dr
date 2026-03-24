@@ -31,6 +31,8 @@ export interface AudioClipboard {
   sourceTrackId: string;
   waveformData: number[];
   copiedAt: number;
+  /** Which source channels were copied (e.g., [0] for L only, [0,1] for stereo) */
+  sourceChannels?: number[];
   /** Virtual source for large-file regions — audio materialized on paste */
   virtualSource?: {
     kind: 'mixdown';
@@ -161,9 +163,21 @@ export const useClipboardStore = defineStore('clipboard', () => {
       return false;
     }
 
-    // Extract samples from each channel
+    // Determine which channels to copy — lane-aware
+    const selectedLane = tracksStore.getSelectedLane();
+    const selectedTrack = tracksStore.selectedTrack;
+    let channelsToCopy: number[];
+    if (selectedLane && selectedTrack?.channelLinked === false) {
+      // Unlinked + specific lane clip focused → copy only that channel
+      channelsToCopy = [selectedLane.channelIndex];
+    } else {
+      // Linked, no lane focused, or mono track → copy all channels
+      channelsToCopy = Array.from({ length: buffer.numberOfChannels }, (_, i) => i);
+    }
+
+    // Extract samples from selected channels only
     const samples: Float32Array[] = [];
-    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    for (const ch of channelsToCopy) {
       const channelData = buffer.getChannelData(ch);
       const extracted = new Float32Array(sampleCount);
       for (let i = 0; i < sampleCount; i++) {
@@ -172,15 +186,14 @@ export const useClipboardStore = defineStore('clipboard', () => {
       samples.push(extracted);
     }
 
-    // Create AudioBuffer for playback preview
+    // Create AudioBuffer for playback preview (channel count matches selection)
     const ctx = audioStore.getAudioContext();
     const newBuffer = ctx.createBuffer(
-      buffer.numberOfChannels,
+      channelsToCopy.length,
       sampleCount,
       buffer.sampleRate
     );
-    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-      // Copy channel data - create a new Float32Array to ensure correct type
+    for (let ch = 0; ch < channelsToCopy.length; ch++) {
       const channelData = newBuffer.getChannelData(ch);
       channelData.set(samples[ch]);
     }
@@ -197,9 +210,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
       sourceTrackId: trackId,
       waveformData,
       copiedAt: Date.now(),
+      sourceChannels: channelsToCopy,
     };
 
-    console.log(`[Clipboard] Copied ${(end - start).toFixed(2)}s from track ${trackId}`);
+    console.log(`[Clipboard] Copied ${(end - start).toFixed(2)}s (${channelsToCopy.length}ch) from track ${trackId}`);
     return true;
   }
 
@@ -221,13 +235,24 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
       // Copy clip audio to clipboard (requires buffer — large-file clips can't be cut this way)
       if (!clip.buffer) return false;
+
+      // Lane-aware channel extraction: unlinked + lane clip → copy only that channel
+      const selectedLane = tracksStore.getSelectedLane();
+      const srcTrackForLane = tracksStore.tracks.find(t => t.id === trackId);
+      let cutChannels: number[];
+      if (selectedLane && srcTrackForLane?.channelLinked === false) {
+        cutChannels = [selectedLane.channelIndex];
+      } else {
+        cutChannels = Array.from({ length: clip.buffer.numberOfChannels }, (_, i) => i);
+      }
+
       const clonedBuffer = ctx.createBuffer(
-        clip.buffer.numberOfChannels,
+        cutChannels.length,
         clip.buffer.length,
         clip.buffer.sampleRate
       );
-      for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
-        clonedBuffer.getChannelData(ch).set(clip.buffer.getChannelData(ch));
+      for (let i = 0; i < cutChannels.length; i++) {
+        clonedBuffer.getChannelData(i).set(clip.buffer.getChannelData(cutChannels[i]));
       }
       clipboardBuffer.value = clonedBuffer;
 
@@ -245,6 +270,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         sourceTrackId: trackId,
         waveformData: waveform,
         copiedAt: Date.now(),
+        sourceChannels: cutChannels,
         virtualSource: segSourceFile ? {
           kind: 'mixdown',
           segments: [{

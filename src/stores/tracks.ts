@@ -3128,6 +3128,16 @@ export const useTracksStore = defineStore('tracks', () => {
     return track?.channelLanes?.find(l => l.channelIndex === channelIndex);
   }
 
+  /** Get the channel lane of the currently focused clip (if any).
+   *  Returns null if no clip focused, clip is in parent clips, or selection is inconsistent. */
+  function getSelectedLane(): import('@/shared/types').ChannelLane | null {
+    if (!focusedClipId.value) return null;
+    const trackId = selectedTrackId.value;
+    if (!trackId || trackId === 'ALL') return null;
+    const found = findClipById(trackId as string, focusedClipId.value);
+    return found?.lane ?? null;
+  }
+
   function setChannelLaneVolume(trackId: string, channelIndex: number, volume: number): void {
     const track = getTrackById(trackId);
     if (!track) return;
@@ -3604,6 +3614,7 @@ export const useTracksStore = defineStore('tracks', () => {
     updateVolumePoint,
     removeVolumePoint,
     getChannelLane,
+    getSelectedLane,
     setChannelLaneVolume,
     addChannelLaneVolumePoint,
     updateChannelLaneVolumePoint,
