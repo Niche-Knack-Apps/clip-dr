@@ -209,6 +209,8 @@ export function useClipping() {
                 duration: overlapEnd - overlapStart,
                 sourceFile: clip.sourceFile || sourceTrack.sourcePath || sourceTrack.cachedAudioPath,
                 sourceOffset: (clip.sourceOffset ?? 0) + (overlapStart - clip.clipStart),
+                sourceIn: (clip.sourceOffset ?? 0) + (overlapStart - clip.clipStart),
+                sourceDuration: overlapEnd - overlapStart,
               });
             }
             return {
@@ -220,6 +222,8 @@ export function useClipping() {
             };
           });
           newTrack.channelLinked = sourceTrack.channelLinked;
+          // Clear parent clips — lane clips are the source of truth for rendering
+          newTrack.clips = undefined;
 
           // Populate lane clip waveforms + buffers from the extracted audio
           if (newTrack.audioData.buffer && newTrack.audioData.waveformData.length > 0) {
