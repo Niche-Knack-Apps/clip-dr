@@ -55,9 +55,14 @@ const tracksStore = useTracksStore();
 const uiStore = useUIStore();
 
 // Stereo view: whether this track should show L/R sub-lanes
-const isStereoView = computed(() =>
-  uiStore.showChannelLanes && (props.track.channelMode === 'stereo' || (props.track.audioData.channels ?? 1) >= 2)
-);
+// Reads from store (not stale prop) so paste-to-stereo triggers re-render immediately
+const isStereoView = computed(() => {
+  void tracksStore.tracks; // react to triggerRef(tracks)
+  const t = tracksStore.getTrackById(props.track.id);
+  return uiStore.showChannelLanes && (
+    t?.channelMode === 'stereo' || (t?.audioData.channels ?? 1) >= 2
+  );
+});
 const effectiveTrackHeight = computed(() =>
   isStereoView.value ? TRACK_SUBLANE_HEIGHT * 2 : TRACK_HEIGHT
 );
