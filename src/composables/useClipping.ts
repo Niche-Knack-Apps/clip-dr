@@ -185,6 +185,44 @@ export function useClipping() {
         };
       }
 
+      // If source track has materialized channel lanes, create lane structure on new track
+      // so per-channel clip positions are preserved (offsets for askew L/R)
+      if (newTrack.channelMode === 'stereo') {
+        const sourceTrack = sourceTrackIds
+          ? tracksStore.tracks.find(t => sourceTrackIds!.includes(t.id) && t.channelLanes && t.channelLanes.length > 0)
+          : tracksStore.tracks.find(t => t.channelLanes && t.channelLanes.length > 0 && t.trackStart < outPoint && t.trackStart + t.duration > inPoint);
+        if (sourceTrack?.channelLanes) {
+          newTrack.channelLanes = sourceTrack.channelLanes.map(lane => {
+            // Build per-lane clips from the overlapping region
+            const laneClips: TrackClip[] = [];
+            for (const clip of lane.clips) {
+              const clipEnd = clip.clipStart + clip.duration;
+              if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
+              const overlapStart = Math.max(clip.clipStart, inPoint);
+              const overlapEnd = Math.min(clipEnd, outPoint);
+              if (overlapEnd <= overlapStart) continue;
+              laneClips.push({
+                id: generateId(),
+                buffer: null,
+                waveformData: [],
+                clipStart: overlapStart,
+                duration: overlapEnd - overlapStart,
+                sourceFile: clip.sourceFile || sourceTrack.sourcePath || sourceTrack.cachedAudioPath,
+                sourceOffset: (clip.sourceOffset ?? 0) + (overlapStart - clip.clipStart),
+              });
+            }
+            return {
+              id: generateId(),
+              channelIndex: lane.channelIndex,
+              kind: lane.kind,
+              volume: lane.volume,
+              clips: laneClips,
+            };
+          });
+          newTrack.channelLinked = sourceTrack.channelLinked;
+        }
+      }
+
       // Insert below current selected track
       const currentTrackId = tracksStore.selectedTrackId;
       let insertIndex = tracksStore.tracks.length;

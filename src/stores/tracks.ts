@@ -920,7 +920,14 @@ export const useTracksStore = defineStore('tracks', () => {
             anyChanged = true;
           }
         }
-        lane.clips = newLaneClips;
+        // Ripple: shift clips at/after outPoint left by the gap duration
+        const gapDuration = outPoint - inPoint;
+        lane.clips = newLaneClips.map(c => {
+          if (c.clipStart >= outPoint) {
+            return { ...c, clipStart: c.clipStart - gapDuration };
+          }
+          return c;
+        });
       }
       // Also apply to parent clips if they exist
       if (track.clips && track.clips.length > 0) {
