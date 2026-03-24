@@ -346,6 +346,8 @@ export interface WaveformLayer {
   sourcePath?: string;
   hasPeakPyramid?: boolean;
   clips?: WaveformLayerClip[];
+  /** Source channel index when this layer represents a specific channel lane (0=L, 1=R) */
+  channelIndex?: number;
 }
 
 export interface AudioMetadata {

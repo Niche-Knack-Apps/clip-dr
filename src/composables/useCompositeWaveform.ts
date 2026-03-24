@@ -191,59 +191,68 @@ export function useCompositeWaveform() {
         continue;
       }
 
-      // Multi-clip track: build per-track bucket array
-      // Use lane clips when materialized (reflects independent lane positions)
-      const effectiveClips = (track.channelLanes && track.channelLanes.length > 0)
-        ? track.channelLanes.flatMap(lane => lane.clips)
-        : tracksStore.getTrackClips(track.id);
-      const trackBuckets = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
-      for (const clip of effectiveClips) {
-        addClipToComposite(trackBuckets, clip, timelineDuration, bucketDuration);
-      }
-
-      // Build WaveformLayerClip array for ALL multi-clip tracks:
-      // EDL clips have sourceFile; small-file clips have buffer
-      const sourceClips = (track.channelLanes && track.channelLanes.length > 0)
-        ? track.channelLanes.flatMap(lane => lane.clips)
-        : (track.clips ?? []);
-      const layerClips: WaveformLayerClip[] = [];
-      let hasAnyHiRes = false;
-      for (const c of sourceClips) {
-        if (c.buffer) {
-          // Small-file clip: hi-res from AudioBuffer (shared ref, not cloned)
-          layerClips.push({
-            clipStart: c.clipStart,
-            duration: c.duration,
-            sourceOffset: c.sourceOffset ?? 0,
-            sourceIn: c.sourceIn ?? c.sourceOffset ?? 0,
-            buffer: c.buffer,
+      // Multi-clip track: when lanes are materialized, emit separate layers per lane
+      // so the zoomed stereo view can filter L/R independently
+      if (track.channelLanes && track.channelLanes.length > 0) {
+        for (const lane of track.channelLanes) {
+          const laneBuckets = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
+          for (const clip of lane.clips) {
+            addClipToComposite(laneBuckets, clip, timelineDuration, bucketDuration);
+          }
+          const laneLayerClips: WaveformLayerClip[] = [];
+          let hasAnyHiRes = false;
+          for (const c of lane.clips) {
+            if (c.buffer) {
+              laneLayerClips.push({ clipStart: c.clipStart, duration: c.duration, sourceOffset: c.sourceOffset ?? 0, sourceIn: c.sourceIn ?? c.sourceOffset ?? 0, buffer: c.buffer });
+              hasAnyHiRes = true;
+            } else if (c.sourceFile) {
+              laneLayerClips.push({ clipStart: c.clipStart, duration: c.duration, sourceFile: c.sourceFile, pyramidSourceFile: track.sourcePath, sourceOffset: c.sourceOffset ?? 0 });
+              hasAnyHiRes = true;
+            }
+          }
+          const isEDL = laneLayerClips.length > 0 && laneLayerClips.every(c => c.sourceFile);
+          layers.push({
+            trackId: track.id,
+            color: track.color,
+            waveformData: laneBuckets,
+            trackStart: track.trackStart,
+            duration: track.duration,
+            sourcePath: track.sourcePath,
+            hasPeakPyramid: isEDL ? true : track.hasPeakPyramid,
+            clips: hasAnyHiRes ? laneLayerClips : undefined,
+            channelIndex: lane.channelIndex,
           });
-          hasAnyHiRes = true;
-        } else if (c.sourceFile) {
-          // EDL clip: peak tiles from Rust
-          layerClips.push({
-            clipStart: c.clipStart,
-            duration: c.duration,
-            sourceFile: c.sourceFile,
-            pyramidSourceFile: track.sourcePath,
-            sourceOffset: c.sourceOffset ?? 0,
-          });
-          hasAnyHiRes = true;
         }
+      } else {
+        // No lanes: single combined layer (original behavior)
+        const trackBuckets = new Array(WAVEFORM_BUCKET_COUNT * 2).fill(0);
+        const clips = tracksStore.getTrackClips(track.id);
+        for (const clip of clips) {
+          addClipToComposite(trackBuckets, clip, timelineDuration, bucketDuration);
+        }
+        const layerClips: WaveformLayerClip[] = [];
+        let hasAnyHiRes = false;
+        for (const c of (track.clips ?? [])) {
+          if (c.buffer) {
+            layerClips.push({ clipStart: c.clipStart, duration: c.duration, sourceOffset: c.sourceOffset ?? 0, sourceIn: c.sourceIn ?? c.sourceOffset ?? 0, buffer: c.buffer });
+            hasAnyHiRes = true;
+          } else if (c.sourceFile) {
+            layerClips.push({ clipStart: c.clipStart, duration: c.duration, sourceFile: c.sourceFile, pyramidSourceFile: track.sourcePath, sourceOffset: c.sourceOffset ?? 0 });
+            hasAnyHiRes = true;
+          }
+        }
+        const isEDL = layerClips.length > 0 && layerClips.every(c => c.sourceFile);
+        layers.push({
+          trackId: track.id,
+          color: track.color,
+          waveformData: trackBuckets,
+          trackStart: track.trackStart,
+          duration: track.duration,
+          sourcePath: track.sourcePath,
+          hasPeakPyramid: isEDL ? true : track.hasPeakPyramid,
+          clips: hasAnyHiRes ? layerClips : undefined,
+        });
       }
-
-      const isEDL = layerClips.length > 0 && layerClips.every(c => c.sourceFile);
-
-      layers.push({
-        trackId: track.id,
-        color: track.color,
-        waveformData: trackBuckets,
-        trackStart: track.trackStart,
-        duration: track.duration,
-        sourcePath: track.sourcePath,
-        hasPeakPyramid: isEDL ? true : track.hasPeakPyramid,
-        clips: hasAnyHiRes ? layerClips : undefined,
-      });
     }
 
     // Deduplicate layer colors — reassign duplicates from unused TRACK_COLORS

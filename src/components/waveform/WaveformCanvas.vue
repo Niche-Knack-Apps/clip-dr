@@ -39,7 +39,13 @@ function render() {
   canvas.height = props.height * dpr;
   ctx.scale(dpr, dpr);
 
-  const layers = waveformLayers.value;
+  let layers = waveformLayers.value;
+
+  // When channelIndex is specified, filter to layers matching that channel
+  // (layers with no channelIndex are included in all views — they're non-lane layers)
+  if (props.channelIndex != null) {
+    layers = layers.filter(l => l.channelIndex === props.channelIndex || l.channelIndex == null);
+  }
 
   if (layers.length > 0) {
     // Layered rendering: each track in its own color with alpha blending
