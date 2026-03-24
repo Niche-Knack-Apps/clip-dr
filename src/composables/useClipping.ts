@@ -116,7 +116,7 @@ export function useClipping() {
         const ctx = audioStore.getAudioContext();
         const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds);
         if (!extracted) {
-          console.log('[Clipping] No audio found in I/O region');
+          console.warn('[Clipping] No audio found in I/O region');
           return null;
         }
         const clipName = `Clip ${tracksStore.tracks.length + 1}`;
@@ -154,6 +154,7 @@ export function useClipping() {
           t.trackStart < outPoint && t.trackStart + t.duration > inPoint
         );
         const numChannels = extracted.buffer.numberOfChannels;
+        console.warn(`[Clipping] createClip: extracted ${numChannels}ch buffer, segments=${segments.length}, channelMode=${numChannels >= 2 ? 'stereo' : 'mono'}`);
         newTrack = {
           id: generateId(),
           name: clipName,

@@ -2014,7 +2014,7 @@ export const useTracksStore = defineStore('tracks', () => {
     }
 
     const waveformData = await generateWaveformFromBuffer(mixedBuffer);
-    console.log(`[Tracks] Extracted ${regionDuration.toFixed(2)}s from ${contributions.length} tracks`);
+    console.warn(`[Tracks] extractRegion: ${contributions.length} contributions, maxCh=${maxChannels}, mixedBuf=${mixedBuffer.numberOfChannels}ch, sr=${sampleRate}, dur=${regionDuration.toFixed(2)}s`);
     return { buffer: mixedBuffer, waveformData };
   }
 
