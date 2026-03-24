@@ -1625,15 +1625,18 @@ export const useTracksStore = defineStore('tracks', () => {
       clipStart: snappedStart,
     };
 
-    // When track is linked and clip is in a lane, also move the paired clip in the other lane
+    // When track is linked and clip is in a lane, also move the paired clip in the other lane.
+    // Apply the same DELTA (not absolute position) to preserve relative offset between lanes.
     if (targetLane && track.channelLinked !== false && track.channelLanes) {
+      const delta = snappedStart - clip.clipStart;
       const groupId = targetClips[clipIndex].linkedClipGroupId;
-      if (groupId) {
+      if (groupId && delta !== 0) {
         for (const otherLane of track.channelLanes) {
           if (otherLane === targetLane) continue;
           const pairedIdx = otherLane.clips.findIndex(c => c.linkedClipGroupId === groupId);
           if (pairedIdx !== -1) {
-            otherLane.clips[pairedIdx] = { ...otherLane.clips[pairedIdx], clipStart: snappedStart };
+            const pairedNewStart = Math.max(0, otherLane.clips[pairedIdx].clipStart + delta);
+            otherLane.clips[pairedIdx] = { ...otherLane.clips[pairedIdx], clipStart: pairedNewStart };
             otherLane.clips = [...otherLane.clips];
           }
         }
