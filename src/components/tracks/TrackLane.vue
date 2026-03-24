@@ -61,6 +61,12 @@ const isStereoView = computed(() =>
 const effectiveTrackHeight = computed(() =>
   isStereoView.value ? TRACK_SUBLANE_HEIGHT * 2 : TRACK_HEIGHT
 );
+// Reactive channelLinked — reads from store, not stale prop
+const isChannelLinked = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  return t?.channelLinked !== false;
+});
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
@@ -448,9 +454,18 @@ function flushTrim() {
   }
 
   // Update ghost trim edge line position for waveform views
-  const clip = trackClips.value.find(c => c.id === trimClipId.value);
-  if (clip) {
-    const edgeTime = trimEdge.value === 'left' ? clip.clipStart : clip.clipStart + clip.duration;
+  // Search lane clips first (trim may be on a lane clip), then parent
+  let trimClip: import('@/shared/types').TrackClip | undefined;
+  const currentTrack = tracksStore.getTrackById(props.track.id);
+  if (currentTrack?.channelLanes) {
+    for (const lane of currentTrack.channelLanes) {
+      trimClip = lane.clips.find(c => c.id === trimClipId.value);
+      if (trimClip) break;
+    }
+  }
+  if (!trimClip) trimClip = trackClips.value.find(c => c.id === trimClipId.value);
+  if (trimClip) {
+    const edgeTime = trimEdge.value === 'left' ? trimClip.clipStart : trimClip.clipStart + trimClip.duration;
     uiStore.activeTrimEdge = { time: edgeTime, edge: trimEdge.value };
   }
 }
@@ -716,15 +731,15 @@ onUnmounted(() => {
             type="button"
             :class="[
               'w-5 h-5 flex items-center justify-center rounded transition-colors',
-              track.channelLinked !== false
+              isChannelLinked
                 ? 'bg-cyan-700 text-cyan-200'
                 : 'bg-gray-700 text-gray-500 hover:bg-gray-600',
             ]"
-            :title="track.channelLinked !== false ? 'Channels linked — unlink for independent editing' : 'Channels unlinked — click to relink'"
+            :title="isChannelLinked ? 'Channels linked — unlink for independent editing' : 'Channels unlinked — click to relink'"
             @click.stop="tracksStore.toggleChannelLinked(track.id)"
           >
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
-              <path v-if="track.channelLinked !== false" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              <path v-if="isChannelLinked" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
               <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
             </svg>
           </button>
