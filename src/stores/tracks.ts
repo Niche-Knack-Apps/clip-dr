@@ -870,6 +870,81 @@ export const useTracksStore = defineStore('tracks', () => {
 
     const { keepTrack = false } = opts;
 
+    // ── Lane-aware path: when channel lanes are materialized, cut from each lane ──
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      let anyChanged = false;
+      for (const lane of track.channelLanes) {
+        if (lane.clips.length === 0) continue;
+        const newLaneClips: TrackClip[] = [];
+        for (const clip of lane.clips) {
+          const clipEnd = clip.clipStart + clip.duration;
+          // No overlap — keep clip
+          if (clip.clipStart >= outPoint || clipEnd <= inPoint) {
+            newLaneClips.push(clip);
+            continue;
+          }
+          // Fully inside cut region — remove
+          if (clip.clipStart >= inPoint && clipEnd <= outPoint) {
+            anyChanged = true;
+            continue;
+          }
+          // Partial overlap — trim
+          if (clip.clipStart < inPoint && clipEnd > outPoint) {
+            // Cut spans middle of clip — split into before and after
+            const beforeDuration = inPoint - clip.clipStart;
+            const afterOffset = (clip.sourceOffset ?? 0) + (outPoint - clip.clipStart);
+            const afterDuration = clipEnd - outPoint;
+            newLaneClips.push({ ...clip, duration: beforeDuration });
+            newLaneClips.push({
+              ...clip,
+              id: generateId(),
+              clipStart: outPoint,
+              sourceOffset: afterOffset,
+              duration: afterDuration,
+              linkedClipGroupId: clip.linkedClipGroupId,
+            });
+            anyChanged = true;
+          } else if (clip.clipStart < inPoint) {
+            // Trim right side
+            newLaneClips.push({ ...clip, duration: inPoint - clip.clipStart });
+            anyChanged = true;
+          } else {
+            // Trim left side
+            const trimAmount = outPoint - clip.clipStart;
+            newLaneClips.push({
+              ...clip,
+              clipStart: outPoint,
+              sourceOffset: (clip.sourceOffset ?? 0) + trimAmount,
+              duration: clip.duration - trimAmount,
+            });
+            anyChanged = true;
+          }
+        }
+        lane.clips = newLaneClips;
+      }
+      // Also apply to parent clips if they exist
+      if (track.clips && track.clips.length > 0) {
+        await cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, opts);
+      } else if (anyChanged) {
+        // Recompute track bounds from lane clips
+        const allClips = track.channelLanes.flatMap(l => l.clips);
+        const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+        if (trackIndex !== -1 && allClips.length > 0) {
+          const firstClipStart = Math.min(...allClips.map(c => c.clipStart));
+          const lastClipEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
+          tracks.value[trackIndex] = {
+            ...tracks.value[trackIndex],
+            trackStart: firstClipStart,
+            duration: lastClipEnd - firstClipStart,
+          };
+          _cachedTrackMap = null;
+        }
+        triggerRef(tracks);
+        bumpSyncEpoch();
+      }
+      return anyChanged ? { buffer: null, waveformData: [] } : null;
+    }
+
     // ── Multi-clip track: process each clip individually ──
     if (track.clips && track.clips.length > 0) {
       return await cutRegionFromClips(track, trackId, inPoint, outPoint, audioContext, opts);
@@ -1829,7 +1904,10 @@ export const useTracksStore = defineStore('tracks', () => {
       // Quick reject: track has no overlap with extraction region
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-      const clips = getTrackClips(track.id);
+      // Use lane clips when materialized (reflects independent positions), else parent clips
+      const clips = (track.channelLanes && track.channelLanes.length > 0)
+        ? track.channelLanes.flatMap(lane => lane.clips)
+        : getTrackClips(track.id);
       for (const clip of clips) {
         const clipEnd = clip.clipStart + clip.duration;
         if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
