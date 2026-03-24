@@ -1905,9 +1905,51 @@ export const useTracksStore = defineStore('tracks', () => {
       if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
       // Use lane clips when materialized (reflects independent positions), else parent clips
-      const clips = (track.channelLanes && track.channelLanes.length > 0)
-        ? track.channelLanes.flatMap(lane => lane.clips)
-        : getTrackClips(track.id);
+      const hasLanes = track.channelLanes && track.channelLanes.length > 0;
+      if (hasLanes) {
+        // Per-lane extraction: each lane contributes only its channel
+        sampleRate = track.audioData.sampleRate || 44100;
+        maxChannels = Math.max(maxChannels, track.audioData.channels || 2);
+        for (const lane of track.channelLanes!) {
+          for (const clip of lane.clips) {
+            const clipEnd = clip.clipStart + clip.duration;
+            if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
+            const overlapStart = Math.max(clip.clipStart, inPoint);
+            const overlapEnd = Math.min(clipEnd, outPoint);
+            if (overlapEnd <= overlapStart) continue;
+
+            if (clip.buffer) {
+              const buffer = clip.buffer;
+              const relStart = overlapStart - clip.clipStart;
+              const startSample = Math.floor(relStart * buffer.sampleRate);
+              const length = Math.floor((overlapEnd - overlapStart) * buffer.sampleRate);
+              if (length <= 0) continue;
+
+              // Extract only this lane's channel into a multi-channel buffer
+              // with silence on other channels (mixing will combine them)
+              const chCount = track.audioData.channels || buffer.numberOfChannels;
+              const extractedBuffer = audioContext.createBuffer(chCount, length, buffer.sampleRate);
+              const srcCh = Math.min(lane.channelIndex, buffer.numberOfChannels - 1);
+              const src = buffer.getChannelData(srcCh);
+              const dest = extractedBuffer.getChannelData(lane.channelIndex);
+              for (let i = 0; i < length && startSample + i < src.length; i++) dest[i] = src[startSample + i];
+              contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
+            } else if (clip.sourceFile) {
+              const regionOffset = overlapStart - clip.clipStart;
+              const fileStart = (clip.sourceOffset ?? 0) + regionOffset;
+              const fileEnd = fileStart + (overlapEnd - overlapStart);
+              const rustBuffer = await invokeExtractRegion(clip.sourceFile, fileStart, fileEnd, audioContext);
+              if (rustBuffer) {
+                sampleRate = rustBuffer.sampleRate;
+                contributions.push({ buffer: rustBuffer, offsetInRegion: overlapStart - inPoint });
+              }
+            }
+          }
+        }
+      }
+
+      // Non-lane path: use parent clips
+      const clips = hasLanes ? [] : getTrackClips(track.id);
       for (const clip of clips) {
         const clipEnd = clip.clipStart + clip.duration;
         if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
