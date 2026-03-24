@@ -225,23 +225,46 @@ export function useClipping() {
           // Clear parent clips — lane clips are the source of truth for rendering
           newTrack.clips = undefined;
 
-          // Populate lane clip waveforms + buffers from the extracted audio
-          if (newTrack.audioData.buffer && newTrack.audioData.waveformData.length > 0) {
-            const parentWaveform = newTrack.audioData.waveformData;
+          // Populate lane clip waveforms + buffers from the extracted audio.
+          // Each lane gets per-CHANNEL waveform data extracted from the buffer,
+          // not sliced from the composite (which mixes both channels together).
+          if (newTrack.audioData.buffer) {
             const parentBuffer = newTrack.audioData.buffer;
-            const buckets = parentWaveform.length / 2;
             const trackDuration = newTrack.duration;
+            const sampleRate = parentBuffer.sampleRate;
+
             for (const lane of newTrack.channelLanes!) {
+              const ch = Math.min(lane.channelIndex, parentBuffer.numberOfChannels - 1);
+              const channelData = parentBuffer.getChannelData(ch);
+
               for (const lc of lane.clips) {
-                // Assign the parent buffer so ClipRegion can extract per-channel peaks
                 lc.buffer = parentBuffer;
-                // Slice waveform proportionally
-                if (trackDuration > 0) {
-                  const relStart = (lc.clipStart - newTrack.trackStart) / trackDuration;
-                  const relEnd = (lc.clipStart - newTrack.trackStart + lc.duration) / trackDuration;
-                  const startBucket = Math.floor(relStart * buckets);
-                  const endBucket = Math.ceil(relEnd * buckets);
-                  lc.waveformData = parentWaveform.slice(startBucket * 2, endBucket * 2);
+
+                // Generate per-channel waveform from the actual audio samples
+                if (trackDuration > 0 && lc.duration > 0) {
+                  // Compute sample range for this clip within the extracted buffer
+                  const clipOffsetInTrack = lc.clipStart - newTrack.trackStart;
+                  const startSample = Math.max(0, Math.floor(clipOffsetInTrack * sampleRate));
+                  const endSample = Math.min(channelData.length, Math.floor((clipOffsetInTrack + lc.duration) * sampleRate));
+                  const totalSamples = endSample - startSample;
+
+                  // Generate ~500 buckets for overview
+                  const targetBuckets = Math.min(500, Math.max(50, totalSamples > 0 ? Math.ceil(totalSamples / 100) : 50));
+                  const samplesPerBucket = Math.max(1, Math.ceil(totalSamples / targetBuckets));
+                  const waveform: number[] = [];
+
+                  for (let i = 0; i < targetBuckets; i++) {
+                    const bStart = startSample + i * samplesPerBucket;
+                    const bEnd = Math.min(bStart + samplesPerBucket, endSample);
+                    let min = 0, max = 0;
+                    for (let j = bStart; j < bEnd; j++) {
+                      const s = channelData[j];
+                      if (s < min) min = s;
+                      if (s > max) max = s;
+                    }
+                    waveform.push(min, max);
+                  }
+                  lc.waveformData = waveform;
                 }
               }
             }
