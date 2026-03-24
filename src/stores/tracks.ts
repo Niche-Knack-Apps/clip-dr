@@ -49,6 +49,47 @@ export const useTracksStore = defineStore('tracks', () => {
     return trackMap.value.get(id);
   }
 
+  /** Find a clip by ID — searches channel lanes first (priority), then parent clips.
+   *  Returns the clip, its index, the containing array (for mutation), and which lane (if any). */
+  function findClipById(trackId: string, clipId: string): {
+    clip: TrackClip;
+    clipIndex: number;
+    clips: TrackClip[];
+    lane: import('@/shared/types').ChannelLane | null;
+  } | null {
+    const track = getTrackById(trackId);
+    if (!track) return null;
+    // Search lanes first
+    if (track.channelLanes) {
+      for (const lane of track.channelLanes) {
+        const idx = lane.clips.findIndex(c => c.id === clipId);
+        if (idx !== -1) return { clip: lane.clips[idx], clipIndex: idx, clips: lane.clips, lane };
+      }
+    }
+    // Fall back to parent clips
+    if (track.clips) {
+      const idx = track.clips.findIndex(c => c.id === clipId);
+      if (idx !== -1) return { clip: track.clips[idx], clipIndex: idx, clips: track.clips, lane: null };
+    }
+    return null;
+  }
+
+  /** Find the paired clip in another lane via linkedClipGroupId. */
+  function findLinkedClip(track: Track, clip: TrackClip, excludeLane: import('@/shared/types').ChannelLane): {
+    clip: TrackClip;
+    clipIndex: number;
+    clips: TrackClip[];
+    lane: import('@/shared/types').ChannelLane;
+  } | null {
+    if (!clip.linkedClipGroupId || !track.channelLanes) return null;
+    for (const lane of track.channelLanes) {
+      if (lane === excludeLane) continue;
+      const idx = lane.clips.findIndex(c => c.linkedClipGroupId === clip.linkedClipGroupId);
+      if (idx !== -1) return { clip: lane.clips[idx], clipIndex: idx, clips: lane.clips, lane };
+    }
+    return null;
+  }
+
   // 'ALL' means composite view (default), string means specific track, null means nothing selected
   const selectedTrackId = ref<string | 'ALL' | null>('ALL');
   const viewMode = ref<ViewMode>('all');
@@ -1973,42 +2014,29 @@ export const useTracksStore = defineStore('tracks', () => {
    */
   function trimClipLeft(trackId: string, clipId: string, delta: number): void {
     const track = getTrackById(trackId);
-    if (!track?.clips) return;
-    const clipIndex = track.clips.findIndex(c => c.id === clipId);
-    if (clipIndex === -1) return;
+    if (!track) return;
+    const found = findClipById(trackId, clipId);
+    if (!found) return;
 
-    const clip = track.clips[clipIndex];
-    const srcIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
-    const currentOffset = clip.sourceOffset ?? 0;
-
-    let newOffset = currentOffset + delta;
-    let newClipStart = clip.clipStart + delta;
-    let newDuration = clip.duration - delta;
-
-    // Clamp: cannot trim past original source start
-    if (newOffset < srcIn) {
-      const excess = srcIn - newOffset;
-      newOffset = srcIn;
-      newClipStart += excess;
-      newDuration -= excess;
-    }
-    // Clamp: minimum duration
-    if (newDuration < MIN_CLIP_DURATION) {
-      const shortfall = MIN_CLIP_DURATION - newDuration;
-      newDuration = MIN_CLIP_DURATION;
-      newOffset -= shortfall;
-      newClipStart -= shortfall;
+    function applyLeftTrim(clip: TrackClip, clips: TrackClip[], idx: number, lane: import('@/shared/types').ChannelLane | null) {
+      const srcIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
+      const currentOffset = clip.sourceOffset ?? 0;
+      let newOffset = currentOffset + delta;
+      let newClipStart = clip.clipStart + delta;
+      let newDuration = clip.duration - delta;
+      if (newOffset < srcIn) { const excess = srcIn - newOffset; newOffset = srcIn; newClipStart += excess; newDuration -= excess; }
+      if (newDuration < MIN_CLIP_DURATION) { const shortfall = MIN_CLIP_DURATION - newDuration; newDuration = MIN_CLIP_DURATION; newOffset -= shortfall; newClipStart -= shortfall; }
+      clips[idx] = { ...clip, sourceOffset: newOffset, clipStart: newClipStart, duration: newDuration };
+      if (lane) lane.clips = [...lane.clips];
     }
 
-    track.clips[clipIndex] = {
-      ...clip,
-      sourceOffset: newOffset,
-      clipStart: newClipStart,
-      duration: newDuration,
-    };
+    applyLeftTrim(found.clip, found.clips, found.clipIndex, found.lane);
+    // Linked: also trim the paired clip
+    if (found.lane && track.channelLinked !== false) {
+      const linked = findLinkedClip(track, found.clip, found.lane);
+      if (linked) applyLeftTrim(linked.clip, linked.clips, linked.clipIndex, linked.lane);
+    }
     triggerRef(tracks);
-    // NOTE: no bumpSyncEpoch() here — this is called per-frame during drag (~60fps).
-    // Cache invalidation happens once on drag end via finalizeEdgeTrim → bumpSyncEpoch.
   }
 
   /**
@@ -2017,34 +2045,29 @@ export const useTracksStore = defineStore('tracks', () => {
    */
   function trimClipRight(trackId: string, clipId: string, delta: number): void {
     const track = getTrackById(trackId);
-    if (!track?.clips) return;
-    const clipIndex = track.clips.findIndex(c => c.id === clipId);
-    if (clipIndex === -1) return;
+    if (!track) return;
+    const found = findClipById(trackId, clipId);
+    if (!found) return;
 
-    const clip = track.clips[clipIndex];
-    const srcIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
-    const srcDur = clip.sourceDuration ?? clip.duration;
-    const currentOffset = clip.sourceOffset ?? 0;
-
-    let newDuration = clip.duration + delta;
-
-    // Clamp: cannot extend past end of source audio
-    const maxDuration = (srcIn + srcDur) - currentOffset;
-    if (newDuration > maxDuration) {
-      newDuration = maxDuration;
-    }
-    // Clamp: minimum duration
-    if (newDuration < MIN_CLIP_DURATION) {
-      newDuration = MIN_CLIP_DURATION;
+    function applyRightTrim(clip: TrackClip, clips: TrackClip[], idx: number, lane: import('@/shared/types').ChannelLane | null) {
+      const srcIn = clip.sourceIn ?? clip.sourceOffset ?? 0;
+      const srcDur = clip.sourceDuration ?? clip.duration;
+      const currentOffset = clip.sourceOffset ?? 0;
+      let newDuration = clip.duration + delta;
+      const maxDuration = (srcIn + srcDur) - currentOffset;
+      if (newDuration > maxDuration) newDuration = maxDuration;
+      if (newDuration < MIN_CLIP_DURATION) newDuration = MIN_CLIP_DURATION;
+      clips[idx] = { ...clip, duration: newDuration };
+      if (lane) lane.clips = [...lane.clips];
     }
 
-    track.clips[clipIndex] = {
-      ...clip,
-      duration: newDuration,
-    };
+    applyRightTrim(found.clip, found.clips, found.clipIndex, found.lane);
+    // Linked: also trim the paired clip
+    if (found.lane && track.channelLinked !== false) {
+      const linked = findLinkedClip(track, found.clip, found.lane);
+      if (linked) applyRightTrim(linked.clip, linked.clips, linked.clipIndex, linked.lane);
+    }
     triggerRef(tracks);
-    // NOTE: no bumpSyncEpoch() here — this is called per-frame during drag (~60fps).
-    // Cache invalidation happens once on drag end via finalizeEdgeTrim → bumpSyncEpoch.
   }
 
   /**
@@ -2065,8 +2088,13 @@ export const useTracksStore = defineStore('tracks', () => {
     useHistoryStore().pushState('Edge trim');
 
     const oldTrackStart = track.trackStart;
-    const firstClipStart = Math.min(...track.clips.map(c => c.clipStart));
-    const lastClipEnd = Math.max(...track.clips.map(c => c.clipStart + c.duration));
+    // Use lane clips for bounds when materialized
+    let allClips = track.clips;
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      allClips = track.channelLanes.flatMap(lane => lane.clips);
+    }
+    const firstClipStart = Math.min(...allClips.map(c => c.clipStart));
+    const lastClipEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
     const newDuration = lastClipEnd - firstClipStart;
 
     tracks.value[trackIndex] = {
@@ -2101,26 +2129,56 @@ export const useTracksStore = defineStore('tracks', () => {
         return;
       }
 
-      // Multi-clip track: remove the clip
-      if (!track.clips || track.clips.length === 0) return;
-
-      const newClips = track.clips.filter(c => c.id !== clipId);
-
-      if (newClips.length === 0) {
-        // No clips left, delete the track
-        deleteTrack(trackId);
+      // Lane-aware delete: find clip in lanes or parent clips
+      const found = findClipById(trackId, clipId);
+      if (!found) {
+        if (!track.clips || track.clips.length === 0) return;
+        // Legacy fallback for parent clips
+        const newClips = track.clips.filter(c => c.id !== clipId);
+        if (newClips.length === 0) { deleteTrack(trackId); return; }
+        const oldTrackStart = track.trackStart;
+        const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
+        const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+        const newDuration = lastClipEnd - firstClipStart;
+        tracks.value[trackIndex] = { ...track, clips: newClips, trackStart: firstClipStart, duration: newDuration };
+        adjustEnvelopeForBoundsChange(trackIndex, oldTrackStart, firstClipStart, newDuration);
+        triggerRef(tracks); bumpSyncEpoch();
+        if (focusedClipId.value === clipId) focusedClipId.value = null;
         return;
       }
 
+      // Delete from lane or parent
+      if (found.lane) {
+        found.lane.clips = found.lane.clips.filter(c => c.id !== clipId);
+        // Linked: also delete paired clip
+        if (track.channelLinked !== false) {
+          const linked = findLinkedClip(track, found.clip, found.lane);
+          if (linked) {
+            linked.lane.clips = linked.lane.clips.filter(c => c.id !== linked.clip.id);
+          }
+        }
+      } else {
+        // Parent clips
+        track.clips = track.clips!.filter(c => c.id !== clipId);
+      }
+
+      // Check if any clips remain
+      let allClips: TrackClip[];
+      if (track.channelLanes && track.channelLanes.length > 0) {
+        allClips = track.channelLanes.flatMap(l => l.clips);
+      } else {
+        allClips = track.clips ?? [];
+      }
+      if (allClips.length === 0) { deleteTrack(trackId); return; }
+
       // Recalculate track bounds
       const oldTrackStart = track.trackStart;
-      const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
-      const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+      const firstClipStart = Math.min(...allClips.map(c => c.clipStart));
+      const lastClipEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
       const newDuration = lastClipEnd - firstClipStart;
 
       tracks.value[trackIndex] = {
         ...track,
-        clips: newClips,
         trackStart: firstClipStart,
         duration: newDuration,
       };
@@ -2136,7 +2194,7 @@ export const useTracksStore = defineStore('tracks', () => {
         focusedClipId.value = null;
       }
 
-      console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}, ${newClips.length} clips remain`);
+      console.log(`[Tracks] Deleted clip ${clipId} from track ${trackId}`);
     } finally {
       historyStore.endBatch();
     }
@@ -2167,13 +2225,30 @@ export const useTracksStore = defineStore('tracks', () => {
       return;
     }
 
-    // Multi-clip track: remove the clip
-    if (!track.clips || track.clips.length === 0) return;
+    // Lane-aware remove
+    const found = findClipById(trackId, clipId);
+    if (found?.lane) {
+      found.lane.clips = found.lane.clips.filter(c => c.id !== clipId);
+      // Linked: also remove paired clip
+      if (track.channelLinked !== false) {
+        const linked = findLinkedClip(track, found.clip, found.lane);
+        if (linked) linked.lane.clips = linked.lane.clips.filter(c => c.id !== linked.clip.id);
+      }
+    } else if (track.clips) {
+      // Parent clips
+      track.clips = track.clips.filter(c => c.id !== clipId);
+    } else {
+      return;
+    }
 
-    const newClips = track.clips.filter(c => c.id !== clipId);
-
-    if (newClips.length === 0) {
-      // No clips left — keep track as empty
+    // Recompute bounds
+    let allClips: TrackClip[];
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      allClips = track.channelLanes.flatMap(l => l.clips);
+    } else {
+      allClips = track.clips ?? [];
+    }
+    if (allClips.length === 0) {
       tracks.value[trackIndex] = {
         ...track,
         clips: undefined,
@@ -2181,23 +2256,20 @@ export const useTracksStore = defineStore('tracks', () => {
         duration: 0,
       };
     } else {
-      const firstClipStart = Math.min(...newClips.map(c => c.clipStart));
-      const lastClipEnd = Math.max(...newClips.map(c => c.clipStart + c.duration));
+      const firstClipStart = Math.min(...allClips.map(c => c.clipStart));
+      const lastClipEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
       tracks.value[trackIndex] = {
         ...track,
-        clips: newClips,
         trackStart: firstClipStart,
         duration: lastClipEnd - firstClipStart,
       };
     }
+    _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
 
-    if (focusedClipId.value === clipId) {
-      focusedClipId.value = null;
-    }
-
-    console.log(`[Tracks] Removed clip ${clipId} from track ${trackId}, track preserved, ${newClips.length} clips remain`);
+    if (focusedClipId.value === clipId) focusedClipId.value = null;
+    console.log(`[Tracks] Removed clip ${clipId} from track ${trackId}, track preserved`);
   }
 
   // Split a clip at a specific time, returning the two resulting clips
@@ -2313,12 +2385,26 @@ export const useTracksStore = defineStore('tracks', () => {
     playheadTime: number,
     audioContext: AudioContext
   ): Promise<boolean> {
-    const track = getTrackById(trackId);
+    let track = getTrackById(trackId);
     if (!track) return false;
 
     promoteToExplicitClips(trackId);
-    const clips = getTrackClips(trackId);
-    const clip = clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
+    track = getTrackById(trackId)!;
+
+    // Find clip spanning playhead — check lanes first, then parent clips
+    let clip: TrackClip | undefined;
+    let targetLane: import('@/shared/types').ChannelLane | null = null;
+
+    if (track.channelLanes) {
+      for (const lane of track.channelLanes) {
+        clip = lane.clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
+        if (clip) { targetLane = lane; break; }
+      }
+    }
+    if (!clip) {
+      const clips = getTrackClips(trackId);
+      clip = clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
+    }
     if (!clip) return false;
 
     const result = await splitClipAtTime(trackId, clip.id, playheadTime, audioContext);
@@ -2326,8 +2412,36 @@ export const useTracksStore = defineStore('tracks', () => {
 
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     const currentTrack = tracks.value[trackIndex];
-    const newClips = currentTrack.clips!.map(c => c.id === clip.id ? [result.before, result.after] : [c]).flat();
-    tracks.value[trackIndex] = { ...currentTrack, clips: newClips };
+
+    if (targetLane) {
+      // Split within a lane
+      targetLane.clips = targetLane.clips.map(c => c.id === clip!.id ? [result.before, result.after] : [c]).flat();
+      // Linked: also split paired clip in other lane
+      if (currentTrack.channelLinked !== false && currentTrack.channelLanes) {
+        const linked = findLinkedClip(currentTrack, clip, targetLane);
+        if (linked) {
+          const linkedResult = await splitClipAtTime(trackId, linked.clip.id, playheadTime, audioContext);
+          if (linkedResult) {
+            // Share linkedClipGroupIds between split halves
+            linkedResult.before.linkedClipGroupId = result.before.linkedClipGroupId || generateId();
+            linkedResult.after.linkedClipGroupId = result.after.linkedClipGroupId || generateId();
+            result.before.linkedClipGroupId = linkedResult.before.linkedClipGroupId;
+            result.after.linkedClipGroupId = linkedResult.after.linkedClipGroupId;
+            linked.lane.clips = linked.lane.clips.map(c => c.id === linked.clip.id ? [linkedResult.before, linkedResult.after] : [c]).flat();
+          }
+        }
+      }
+      // Update lane array refs for reactivity
+      for (const lane of currentTrack.channelLanes ?? []) {
+        lane.clips = [...lane.clips];
+      }
+    } else {
+      // Split in parent clips
+      const newClips = currentTrack.clips!.map(c => c.id === clip!.id ? [result.before, result.after] : [c]).flat();
+      tracks.value[trackIndex] = { ...currentTrack, clips: newClips };
+    }
+
+    _cachedTrackMap = null;
     triggerRef(tracks);
     bumpSyncEpoch();
 
