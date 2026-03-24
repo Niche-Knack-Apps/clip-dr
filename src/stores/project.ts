@@ -281,36 +281,39 @@ export const useProjectStore = defineStore('project', () => {
         try {
           await audioStore.importFile(absPath, pt.trackStart);
 
-          // Find the just-imported track (last one added)
-          const lastTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
-          if (lastTrack) {
-            idMap.set(pt.id, lastTrack.id);
-            // Capture the import duration as sourceDuration BEFORE overwriting with
-            // saved pt.duration. This is the full source file duration — needed by
-            // finalizeClipWaveforms to correctly slice the parent waveform for clips
-            // that reference arbitrary portions of the source (via sourceOffset).
-            const importDuration = lastTrack.duration;
-            if (!lastTrack.audioData.sourceDuration) {
-              lastTrack.audioData.sourceDuration = importDuration;
+          // Find the just-imported track (last one added).
+          // IMPORTANT: importFile() replaces the track object multiple times via spread
+          // (setImportBuffer, setImportReady), so we must re-read from the reactive array
+          // AFTER importFile returns, not use a stale reference from before.
+          const trackIdx = tracksStore.tracks.length - 1;
+          const importedTrackId = tracksStore.tracks[trackIdx]?.id;
+          if (importedTrackId) {
+            idMap.set(pt.id, importedTrackId);
+            // Capture import duration before overwriting
+            const importDuration = tracksStore.tracks[trackIdx].duration;
+            if (!tracksStore.tracks[trackIdx].audioData.sourceDuration) {
+              tracksStore.tracks[trackIdx].audioData.sourceDuration = importDuration;
             }
 
-            // Apply saved metadata directly (no history for initial load)
-            lastTrack.name = pt.name;
-            lastTrack.color = pt.color;
-            lastTrack.volume = pt.volume;
-            lastTrack.muted = pt.muted;
-            lastTrack.solo = pt.solo;
-            lastTrack.autoMuted = false; // Saved state is explicit, not auto-derived
-            if (pt.tag) lastTrack.tag = pt.tag;
-            if (pt.timemarks) lastTrack.timemarks = pt.timemarks;
-            if (pt.volumeEnvelope) lastTrack.volumeEnvelope = pt.volumeEnvelope;
-
-            // Loader invariant: the saved pt.duration and pt.trackStart are the
-            // authoritative timeline values — they were captured after VBR correction
-            // at save time. The import bootstraps audio/waveform but its metadata
-            // duration reflects the full source file, not the track's timeline extent.
-            lastTrack.duration = pt.duration;
-            lastTrack.trackStart = pt.trackStart;
+            // Apply ALL saved metadata in a single reactive update to avoid stale refs.
+            // Re-read the current track object from the array (may have been replaced by import).
+            const current = tracksStore.tracks[trackIdx];
+            const updated = [...tracksStore.tracks];
+            updated[trackIdx] = {
+              ...current,
+              name: pt.name,
+              color: pt.color,
+              volume: pt.volume,
+              muted: pt.muted,
+              solo: pt.solo,
+              autoMuted: false,
+              tag: pt.tag ?? current.tag,
+              timemarks: pt.timemarks ?? current.timemarks,
+              volumeEnvelope: pt.volumeEnvelope ?? current.volumeEnvelope,
+              duration: pt.duration,
+              trackStart: pt.trackStart,
+            };
+            tracksStore.tracks = updated;
 
             // v2+: restore EDL clip state
             if ((project.version === 2 || project.version === 3) && pt.clips && pt.clips.length > 0) {
@@ -334,14 +337,16 @@ export const useProjectStore = defineStore('project', () => {
                 sourceIn: c.sourceIn ?? c.sourceOffset,
                 sourceDuration: c.sourceDuration ?? c.duration,
               }));
-              tracksStore.setTrackClips(lastTrack.id, reconstructed);
+              tracksStore.setTrackClips(importedTrackId, reconstructed);
             }
 
-            // Restore channel lane state
-            if (pt.channelMode) lastTrack.channelMode = pt.channelMode;
-            if (pt.channelLinked != null) lastTrack.channelLinked = pt.channelLinked;
-            if (pt.channelLanes && pt.channelLanes.length > 0) {
-              lastTrack.channelLanes = pt.channelLanes.map(lane => ({
+            // Restore channel lane state (re-read track — setTrackClips may have replaced it)
+            const laneTrack = tracksStore.tracks.find(t => t.id === importedTrackId);
+            if (laneTrack) {
+              if (pt.channelMode) laneTrack.channelMode = pt.channelMode;
+              if (pt.channelLinked != null) laneTrack.channelLinked = pt.channelLinked;
+              if (pt.channelLanes && pt.channelLanes.length > 0) {
+                laneTrack.channelLanes = pt.channelLanes.map(lane => ({
                 id: lane.id,
                 channelIndex: lane.channelIndex,
                 kind: lane.kind as import('@/shared/types').LaneKind,
@@ -360,6 +365,7 @@ export const useProjectStore = defineStore('project', () => {
                   linkedClipGroupId: c.linkedClipGroupId,
                 })),
               }));
+              }
             }
           }
         } catch (e) {
