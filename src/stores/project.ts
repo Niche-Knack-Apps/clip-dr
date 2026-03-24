@@ -398,6 +398,11 @@ export const useProjectStore = defineStore('project', () => {
         if (changed) {
           tracksStore.tracks = finalTracks;
         }
+        // Solo implies selection — select the solo'd track (matches setTrackSolo behavior)
+        const soloTrack = tracksStore.tracks.find(t => t.solo);
+        if (soloTrack) {
+          tracksStore.selectTrack(soloTrack.id);
+        }
       }
 
       // Restore in/out points
