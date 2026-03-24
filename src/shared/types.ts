@@ -467,6 +467,18 @@ export interface ProjectTrackClip {
   sourceIn?: number;
   /** Total available duration from sourceIn (v3+). Defines full recoverable range. */
   sourceDuration?: number;
+  /** Clip pairing identity across channel lanes */
+  linkedClipGroupId?: string;
+}
+
+/** A channel lane as serialized in a .clipdr project file */
+export interface ProjectChannelLane {
+  id: string;
+  channelIndex: number;
+  kind: string;
+  volume?: number;
+  volumeEnvelope?: VolumeAutomationPoint[];
+  clips: ProjectTrackClip[];
 }
 
 /** A track as serialized in a .clipdr project file */
@@ -486,6 +498,12 @@ export interface ProjectTrack {
   cachedAudioPath?: string | null;
   /** Present in v2+ files when track has been edited into multiple clips */
   clips?: ProjectTrackClip[];
+  /** Channel structure: 'mono' | 'stereo' */
+  channelMode?: 'mono' | 'stereo';
+  /** Whether channel lanes are linked (default true) */
+  channelLinked?: boolean;
+  /** Per-lane state (only present when lanes have been materialized) */
+  channelLanes?: ProjectChannelLane[];
 }
 
 /** .clipdr project file format */

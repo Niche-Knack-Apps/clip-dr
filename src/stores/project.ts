@@ -117,6 +117,30 @@ export const useProjectStore = defineStore('project', () => {
           source_kind: sourceKind(c, t),
           sourceIn: c.sourceIn,
           sourceDuration: c.sourceDuration,
+          linkedClipGroupId: c.linkedClipGroupId,
+        }));
+      }
+      // Persist channel lane state
+      if (t.channelMode) base.channelMode = t.channelMode;
+      if (t.channelLinked != null) base.channelLinked = t.channelLinked;
+      if (t.channelLanes) {
+        base.channelLanes = t.channelLanes.map(lane => ({
+          id: lane.id,
+          channelIndex: lane.channelIndex,
+          kind: lane.kind,
+          volume: lane.volume,
+          volumeEnvelope: lane.volumeEnvelope,
+          clips: lane.clips.map(c => ({
+            id: c.id,
+            clipStart: c.clipStart,
+            duration: c.duration,
+            sourceFile: stableSourcePath(c, t),
+            sourceOffset: c.sourceOffset ?? 0,
+            source_kind: sourceKind(c, t),
+            sourceIn: c.sourceIn,
+            sourceDuration: c.sourceDuration,
+            linkedClipGroupId: c.linkedClipGroupId,
+          })),
         }));
       }
       return base;
@@ -311,6 +335,31 @@ export const useProjectStore = defineStore('project', () => {
                 sourceDuration: c.sourceDuration ?? c.duration,
               }));
               tracksStore.setTrackClips(lastTrack.id, reconstructed);
+            }
+
+            // Restore channel lane state
+            if (pt.channelMode) lastTrack.channelMode = pt.channelMode;
+            if (pt.channelLinked != null) lastTrack.channelLinked = pt.channelLinked;
+            if (pt.channelLanes && pt.channelLanes.length > 0) {
+              lastTrack.channelLanes = pt.channelLanes.map(lane => ({
+                id: lane.id,
+                channelIndex: lane.channelIndex,
+                kind: lane.kind as import('@/shared/types').LaneKind,
+                volume: lane.volume,
+                volumeEnvelope: lane.volumeEnvelope,
+                clips: lane.clips.map(c => ({
+                  id: c.id,
+                  buffer: null,
+                  waveformData: [],
+                  clipStart: c.clipStart,
+                  duration: c.duration,
+                  sourceFile: c.sourceFile,
+                  sourceOffset: c.sourceOffset,
+                  sourceIn: c.sourceIn ?? c.sourceOffset,
+                  sourceDuration: c.sourceDuration ?? c.duration,
+                  linkedClipGroupId: c.linkedClipGroupId,
+                })),
+              }));
             }
           }
         } catch (e) {

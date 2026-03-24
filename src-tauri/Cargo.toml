@@ -1,6 +1,6 @@
 [package]
 name = "clip-dr"
-version = "0.30.6"
+version = "0.31.0"
 description = "Audio cleaning and clip-making application"
 authors = ["Niche-Knack Apps"]
 license = "Apache-2.0"
