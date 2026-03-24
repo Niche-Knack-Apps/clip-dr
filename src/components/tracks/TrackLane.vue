@@ -748,6 +748,18 @@ onUnmounted(() => {
               <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
             </svg>
           </button>
+          <!-- Mono-to-stereo button (mono tracks only, visible when channel lanes UI is on) -->
+          <button
+            v-if="uiStore.showChannelLanes && !isStereoView && (track.audioData.channels ?? 1) === 1"
+            type="button"
+            class="w-5 h-5 flex items-center justify-center rounded transition-colors bg-gray-700 text-gray-400 hover:bg-cyan-700 hover:text-cyan-200"
+            title="Convert to stereo (duplicate to both channels)"
+            @click.stop="tracksStore.convertToStereo(track.id)"
+          >
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
           <button
             type="button"
             :class="[
@@ -894,9 +906,17 @@ onUnmounted(() => {
           class="absolute left-0 right-0 overflow-hidden"
           :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
         >
-          <!-- Lane label -->
-          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-20 pointer-events-none select-none">
+          <!-- Lane label + delete channel button -->
+          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-20 select-none flex items-center gap-0.5">
             {{ ch === 0 ? 'L' : 'R' }}
+            <button
+              type="button"
+              class="w-3 h-3 flex items-center justify-center rounded-sm text-gray-600 hover:text-red-400 hover:bg-red-900/30 transition-colors pointer-events-auto"
+              :title="ch === 0 ? 'Delete L channel (keep R)' : 'Delete R channel (keep L)'"
+              @click.stop="tracksStore.replaceWithChannel(track.id, ch === 0 ? 1 : 0)"
+            >
+              <svg class="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+            </button>
           </span>
           <!-- Lane divider (between L and R) -->
           <div v-if="ch === 1" class="absolute top-0 left-0 right-0 h-px bg-gray-700/60 z-10 pointer-events-none" />

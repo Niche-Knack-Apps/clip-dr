@@ -3353,6 +3353,122 @@ export const useTracksStore = defineStore('tracks', () => {
     triggerRef(tracks);
   }
 
+  // ── Channel conversion operations ──
+
+  /**
+   * Replace both channels with one kept channel (stereo → stereo with identical channels).
+   * Deletes the other channel's audio. Both L and R play the same audio after this.
+   */
+  function replaceWithChannel(trackId: string, keepChannelIndex: number): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.audioData.buffer || (track.audioData.channels ?? 1) < 2) return;
+
+    useHistoryStore().pushState(keepChannelIndex === 0 ? 'Replace with L channel' : 'Replace with R channel');
+
+    const src = track.audioData.buffer;
+    const ctx = new AudioContext();
+    const newBuffer = ctx.createBuffer(2, src.length, src.sampleRate);
+    const keptData = src.getChannelData(keepChannelIndex);
+    newBuffer.getChannelData(0).set(keptData);
+    newBuffer.getChannelData(1).set(keptData);
+
+    // Generate waveform from kept channel
+    const bucketCount = 1000;
+    const samplesPerBucket = Math.max(1, Math.ceil(src.length / bucketCount));
+    const waveform: number[] = [];
+    for (let i = 0; i < bucketCount; i++) {
+      const bStart = i * samplesPerBucket;
+      const bEnd = Math.min(bStart + samplesPerBucket, keptData.length);
+      let min = 0, max = 0;
+      for (let j = bStart; j < bEnd; j++) {
+        const s = keptData[j];
+        if (s < min) min = s;
+        if (s > max) max = s;
+      }
+      waveform.push(min, max);
+    }
+
+    // If lanes were materialized, adopt the kept lane's clip positions as parent clips
+    let newClips = track.clips;
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      const keptLane = track.channelLanes.find(l => l.channelIndex === keepChannelIndex);
+      if (keptLane && keptLane.clips.length > 0) {
+        newClips = keptLane.clips.map(c => ({
+          ...c,
+          linkedClipGroupId: undefined, // No more pairing
+        }));
+      }
+    }
+
+    // Update clip buffers
+    if (newClips) {
+      newClips = newClips.map(c => {
+        if (!c.buffer || c.buffer.numberOfChannels < 2) return c;
+        const clipBuf = ctx.createBuffer(2, c.buffer.length, c.buffer.sampleRate);
+        const kept = c.buffer.getChannelData(keepChannelIndex);
+        clipBuf.getChannelData(0).set(kept);
+        clipBuf.getChannelData(1).set(kept);
+        return { ...c, buffer: clipBuf };
+      });
+    }
+
+    tracks.value[idx] = {
+      ...tracks.value[idx],
+      audioData: { ...track.audioData, buffer: newBuffer, waveformData: waveform },
+      clips: newClips,
+      channelLanes: undefined,
+      channelLinked: true,
+    };
+    _cachedTrackMap = null;
+    triggerRef(tracks);
+    bumpSyncEpoch();
+  }
+
+  /**
+   * Convert a mono track to stereo by duplicating the single channel to both L and R.
+   */
+  function convertToStereo(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.audioData.buffer || (track.audioData.channels ?? 1) >= 2) return;
+
+    useHistoryStore().pushState('Convert to stereo');
+
+    const src = track.audioData.buffer;
+    const ctx = new AudioContext();
+    const newBuffer = ctx.createBuffer(2, src.length, src.sampleRate);
+    const monoData = src.getChannelData(0);
+    newBuffer.getChannelData(0).set(monoData);
+    newBuffer.getChannelData(1).set(monoData);
+
+    // Update clip buffers
+    let newClips = track.clips;
+    if (newClips) {
+      newClips = newClips.map(c => {
+        if (!c.buffer || c.buffer.numberOfChannels >= 2) return c;
+        const clipBuf = ctx.createBuffer(2, c.buffer.length, c.buffer.sampleRate);
+        const mono = c.buffer.getChannelData(0);
+        clipBuf.getChannelData(0).set(mono);
+        clipBuf.getChannelData(1).set(mono);
+        return { ...c, buffer: clipBuf };
+      });
+    }
+
+    tracks.value[idx] = {
+      ...tracks.value[idx],
+      audioData: { ...track.audioData, buffer: newBuffer, channels: 2 },
+      clips: newClips,
+      channelMode: 'stereo',
+      channelLinked: true,
+    };
+    _cachedTrackMap = null;
+    triggerRef(tracks);
+    bumpSyncEpoch();
+  }
+
   /** Add a keyframe to a track's volume envelope. */
   function addVolumePoint(trackId: string, time: number, value: number): void {
     const idx = tracks.value.findIndex((t) => t.id === trackId);
@@ -3788,6 +3904,8 @@ export const useTracksStore = defineStore('tracks', () => {
     addChannelLaneVolumePoint,
     updateChannelLaneVolumePoint,
     removeChannelLaneVolumePoint,
+    replaceWithChannel,
+    convertToStereo,
     getVolumeAtTime,
     adjustVolumeEnvelopeForCut,
     adjustVolumeEnvelopeForDelete,
