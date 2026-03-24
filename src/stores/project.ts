@@ -368,24 +368,35 @@ export const useProjectStore = defineStore('project', () => {
               }
             }
           }
-          // Diagnostic: log ALL tracks' muted/solo after each track's metadata + clips are restored
-          console.warn(`[Project] After restoring ${pt.name}: ALL tracks state:`);
-          for (const t of tracksStore.tracks) {
-            console.warn(`  [${t.name}] muted=${t.muted} solo=${t.solo} autoMuted=${t.autoMuted}`);
-          }
+          // Note: muted/solo/autoMuted are applied in a final batch AFTER all imports complete
+          // (see post-loop block below). Per-track muted/solo in the spread above is still set
+          // but may be overwritten by subsequent imports — the batch fix handles this.
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           errors.push(`Track "${pt.name}" (${absPath}): ${msg}`);
         }
       }
 
-      // Diagnostic: final mute/solo state after all tracks loaded
-      for (const pt of project.tracks) {
-        const newId = idMap.get(pt.id);
-        if (!newId) continue;
-        const finalTrack = tracksStore.tracks.find(t => t.id === newId);
-        if (finalTrack && (finalTrack.muted !== pt.muted || finalTrack.solo !== pt.solo)) {
-          console.warn(`[Project] FINAL STATE MISMATCH for ${pt.name}: saved muted=${pt.muted}/solo=${pt.solo}, actual muted=${finalTrack.muted}/solo=${finalTrack.solo}`);
+      // Apply muted/solo/autoMuted AFTER all tracks are imported.
+      // During the import loop, createImportingTrack auto-mutes based on hasActiveSolo(),
+      // and subsequent array replacements (setImportBuffer, etc.) can overwrite per-track
+      // metadata applied mid-loop. Applying mute/solo as a final batch avoids all races.
+      {
+        const finalTracks = [...tracksStore.tracks];
+        let changed = false;
+        for (const pt of project.tracks) {
+          const newId = idMap.get(pt.id);
+          if (!newId) continue;
+          const idx = finalTracks.findIndex(t => t.id === newId);
+          if (idx === -1) continue;
+          const t = finalTracks[idx];
+          if (t.muted !== pt.muted || t.solo !== pt.solo || t.autoMuted !== false) {
+            finalTracks[idx] = { ...t, muted: pt.muted, solo: pt.solo, autoMuted: false };
+            changed = true;
+          }
+        }
+        if (changed) {
+          tracksStore.tracks = finalTracks;
         }
       }
 
