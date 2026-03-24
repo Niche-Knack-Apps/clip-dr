@@ -220,6 +220,28 @@ export function useClipping() {
             };
           });
           newTrack.channelLinked = sourceTrack.channelLinked;
+
+          // Populate lane clip waveforms + buffers from the extracted audio
+          if (newTrack.audioData.buffer && newTrack.audioData.waveformData.length > 0) {
+            const parentWaveform = newTrack.audioData.waveformData;
+            const parentBuffer = newTrack.audioData.buffer;
+            const buckets = parentWaveform.length / 2;
+            const trackDuration = newTrack.duration;
+            for (const lane of newTrack.channelLanes!) {
+              for (const lc of lane.clips) {
+                // Assign the parent buffer so ClipRegion can extract per-channel peaks
+                lc.buffer = parentBuffer;
+                // Slice waveform proportionally
+                if (trackDuration > 0) {
+                  const relStart = (lc.clipStart - newTrack.trackStart) / trackDuration;
+                  const relEnd = (lc.clipStart - newTrack.trackStart + lc.duration) / trackDuration;
+                  const startBucket = Math.floor(relStart * buckets);
+                  const endBucket = Math.ceil(relEnd * buckets);
+                  lc.waveformData = parentWaveform.slice(startBucket * 2, endBucket * 2);
+                }
+              }
+            }
+          }
         }
       }
 
