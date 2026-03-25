@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useRecordingStore } from '@/stores/recording';
 import RecordingTimerBar from './RecordingTimerBar.vue';
 import RecordingTrackLane from './RecordingTrackLane.vue';
@@ -76,11 +77,12 @@ function updateSize() {
 }
 
 onMounted(() => {
+  // Signal Rust emitter that monitor view is visible (gates emission)
+  invoke('set_monitor_active', { active: true }).catch(() => {});
   updateSize();
   if (containerRef.value) {
     resizeObserver = new ResizeObserver(() => {
       updateSize();
-      // Restart render loop on resize (might have paused)
       if (recordingStore.monitorViewActive && rafId === null) startRenderLoop();
     });
     resizeObserver.observe(containerRef.value);
@@ -89,6 +91,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  // Signal Rust emitter to pause
+  invoke('set_monitor_active', { active: false }).catch(() => {});
   stopRenderLoop();
   resizeObserver?.disconnect();
 });

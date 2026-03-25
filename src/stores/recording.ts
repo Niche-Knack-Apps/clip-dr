@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
@@ -232,6 +233,52 @@ export const useRecordingStore = defineStore('recording', () => {
   function clearWaveformHistory(sessionId: string) {
     waveformHistories.delete(sessionId);
   }
+
+  // ── Session map cache for O(1) lookup in event handler ──
+  let _sessionMap = new Map<string, RecordingSession>();
+  watch(sessions, (s) => {
+    _sessionMap = new Map(s.map(sess => [sess.sessionId, sess]));
+  }, { immediate: true });
+
+  // ── Push-based level listener (replaces polling) ──
+  interface RecordingLevelEvent {
+    session_ids: string[];
+    levels: number[];
+    duration: number;
+  }
+
+  let unlistenLevels: (() => void) | null = null;
+  let lastEventTime = 0;
+
+  async function initLevelListener() {
+    if (unlistenLevels) return;
+    unlistenLevels = await listen<RecordingLevelEvent>(
+      'recording-levels',
+      (event) => {
+        // Drop stale frames (backpressure)
+        const now = performance.now();
+        if (now - lastEventTime < 14) return;
+        lastEventTime = now;
+
+        const { session_ids, levels, duration: dur } = event.payload;
+        recordingDuration.value = dur;
+
+        for (let i = 0; i < session_ids.length; i++) {
+          const session = _sessionMap.get(session_ids[i]);
+          if (session) {
+            session.level = levels[i];
+            session.duration = dur;
+            const buf = getOrCreateWaveformHistory(session.sessionId);
+            buf.push(levels[i], dur);
+          }
+        }
+        currentLevel.value = levels.length > 0 ? Math.max(...levels) : 0;
+      }
+    );
+  }
+
+  // Initialize listener on store creation
+  initLevelListener().catch(e => console.warn('[Recording] Failed to init level listener:', e));
 
   // Timemark state
   const timemarks = ref<TimeMark[]>([]);
@@ -1158,27 +1205,8 @@ export const useRecordingStore = defineStore('recording', () => {
       sessions.value = [...sessions.value, session];
       isRecording.value = true;
 
-      // Start level polling for device sessions (needed for waveform history)
-      if (!levelPollInterval) {
-        levelPollInterval = window.setInterval(async () => {
-          try {
-            const levels = await invoke<SessionLevel[]>('get_session_levels');
-            for (const sl of levels) {
-              const sess = sessions.value.find(s => s.sessionId === sl.session_id);
-              if (sess) {
-                sess.level = sl.level;
-                const buf = getOrCreateWaveformHistory(sess.sessionId);
-                buf.push(sl.level, recordingDuration.value);
-              }
-            }
-            currentLevel.value = levels.length > 0
-              ? Math.max(...levels.map(l => l.level))
-              : 0;
-          } catch {
-            // Ignore polling errors
-          }
-        }, 100);
-      }
+      // Level updates now come via push events (listen("recording-levels"))
+      // — no polling needed. Only start duration tracking.
 
       // Start duration tracking if not already running
       if (!durationInterval) {

@@ -41,11 +41,11 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::panic;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::audio_util::{Rf64Writer, AudioWriter};
 
@@ -76,6 +76,13 @@ pub(super) struct RecordingSession {
     pub(super) start_offset_us: i64,
     /// Seconds of pre-record buffer audio prepended
     pub(super) pre_record_seconds: f64,
+}
+
+/// Cached atomic refs for the level emitter thread (avoids locking sessions map every frame).
+struct EmitterSessionRef {
+    session_id: String,
+    level: Arc<AtomicU32>,
+    active: Arc<AtomicBool>,
 }
 
 /// Managed state for all recording, monitoring, and preview operations.
@@ -112,6 +119,17 @@ pub struct RecordingManager {
     /// Cleared on recording stop so reader thread stops pushing.
     pub(super) system_ring: Arc<Mutex<Option<Arc<RecordingRingBuffer>>>>,
     pub(super) debug_callback_count: Arc<AtomicUsize>,
+
+    // ── Push-based level emitter (replaces polling) ──
+    pub app_handle: OnceLock<AppHandle>,
+    emitter_active: Arc<AtomicBool>,
+    emitter_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Frontend signals whether the monitor view is visible (gates emission)
+    pub monitor_view_active: Arc<AtomicBool>,
+    /// Cached session refs for the emitter thread (updated on session start/stop)
+    emitter_refs: Arc<Mutex<Vec<EmitterSessionRef>>>,
+    /// Duration in milliseconds (from sample count), read by emitter
+    pub(super) duration_ms: Arc<AtomicU64>,
 }
 
 /// A preview session for live VU metering (no recording).
@@ -136,6 +154,12 @@ impl RecordingManager {
             system_monitor_child: Arc::new(Mutex::new(None)),
             system_ring: Arc::new(Mutex::new(None)),
             debug_callback_count: Arc::new(AtomicUsize::new(0)),
+            app_handle: OnceLock::new(),
+            emitter_active: Arc::new(AtomicBool::new(false)),
+            emitter_handle: Mutex::new(None),
+            monitor_view_active: Arc::new(AtomicBool::new(false)),
+            emitter_refs: Arc::new(Mutex::new(Vec::new())),
+            duration_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -145,6 +169,91 @@ impl RecordingManager {
             sessions.values().any(|s| s.active.load(Ordering::SeqCst))
         } else {
             false
+        }
+    }
+
+    /// Register a session's atomics with the level emitter (called on session start).
+    fn register_emitter_session(&self, session_id: &str, level: Arc<AtomicU32>, active: Arc<AtomicBool>) {
+        if let Ok(mut refs) = self.emitter_refs.lock() {
+            refs.push(EmitterSessionRef {
+                session_id: session_id.to_string(),
+                level,
+                active,
+            });
+        }
+    }
+
+    /// Remove a session from the emitter refs (called on session stop).
+    fn unregister_emitter_session(&self, session_id: &str) {
+        if let Ok(mut refs) = self.emitter_refs.lock() {
+            refs.retain(|r| r.session_id != session_id);
+        }
+    }
+
+    /// Start the push-based level emitter thread (idempotent — skips if already running).
+    fn start_level_emitter(&self) {
+        if self.emitter_active.load(Ordering::SeqCst) {
+            return; // already running
+        }
+        let app = match self.app_handle.get() {
+            Some(h) => h.clone(),
+            None => { log::warn!("No AppHandle — cannot start level emitter"); return; }
+        };
+        self.emitter_active.store(true, Ordering::SeqCst);
+
+        let active = self.emitter_active.clone();
+        let monitor_active = self.monitor_view_active.clone();
+        let refs = self.emitter_refs.clone();
+        let duration_ms = self.duration_ms.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("level-emitter".into())
+            .spawn(move || {
+                let mut last_levels: Vec<u32> = Vec::new();
+                while active.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(16));
+
+                    // Gate: skip if frontend monitor view isn't visible
+                    if !monitor_active.load(Ordering::Relaxed) { continue; }
+
+                    // Read session refs — lock only the ref vec, not the full sessions map
+                    let snap = refs.lock().expect("emitter_refs poisoned");
+                    let mut ids: Vec<String> = Vec::with_capacity(snap.len());
+                    let mut levels: Vec<f32> = Vec::with_capacity(snap.len());
+                    let mut raw: Vec<u32> = Vec::with_capacity(snap.len());
+                    for r in snap.iter() {
+                        if !r.active.load(Ordering::Relaxed) { continue; }
+                        let lv = r.level.load(Ordering::Relaxed);
+                        ids.push(r.session_id.clone());
+                        levels.push(lv as f32 / 1000.0);
+                        raw.push(lv);
+                    }
+                    drop(snap);
+
+                    // Change detection: skip if levels haven't changed
+                    if raw == last_levels { continue; }
+                    last_levels = raw;
+
+                    let dur = duration_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+                    let _ = app.emit("recording-levels", RecordingLevelEvent {
+                        session_ids: ids,
+                        levels,
+                        duration: dur,
+                    });
+                }
+                log::info!("Level emitter thread stopped");
+            })
+            .expect("Failed to spawn level-emitter thread");
+
+        *self.emitter_handle.lock().expect("emitter_handle poisoned") = Some(handle);
+        log::info!("Level emitter thread started");
+    }
+
+    /// Stop the level emitter thread (waits for join).
+    fn stop_level_emitter(&self) {
+        self.emitter_active.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.emitter_handle.lock().expect("emitter_handle poisoned").take() {
+            let _ = handle.join();
         }
     }
 
@@ -1235,9 +1344,17 @@ pub async fn start_session(
         pre_record_seconds: 0.0,
     };
 
+    // Register with level emitter BEFORE inserting (clone atomics while we own them)
+    let emitter_level = session.level.clone();
+    let emitter_active = session.active.clone();
+
     if let Ok(mut sessions) = mgr.sessions.lock() {
         sessions.insert(session_id.clone(), session);
     }
+
+    // Register session atomics with the emitter and ensure emitter is running
+    mgr.register_emitter_session(&session_id, emitter_level, emitter_active);
+    mgr.start_level_emitter();
 
     log::info!("Session '{}' started: {}", session_id, output_path.display());
     Ok(output_path.to_string_lossy().to_string())
@@ -1329,9 +1446,11 @@ pub async fn stop_session(
 
     log::info!("Session '{}' stopped: {:.2}s, {} samples", session_id, duration, sample_count);
 
-    // Clear shared level if no more sessions are active
+    // Unregister from emitter; stop emitter if no more active sessions
+    mgr.unregister_emitter_session(&session_id);
     if !mgr.is_any_recording() {
         mgr.current_level.store(0, Ordering::SeqCst);
+        mgr.stop_level_emitter();
     }
 
     // Restart preview for this device (nice-to-have: re-enable VU after stop)
@@ -1442,6 +1561,13 @@ fn stop_all_previews_internal(mgr: &RecordingManager) {
             log::info!("Preview stopped: {}", id);
         }
     }
+}
+
+/// Signal from frontend: monitor view is visible/hidden (gates level emission).
+#[tauri::command]
+pub fn set_monitor_active(mgr: State<'_, RecordingManager>, active: bool) {
+    mgr.monitor_view_active.store(active, Ordering::SeqCst);
+    log::info!("Monitor view active: {}", active);
 }
 
 #[tauri::command]
