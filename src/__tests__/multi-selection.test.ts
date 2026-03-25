@@ -707,6 +707,72 @@ describe('Stereo Unlinked, No Channel Selected', () => {
     expect(clipboardStore.clipboard!.sourceChannels!.length).toBe(2);
   });
 
+  it('copy from askew lanes stores laneClipOffsets', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Move R channel forward by 2s to create askew
+    const rClipId = track.channelLanes![1].clips[0].id;
+    tracksStore.setClipStart(track.id, rClipId, 2.0);
+
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(null);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(0);
+    selectionStore.setOutPoint(10);
+
+    await clipboardStore.copy();
+
+    expect(clipboardStore.clipboard).toBeDefined();
+    expect(clipboardStore.clipboard!.laneClipOffsets).toBeDefined();
+    expect(clipboardStore.clipboard!.laneClipOffsets!.length).toBe(2);
+    // L lane clip starts at 0 relative
+    expect(clipboardStore.clipboard!.laneClipOffsets![0].clips[0].relativeStart).toBeCloseTo(0, 1);
+    // R lane clip starts at 2s relative
+    expect(clipboardStore.clipboard!.laneClipOffsets![1].clips[0].relativeStart).toBeCloseTo(2, 1);
+  });
+
+  it('paste from askew lanes creates channelLanes on new track', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Move R channel forward by 2s
+    const rClipId = track.channelLanes![1].clips[0].id;
+    tracksStore.setClipStart(track.id, rClipId, 2.0);
+
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(null);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(0);
+    selectionStore.setOutPoint(10);
+
+    await clipboardStore.copy();
+
+    // Deselect to force new track creation on paste
+    tracksStore.selectedTrackId = 'ALL';
+    await clipboardStore.paste();
+
+    // Find the pasted track (last one added)
+    const pasted = tracksStore.tracks[tracksStore.tracks.length - 1];
+    expect(pasted.channelLanes).toBeDefined();
+    expect(pasted.channelLanes!.length).toBe(2);
+    expect(pasted.channelLinked).toBe(false);
+    // R lane clip should be offset from L lane clip
+    const lStart = pasted.channelLanes![0].clips[0].clipStart;
+    const rStart = pasted.channelLanes![1].clips[0].clipStart;
+    expect(rStart - lStart).toBeCloseTo(2, 1);
+  });
+
   it('paste inserts stereo at playhead', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const { useClipboardStore } = await import('@/stores/clipboard');
