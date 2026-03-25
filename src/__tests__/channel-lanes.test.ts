@@ -760,6 +760,67 @@ describe('Channel Conversion', () => {
     expect(updated.clips![0].clipStart).toBeCloseTo(3.0, 1);
   });
 
+  it('keepChannel extracts L as true mono', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(2, 44100, 2);
+    const lData = buffer.getChannelData(0);
+    const rData = buffer.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.8; rData[i] = 0.2; }
+
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    tracksStore.keepChannel(track.id, 0); // keep L
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.audioData.channels).toBe(1);
+    expect(updated.audioData.buffer!.numberOfChannels).toBe(1);
+    // Should have L data (0.8), NOT averaged (0.5)
+    expect(updated.audioData.buffer!.getChannelData(0)[0]).toBeCloseTo(0.8);
+  });
+
+  it('keepChannel extracts R as true mono', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(2, 44100, 2);
+    const lData = buffer.getChannelData(0);
+    const rData = buffer.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.8; rData[i] = 0.2; }
+
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    tracksStore.keepChannel(track.id, 1); // keep R
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.audioData.buffer!.numberOfChannels).toBe(1);
+    // Should have R data (0.2), NOT averaged (0.5)
+    expect(updated.audioData.buffer!.getChannelData(0)[0]).toBeCloseTo(0.2);
+  });
+
+  it('keepChannel adopts lane clips when materialized', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(5, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+
+    // Materialize and unlink, move L clip
+    tracksStore.toggleChannelLinked(track.id);
+    const unlinked = tracksStore.getTrackById(track.id)!;
+    const lClipId = unlinked.channelLanes![0].clips[0].id;
+    tracksStore.setClipStart(track.id, lClipId, 3.0, false);
+
+    tracksStore.keepChannel(track.id, 0); // keep L
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.channelLanes).toBeUndefined();
+    expect(updated.clips).toBeDefined();
+    expect(updated.clips![0].clipStart).toBeCloseTo(3.0, 1);
+  });
+
   it('convertToMono downmixes L+R to single channel', async () => {
     const { useTracksStore } = await import('@/stores/tracks');
     const tracksStore = useTracksStore();

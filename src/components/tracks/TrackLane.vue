@@ -129,8 +129,10 @@ function toggleTrackMenu(event?: MouseEvent) {
 function handleMenuAction(action: string) {
   showTrackMenu.value = false;
   switch (action) {
-    case 'keep-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
-    case 'keep-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'clone-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
+    case 'clone-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'keep-l': tracksStore.keepChannel(props.track.id, 0); break;
+    case 'keep-r': tracksStore.keepChannel(props.track.id, 1); break;
     case 'to-mono': tracksStore.convertToMono(props.track.id); break;
     case 'to-stereo': tracksStore.convertToStereo(props.track.id); break;
     case 'link': tracksStore.toggleChannelLinked(props.track.id); break;
@@ -1093,14 +1095,20 @@ onUnmounted(() => {
       >
         <!-- Channel conversion -->
         <template v-if="isStereoView">
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('clone-l')">
+            Clone L channel
+          </button>
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('clone-r')">
+            Clone R channel
+          </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-l')">
-            Keep L channel only
+            Keep L channel
           </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
-            Keep R channel only
+            Keep R channel
           </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-mono')">
-            Convert to Mono (mix L+R)
+            Convert to Mono (L+R)
           </button>
           <div class="border-t border-gray-700 my-1" />
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">
