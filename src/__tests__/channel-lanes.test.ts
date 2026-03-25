@@ -759,4 +759,81 @@ describe('Channel Conversion', () => {
     expect(updated.clips).toBeDefined();
     expect(updated.clips![0].clipStart).toBeCloseTo(3.0, 1);
   });
+
+  it('convertToMono downmixes L+R to single channel', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(2, 44100, 2);
+    const lData = buffer.getChannelData(0);
+    const rData = buffer.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.8; rData[i] = 0.2; }
+
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    expect(track.channelMode).toBe('stereo');
+
+    tracksStore.convertToMono(track.id);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.audioData.channels).toBe(1);
+    expect(updated.audioData.buffer!.numberOfChannels).toBe(1);
+    // Downmix: (0.8 + 0.2) * 0.5 = 0.5
+    const monoData = updated.audioData.buffer!.getChannelData(0);
+    expect(monoData[0]).toBeCloseTo(0.5);
+    expect(updated.channelLanes).toBeUndefined();
+  });
+
+  it('mono→stereo→mono round-trip preserves audio', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(1, 44100, 1);
+    const monoData = buffer.getChannelData(0);
+    for (let i = 0; i < monoData.length; i++) { monoData[i] = 0.6; }
+
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Mono', 0);
+
+    // Mono → Stereo
+    tracksStore.convertToStereo(track.id);
+    let updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('stereo');
+    expect(updated.audioData.channels).toBe(2);
+
+    // Stereo → Mono (downmix)
+    tracksStore.convertToMono(track.id);
+    updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.audioData.channels).toBe(1);
+    // Both channels were 0.6, so downmix = (0.6 + 0.6) * 0.5 = 0.6
+    const resultData = updated.audioData.buffer!.getChannelData(0);
+    expect(resultData[0]).toBeCloseTo(0.6, 2);
+  });
+
+  it('cut with I/O points does not delete entire track after conversion', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+
+    // Convert to mono then back to stereo
+    tracksStore.convertToMono(track.id);
+    tracksStore.convertToStereo(track.id);
+
+    let updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('stereo');
+    expect(updated.duration).toBeCloseTo(10, 0);
+
+    // Simulate I/O cut on middle 2 seconds (2-4)
+    const audioContext = new MockAudioContext() as unknown as AudioContext;
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, audioContext, { keepTrack: true });
+
+    // Track should still exist, not be deleted
+    updated = tracksStore.getTrackById(track.id)!;
+    expect(updated).toBeDefined();
+    // Should have clips (before and/or after segments) from the cut
+    expect(updated.clips).toBeDefined();
+    expect(updated.clips!.length).toBeGreaterThanOrEqual(1);
+  });
 });

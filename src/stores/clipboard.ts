@@ -281,9 +281,13 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Cut');
     try {
-    // Priority 1: Selected clip - cut it to clipboard and slide remaining left
+    // Check I/O points first — when set, they take priority over selected clip
+    const { inPoint: ioIn, outPoint: ioOut } = selectionStore.inOutPoints;
+    const useIOFirst = (settingsStore.settings.clipboardUsesInOutPoints ?? true) && ioIn !== null && ioOut !== null;
+
+    // Priority 1: Selected clip — only when NO I/O points are set
     const selClip = tracksStore.selectedClip;
-    if (selClip) {
+    if (selClip && !useIOFirst) {
       const { trackId, clip } = selClip;
       const ctx = audioStore.getAudioContext();
 
