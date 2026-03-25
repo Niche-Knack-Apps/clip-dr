@@ -28,7 +28,7 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const emit = defineEmits<{
-  select: [trackId: string];
+  select: [trackId: string, event?: MouseEvent];
   toggleMute: [trackId: string];
   toggleSolo: [trackId: string];
   delete: [trackId: string];
@@ -123,6 +123,14 @@ function toggleTrackMenu(event?: MouseEvent) {
       document.removeEventListener('mousedown', close);
     };
     setTimeout(() => document.addEventListener('mousedown', close), 0);
+  }
+}
+
+function handleLaneClick(ch: number) {
+  // Select this track + this specific channel
+  emit('select', props.track.id);
+  if (!isChannelLinked.value) {
+    tracksStore.selectChannel(ch);
   }
 }
 
@@ -719,7 +727,7 @@ onUnmounted(() => {
       borderLeftColor: isSelected ? track.color : 'transparent',
       '--ring-color': isSelected ? track.color : undefined,
     }"
-    @click="emit('select', track.id)"
+    @click="emit('select', track.id, $event)"
   >
     <!-- Track controls (resizable) -->
     <div
@@ -927,8 +935,14 @@ onUnmounted(() => {
         <div
           v-for="ch in [0, 1]"
           :key="ch"
-          class="absolute left-0 right-0 overflow-hidden group/lane"
+          :class="[
+            'absolute left-0 right-0 overflow-hidden group/lane transition-opacity',
+            // Dim the non-selected lane when a specific channel is selected on this unlinked track
+            tracksStore.selectedChannelIndex !== null && tracksStore.selectedChannelIndex !== ch && !isChannelLinked
+              ? 'opacity-50' : 'opacity-100',
+          ]"
           :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
+          @click.stop="handleLaneClick(ch)"
         >
           <!-- Lane label -->
           <span class="absolute top-0 left-1 text-[9px] font-mono font-bold text-gray-400 z-20 pointer-events-none select-none">

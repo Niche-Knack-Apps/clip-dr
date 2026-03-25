@@ -449,6 +449,19 @@ const silenceStore = useSilenceStore();
 let clipDragOriginalStart: number | null = null;
 let clipDragOriginalDuration: number | null = null;
 
+// Track selection handler — supports Ctrl+click (toggle) and Shift+click (range)
+function handleTrackSelect(trackId: string, event?: MouseEvent) {
+  if (event?.ctrlKey || event?.metaKey) {
+    tracksStore.selectTrackToggle(trackId);
+  } else if (event?.shiftKey) {
+    tracksStore.selectTrackRange(trackId);
+  } else {
+    selectTrack(trackId);
+    // Clear channel selection on plain click
+    tracksStore.selectChannel(null);
+  }
+}
+
 // Clip drag handlers (for moving clips on timeline)
 function handleClipDragStart(trackId: string, clipId: string, mouseOffsetX: number, event?: MouseEvent) {
   // Lane materialization now happens eagerly in toggleChannelLinked (not here).
@@ -1152,9 +1165,9 @@ function handleClipSelect(trackId: string, clipId: string) {
         >
           <TrackLane
             :track="track"
-            :is-selected="track.id === selectedTrackId"
+            :is-selected="tracksStore.selectedTrackIds.has(track.id)"
             :is-cross-track-drag="track.id === clipDraggingTrackId && isCrossTrackDrag"
-            @select="selectTrack"
+            @select="handleTrackSelect"
             @toggle-mute="toggleMute"
             @toggle-solo="toggleSolo"
             @delete="deleteTrack"
