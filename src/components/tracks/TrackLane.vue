@@ -97,12 +97,18 @@ const DRAG_THRESHOLD = 5;
 // Rename state
 const isEditing = ref(false);
 const showTrackMenu = ref(false);
+const menuOpenUpward = ref(false);
 
-function toggleTrackMenu() {
+function toggleTrackMenu(event?: MouseEvent) {
   showTrackMenu.value = !showTrackMenu.value;
   if (showTrackMenu.value) {
+    // Detect if menu should open upward (bottom half of viewport)
+    if (event) {
+      const rect = (event.target as HTMLElement).getBoundingClientRect();
+      menuOpenUpward.value = rect.bottom > window.innerHeight * 0.6;
+    }
     // Close on click outside
-    const close = (e: MouseEvent) => {
+    const close = () => {
       showTrackMenu.value = false;
       document.removeEventListener('mousedown', close);
     };
@@ -749,7 +755,7 @@ onUnmounted(() => {
               type="button"
               class="w-4 h-4 flex items-center justify-center rounded text-gray-500 hover:text-gray-200 hover:bg-gray-600 transition-colors shrink-0"
               title="Track options"
-              @click.stop="toggleTrackMenu"
+              @click.stop="toggleTrackMenu($event)"
               @mousedown.stop
             >
               <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
@@ -767,7 +773,10 @@ onUnmounted(() => {
           <!-- Track dropdown menu -->
           <div
             v-if="showTrackMenu"
-            class="absolute top-full left-0 mt-1 z-50 w-48 bg-gray-800 border border-gray-600 rounded-md shadow-lg py-1 text-xs"
+            :class="[
+              'absolute left-0 z-50 w-48 bg-gray-800 border border-gray-600 rounded-md shadow-lg py-1 text-xs',
+              menuOpenUpward ? 'bottom-full mb-1' : 'top-full mt-1',
+            ]"
             @mousedown.stop
           >
             <!-- Channel conversion -->

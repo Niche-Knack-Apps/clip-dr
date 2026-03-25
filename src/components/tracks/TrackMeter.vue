@@ -54,7 +54,7 @@ function handleClipClick() {
 
 <template>
   <div
-    class="flex gap-px items-end shrink-0 cursor-pointer"
+    class="relative flex gap-px items-end shrink-0 cursor-pointer"
     :style="{ height: '20px', width: props.channel != null ? '7px' : '14px' }"
     @click.stop="handleMeterClick"
   >
