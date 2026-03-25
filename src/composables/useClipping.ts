@@ -44,9 +44,18 @@ export function useClipping() {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Create clip');
     try {
-      // Scope extraction to selected track (or all tracks if 'ALL'/null)
-      const selectedId = tracksStore.selectedTrackId;
-      const sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+      // Scope extraction to audible tracks (respects solo/mute like playback/export).
+      // When solo is active, extract only from solo'd tracks.
+      // When no solo, extract from selected track (or all if 'ALL'/null).
+      const hasSolo = tracksStore.tracks.some(t => t.solo);
+      let sourceTrackIds: string[] | undefined;
+      if (hasSolo) {
+        // Solo active: extract from solo'd tracks only (matches playback behavior)
+        sourceTrackIds = tracksStore.tracks.filter(t => t.solo).map(t => t.id);
+      } else {
+        const selectedId = tracksStore.selectedTrackId;
+        sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+      }
 
       // Detect large files (same check as clipboard.cut)
       const hasLargeFile = tracksStore.tracks.some(t => {
@@ -106,6 +115,7 @@ export function useClipping() {
           volume: 1,
           clips,
           sourcePath: segments[0]?.sourceFile,
+          channelMode: channels >= 2 ? 'stereo' : 'mono',
         };
 
         console.log(`[Clipping] Created EDL clip "${clipName}" (${totalDuration.toFixed(2)}s) with ${segments.length} segment(s)`);
@@ -115,7 +125,7 @@ export function useClipping() {
         const ctx = audioStore.getAudioContext();
         const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds);
         if (!extracted) {
-          console.log('[Clipping] No audio found in I/O region');
+          console.warn('[Clipping] No audio found in I/O region');
           return null;
         }
         const clipName = `Clip ${tracksStore.tracks.length + 1}`;
@@ -152,6 +162,8 @@ export function useClipping() {
         const contributingTrack = tracksStore.tracks.find(t =>
           t.trackStart < outPoint && t.trackStart + t.duration > inPoint
         );
+        const numChannels = extracted.buffer.numberOfChannels;
+        console.warn(`[Clipping] createClip: extracted ${numChannels}ch buffer, segments=${segments.length}, channelMode=${numChannels >= 2 ? 'stereo' : 'mono'}`);
         newTrack = {
           id: generateId(),
           name: clipName,
@@ -159,7 +171,7 @@ export function useClipping() {
             buffer: extracted.buffer,
             waveformData: waveform,
             sampleRate: extracted.buffer.sampleRate,
-            channels: extracted.buffer.numberOfChannels,
+            channels: numChannels,
           },
           trackStart: inPoint,
           duration: totalDuration,
@@ -169,7 +181,95 @@ export function useClipping() {
           volume: 1,
           clips: clips.length > 0 ? clips : undefined,
           sourcePath: segments[0]?.sourceFile || contributingTrack?.sourcePath || contributingTrack?.cachedAudioPath,
+          channelMode: numChannels >= 2 ? 'stereo' : 'mono',
         };
+      }
+
+      // If source track has materialized channel lanes, create lane structure on new track
+      // so per-channel clip positions are preserved (offsets for askew L/R)
+      if (newTrack.channelMode === 'stereo') {
+        const sourceTrack = sourceTrackIds
+          ? tracksStore.tracks.find(t => sourceTrackIds!.includes(t.id) && t.channelLanes && t.channelLanes.length > 0)
+          : tracksStore.tracks.find(t => t.channelLanes && t.channelLanes.length > 0 && t.trackStart < outPoint && t.trackStart + t.duration > inPoint);
+        if (sourceTrack?.channelLanes) {
+          newTrack.channelLanes = sourceTrack.channelLanes.map(lane => {
+            // Build per-lane clips from the overlapping region
+            const laneClips: TrackClip[] = [];
+            for (const clip of lane.clips) {
+              const clipEnd = clip.clipStart + clip.duration;
+              if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
+              const overlapStart = Math.max(clip.clipStart, inPoint);
+              const overlapEnd = Math.min(clipEnd, outPoint);
+              if (overlapEnd <= overlapStart) continue;
+              laneClips.push({
+                id: generateId(),
+                buffer: null,
+                waveformData: [],
+                clipStart: overlapStart,
+                duration: overlapEnd - overlapStart,
+                sourceFile: clip.sourceFile || sourceTrack.sourcePath || sourceTrack.cachedAudioPath,
+                sourceOffset: (clip.sourceOffset ?? 0) + (overlapStart - clip.clipStart),
+                sourceIn: (clip.sourceOffset ?? 0) + (overlapStart - clip.clipStart),
+                sourceDuration: overlapEnd - overlapStart,
+              });
+            }
+            return {
+              id: generateId(),
+              channelIndex: lane.channelIndex,
+              kind: lane.kind,
+              volume: lane.volume,
+              clips: laneClips,
+            };
+          });
+          newTrack.channelLinked = sourceTrack.channelLinked;
+          // Clear parent clips — lane clips are the source of truth for rendering
+          newTrack.clips = undefined;
+
+          // Populate lane clip waveforms + buffers from the extracted audio.
+          // Each lane gets per-CHANNEL waveform data extracted from the buffer,
+          // not sliced from the composite (which mixes both channels together).
+          if (newTrack.audioData.buffer) {
+            const parentBuffer = newTrack.audioData.buffer;
+            const trackDuration = newTrack.duration;
+            const sampleRate = parentBuffer.sampleRate;
+
+            for (const lane of newTrack.channelLanes!) {
+              const ch = Math.min(lane.channelIndex, parentBuffer.numberOfChannels - 1);
+              const channelData = parentBuffer.getChannelData(ch);
+
+              for (const lc of lane.clips) {
+                lc.buffer = parentBuffer;
+
+                // Generate per-channel waveform from the actual audio samples
+                if (trackDuration > 0 && lc.duration > 0) {
+                  // Compute sample range for this clip within the extracted buffer
+                  const clipOffsetInTrack = lc.clipStart - newTrack.trackStart;
+                  const startSample = Math.max(0, Math.floor(clipOffsetInTrack * sampleRate));
+                  const endSample = Math.min(channelData.length, Math.floor((clipOffsetInTrack + lc.duration) * sampleRate));
+                  const totalSamples = endSample - startSample;
+
+                  // Generate ~500 buckets for overview
+                  const targetBuckets = Math.min(500, Math.max(50, totalSamples > 0 ? Math.ceil(totalSamples / 100) : 50));
+                  const samplesPerBucket = Math.max(1, Math.ceil(totalSamples / targetBuckets));
+                  const waveform: number[] = [];
+
+                  for (let i = 0; i < targetBuckets; i++) {
+                    const bStart = startSample + i * samplesPerBucket;
+                    const bEnd = Math.min(bStart + samplesPerBucket, endSample);
+                    let min = 0, max = 0;
+                    for (let j = bStart; j < bEnd; j++) {
+                      const s = channelData[j];
+                      if (s < min) min = s;
+                      if (s > max) max = s;
+                    }
+                    waveform.push(min, max);
+                  }
+                  lc.waveformData = waveform;
+                }
+              }
+            }
+          }
+        }
       }
 
       // Insert below current selected track

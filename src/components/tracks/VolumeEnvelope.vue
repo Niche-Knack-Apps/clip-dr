@@ -1,23 +1,26 @@
 <script setup lang="ts">
 import { computed, ref, onUnmounted } from 'vue';
-import type { Track } from '@/shared/types';
+import type { Track, ChannelLane } from '@/shared/types';
 import { useTracksStore } from '@/stores/tracks';
 import { useHistoryStore } from '@/stores/history';
-import { MAX_VOLUME_DB, MIN_VOLUME_DB, TRACK_HEIGHT } from '@/shared/constants';
+import { MAX_VOLUME_DB, MIN_VOLUME_DB, TRACK_HEIGHT, TRACK_SUBLANE_HEIGHT } from '@/shared/constants';
 import { linearToDb, dbToLinear } from '@/shared/utils';
 
 interface Props {
   track: Track;
   containerWidth: number;
   duration: number; // paddedDuration from TrackLane (timelineDuration)
+  /** When provided, renders per-lane envelope instead of track-level */
+  channelLane?: ChannelLane;
 }
 
 const props = defineProps<Props>();
 const tracksStore = useTracksStore();
 const historyStore = useHistoryStore();
 
-const svgHeight = TRACK_HEIGHT;
+const svgHeight = computed(() => props.channelLane ? TRACK_SUBLANE_HEIGHT : TRACK_HEIGHT);
 const dbRange = MAX_VOLUME_DB - MIN_VOLUME_DB; // 84dB total range
+const envelopeId = computed(() => props.channelLane ? `${props.track.id}-ch${props.channelLane.channelIndex}` : props.track.id);
 
 // Drag state
 const draggingPointId = ref<string | null>(null);
@@ -40,12 +43,12 @@ function valueToY(value: number): number {
   const db = value <= 0 ? MIN_VOLUME_DB : Math.max(MIN_VOLUME_DB, Math.min(MAX_VOLUME_DB, linearToDb(value)));
   // 0dB at ~71% from bottom, +24dB at top, -60dB at bottom
   const fraction = (db - MIN_VOLUME_DB) / dbRange;
-  return svgHeight * (1 - fraction);
+  return svgHeight.value * (1 - fraction);
 }
 
 // Convert Y pixel coordinate to linear gain value
 function yToValue(y: number): number {
-  const fraction = 1 - y / svgHeight;
+  const fraction = 1 - y / svgHeight.value;
   const db = MIN_VOLUME_DB + fraction * dbRange;
   if (db <= MIN_VOLUME_DB) return 0;
   return dbToLinear(db);
@@ -66,7 +69,7 @@ function xToTime(x: number): number {
 
 // Clip regions in pixel coordinates — used to mask envelope to clip bounds only
 const clipRects = computed(() => {
-  const clips = tracksStore.getTrackClips(props.track.id);
+  const clips = props.channelLane?.clips ?? tracksStore.getTrackClips(props.track.id);
   return clips.map(clip => {
     const trackRelativeStart = clip.clipStart - props.track.trackStart;
     const x = timeToX(trackRelativeStart);
@@ -78,14 +81,33 @@ const clipRects = computed(() => {
 // The Y position for 0dB reference line
 const unityY = computed(() => valueToY(1.0));
 
-// Get points for the polyline — use envelope if exists, otherwise flat at track.volume
+// Get points for the polyline — use lane envelope if provided, otherwise track-level
+// Touch tracksStore.tracks to react to triggerRef(tracks) after volume changes
+const effectiveVolume = computed(() => {
+  void tracksStore.tracks;
+  // Re-read lane from store for fresh data (prop may be stale after shallowRef mutation)
+  if (props.channelLane) {
+    const freshLane = tracksStore.getChannelLane(props.track.id, props.channelLane.channelIndex);
+    return freshLane?.volume ?? props.track.volume;
+  }
+  return props.track.volume;
+});
+const effectiveEnvelope = computed(() => {
+  void tracksStore.tracks;
+  if (props.channelLane) {
+    const freshLane = tracksStore.getChannelLane(props.track.id, props.channelLane.channelIndex);
+    return freshLane?.volumeEnvelope ?? props.track.volumeEnvelope;
+  }
+  return props.track.volumeEnvelope;
+});
+
 const envelopePoints = computed(() => {
-  const env = props.track.volumeEnvelope;
+  const env = effectiveEnvelope.value;
   if (!env || env.length === 0) {
-    // Flat line at track volume across the track's span
+    // Flat line at volume across the track's span
     return [
-      { x: timeToX(0), y: valueToY(props.track.volume) },
-      { x: timeToX(props.track.duration), y: valueToY(props.track.volume) },
+      { x: timeToX(0), y: valueToY(effectiveVolume.value) },
+      { x: timeToX(props.track.duration), y: valueToY(effectiveVolume.value) },
     ];
   }
 
@@ -120,12 +142,12 @@ const polygonPoints = computed(() => {
   const first = pts[0];
   const last = pts[pts.length - 1];
   const top = pts.map(p => `${p.x},${p.y}`).join(' ');
-  return `${first.x},${svgHeight} ${top} ${last.x},${svgHeight}`;
+  return `${first.x},${svgHeight.value} ${top} ${last.x},${svgHeight.value}`;
 });
 
 // Keyframe circles — only render when envelope has points
 const keyframeCircles = computed(() => {
-  const env = props.track.volumeEnvelope;
+  const env = effectiveEnvelope.value;
   if (!env || env.length === 0) return [];
   return env.map(p => ({
     id: p.id,
@@ -137,14 +159,18 @@ const keyframeCircles = computed(() => {
 // Click on the wide hit polyline — add a new point
 function handleBackgroundClick(event: MouseEvent) {
   if (draggingPointId.value) return;
-  const svgEl = document.querySelector(`[data-envelope-track="${props.track.id}"]`);
+  const svgEl = document.querySelector(`[data-envelope-track="${envelopeId.value}"]`);
   if (!svgEl) return;
   const rect = svgEl.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
   const time = xToTime(x);
   const value = yToValue(y);
-  tracksStore.addVolumePoint(props.track.id, time, value);
+  if (props.channelLane) {
+    tracksStore.addChannelLaneVolumePoint(props.track.id, props.channelLane.channelIndex, time, value);
+  } else {
+    tracksStore.addVolumePoint(props.track.id, time, value);
+  }
 }
 
 // Start dragging a keyframe circle
@@ -169,19 +195,23 @@ function handlePointMouseMove(event: MouseEvent) {
 function flushDrag() {
   dragRafId = null;
   if (!pendingDragEvent || !draggingPointId.value) return;
-  const svg = document.querySelector(`[data-envelope-track="${props.track.id}"]`);
+  const svg = document.querySelector(`[data-envelope-track="${envelopeId.value}"]`);
   if (!svg) return;
   const rect = svg.getBoundingClientRect();
   const x = pendingDragEvent.clientX - rect.left;
   const y = pendingDragEvent.clientY - rect.top;
   pendingDragEvent = null;
 
-  const clampedY = Math.max(0, Math.min(svgHeight, y));
+  const clampedY = Math.max(0, Math.min(svgHeight.value, y));
   const time = xToTime(x);
   const value = yToValue(clampedY);
 
   dragTooltipPosition.value = { x, y: clampedY };
-  tracksStore.updateVolumePoint(props.track.id, draggingPointId.value, time, value);
+  if (props.channelLane) {
+    tracksStore.updateChannelLaneVolumePoint(props.track.id, props.channelLane.channelIndex, draggingPointId.value, time, value);
+  } else {
+    tracksStore.updateVolumePoint(props.track.id, draggingPointId.value, time, value);
+  }
 }
 
 function handlePointMouseUp() {
@@ -200,7 +230,11 @@ function handlePointMouseUp() {
 function handlePointContextMenu(pointId: string, event: MouseEvent) {
   event.preventDefault();
   event.stopPropagation();
-  tracksStore.removeVolumePoint(props.track.id, pointId);
+  if (props.channelLane) {
+    tracksStore.removeChannelLaneVolumePoint(props.track.id, props.channelLane.channelIndex, pointId);
+  } else {
+    tracksStore.removeVolumePoint(props.track.id, pointId);
+  }
 }
 
 onUnmounted(() => {
@@ -212,7 +246,7 @@ onUnmounted(() => {
 
 <template>
   <svg
-    :data-envelope-track="track.id"
+    :data-envelope-track="envelopeId"
     class="absolute inset-0 z-[5] overflow-visible"
     :width="containerWidth"
     :height="svgHeight"
@@ -220,7 +254,7 @@ onUnmounted(() => {
   >
     <!-- Clip-path to mask envelope to clip regions only -->
     <defs>
-      <clipPath :id="`envelope-clip-${track.id}`">
+      <clipPath :id="`envelope-clip-${envelopeId}`">
         <rect
           v-for="(cr, idx) in clipRects"
           :key="idx"
@@ -232,7 +266,7 @@ onUnmounted(() => {
       </clipPath>
     </defs>
 
-    <g :clip-path="`url(#envelope-clip-${track.id})`">
+    <g :clip-path="`url(#envelope-clip-${envelopeId})`">
     <!-- Semi-transparent fill below the curve -->
     <polygon
       v-if="polygonPoints"

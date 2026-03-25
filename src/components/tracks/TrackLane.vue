@@ -55,12 +55,23 @@ const tracksStore = useTracksStore();
 const uiStore = useUIStore();
 
 // Stereo view: whether this track should show L/R sub-lanes
-const isStereoView = computed(() =>
-  uiStore.showChannelLanes && (props.track.channelMode === 'stereo' || (props.track.audioData.channels ?? 1) >= 2)
-);
+// Reads from store (not stale prop) so paste-to-stereo triggers re-render immediately
+const isStereoView = computed(() => {
+  void tracksStore.tracks; // react to triggerRef(tracks)
+  const t = tracksStore.getTrackById(props.track.id);
+  return uiStore.showChannelLanes && (
+    t?.channelMode === 'stereo' || (t?.audioData.channels ?? 1) >= 2
+  );
+});
 const effectiveTrackHeight = computed(() =>
   isStereoView.value ? TRACK_SUBLANE_HEIGHT * 2 : TRACK_HEIGHT
 );
+// Reactive channelLinked — reads from store, not stale prop
+const isChannelLinked = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  return t?.channelLinked !== false;
+});
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const containerWidth = ref(0);
@@ -85,6 +96,48 @@ const DRAG_THRESHOLD = 5;
 
 // Rename state
 const isEditing = ref(false);
+const showTrackMenu = ref(false);
+const menuPosition = ref({ top: 0, left: 0, openUp: false });
+
+const menuStyle = computed(() => {
+  const p = menuPosition.value;
+  if (p.openUp) {
+    return { left: `${p.left}px`, bottom: `${globalThis.innerHeight - p.top + 4}px` };
+  }
+  return { left: `${p.left}px`, top: `${p.top}px` };
+});
+
+function toggleTrackMenu(event?: MouseEvent) {
+  showTrackMenu.value = !showTrackMenu.value;
+  if (showTrackMenu.value && event) {
+    const rect = (event.target as HTMLElement).getBoundingClientRect();
+    const openUp = rect.bottom > window.innerHeight * 0.6;
+    menuPosition.value = {
+      top: openUp ? rect.top : rect.bottom + 4,
+      left: rect.left,
+      openUp,
+    };
+    // Close on click outside
+    const close = () => {
+      showTrackMenu.value = false;
+      document.removeEventListener('mousedown', close);
+    };
+    setTimeout(() => document.addEventListener('mousedown', close), 0);
+  }
+}
+
+function handleMenuAction(action: string) {
+  showTrackMenu.value = false;
+  switch (action) {
+    case 'keep-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
+    case 'keep-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'to-mono': tracksStore.convertToMono(props.track.id); break;
+    case 'to-stereo': tracksStore.convertToStereo(props.track.id); break;
+    case 'link': tracksStore.toggleChannelLinked(props.track.id); break;
+    case 'rename': startEditing(); break;
+    case 'delete': emit('delete', props.track.id); break;
+  }
+}
 const editName = ref('');
 const inputRef = ref<HTMLInputElement | null>(null);
 
@@ -123,6 +176,39 @@ const trackClips = computed(() => {
   void tracksStore.syncEpoch;
   return tracksStore.getTrackClips(props.track.id);
 });
+
+/** Reactive lane clips: re-reads from store when tracks ref is triggered (including during drag) */
+const laneClipsL = computed(() => {
+  // Touch tracks shallowRef to react to triggerRef(tracks) calls
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  const lane = t?.channelLanes?.find(l => l.channelIndex === 0);
+  return lane ? lane.clips : trackClips.value;
+});
+const laneClipsR = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  const lane = t?.channelLanes?.find(l => l.channelIndex === 1);
+  return lane ? lane.clips : trackClips.value;
+});
+function getLaneClips(channelIndex: number) {
+  return channelIndex === 0 ? laneClipsL.value : laneClipsR.value;
+}
+
+/** Reactive channel lane objects (for VolumeEnvelope and volume controls) */
+const channelLaneL = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  return t?.channelLanes?.find(l => l.channelIndex === 0);
+});
+const channelLaneR = computed(() => {
+  void tracksStore.tracks;
+  const t = tracksStore.getTrackById(props.track.id);
+  return t?.channelLanes?.find(l => l.channelIndex === 1);
+});
+function getChannelLane(channelIndex: number) {
+  return channelIndex === 0 ? channelLaneL.value : channelLaneR.value;
+}
 
 // Track timemarks with pixel positions
 // Read through tracksStore.tracks shallowRef so triggerRef(tracks) invalidates this computed
@@ -257,8 +343,19 @@ const formattedDuration = computed(() => {
 function handleClipDragStart(clipId: string, event: MouseEvent) {
   if (event.button !== 0) return;
 
-  // Find the clip being dragged to get its original position
-  const clip = trackClips.value.find(c => c.id === clipId);
+  // Find the clip being dragged — search lane clips first (they have priority after materialization),
+  // then fall back to parent clips. This ensures we get the correct clipStart baseline for drag.
+  let clip: import('@/shared/types').TrackClip | undefined;
+  const t = tracksStore.getTrackById(props.track.id);
+  if (t?.channelLanes) {
+    for (const lane of t.channelLanes) {
+      clip = lane.clips.find(c => c.id === clipId);
+      if (clip) break;
+    }
+  }
+  if (!clip) {
+    clip = trackClips.value.find(c => c.id === clipId);
+  }
   if (!clip) return;
 
   // Don't start drag immediately - wait for threshold
@@ -281,6 +378,9 @@ function handleClipDragMove(event: MouseEvent) {
   // Check if we've crossed the drag threshold (synchronous - don't defer)
   if (!isClipDragging.value && Math.abs(deltaX) >= DRAG_THRESHOLD) {
     isClipDragging.value = true;
+    // Floor timeline duration BEFORE activating drag mode to prevent zoom-in
+    // (timelineDuration returns minTimelineDuration during drag)
+    tracksStore.minTimelineDuration = tracksStore.timelineDuration;
     uiStore.isClipDragActive = true;
     // Compute offset from mouse cursor to clip's left edge in screen coords
     const clipLeftPx = (clipDragOriginalStart.value / duration.value) * containerWidth.value;
@@ -404,9 +504,18 @@ function flushTrim() {
   }
 
   // Update ghost trim edge line position for waveform views
-  const clip = trackClips.value.find(c => c.id === trimClipId.value);
-  if (clip) {
-    const edgeTime = trimEdge.value === 'left' ? clip.clipStart : clip.clipStart + clip.duration;
+  // Search lane clips first (trim may be on a lane clip), then parent
+  let trimClip: import('@/shared/types').TrackClip | undefined;
+  const currentTrack = tracksStore.getTrackById(props.track.id);
+  if (currentTrack?.channelLanes) {
+    for (const lane of currentTrack.channelLanes) {
+      trimClip = lane.clips.find(c => c.id === trimClipId.value);
+      if (trimClip) break;
+    }
+  }
+  if (!trimClip) trimClip = trackClips.value.find(c => c.id === trimClipId.value);
+  if (trimClip) {
+    const edgeTime = trimEdge.value === 'left' ? trimClip.clipStart : trimClip.clipStart + trimClip.duration;
     uiStore.activeTrimEdge = { time: edgeTime, edge: trimEdge.value };
   }
 }
@@ -483,6 +592,32 @@ function handleVolumeDragEnd() {
 function handleVolumeDbChange(db: number) {
   const linear = db <= MIN_VOLUME_DB ? 0 : dbToLinear(db);
   emit('setVolume', props.track.id, linear, volumeDragging.value);
+}
+
+// Per-lane volume (reactive computeds so sliders update when volume changes)
+const laneVolumeDbL = computed(() => {
+  void tracksStore.tracks;
+  const lane = tracksStore.getChannelLane(props.track.id, 0);
+  const vol = lane?.volume ?? props.track.volume;
+  return vol <= 0 ? MIN_VOLUME_DB : linearToDb(vol);
+});
+const laneVolumeDbR = computed(() => {
+  void tracksStore.tracks;
+  const lane = tracksStore.getChannelLane(props.track.id, 1);
+  const vol = lane?.volume ?? props.track.volume;
+  return vol <= 0 ? MIN_VOLUME_DB : linearToDb(vol);
+});
+function laneVolumeDb(ch: number): number {
+  return ch === 0 ? laneVolumeDbL.value : laneVolumeDbR.value;
+}
+function laneVolumeDbLabel(ch: number): string {
+  void tracksStore.tracks;
+  const lane = tracksStore.getChannelLane(props.track.id, ch);
+  return formatDb(lane?.volume ?? props.track.volume);
+}
+function handleLaneVolumeDbChange(ch: number, db: number) {
+  const linear = db <= MIN_VOLUME_DB ? 0 : dbToLinear(db);
+  tracksStore.setChannelLaneVolume(props.track.id, ch, linear);
 }
 
 // Draw static waveform for importing tracks (progressive fill-in)
@@ -608,7 +743,7 @@ onUnmounted(() => {
           :style="{ backgroundColor: track.color }"
         />
 
-        <div class="flex-1 min-w-0">
+        <div class="flex-1 min-w-0 relative">
           <!-- Editable name -->
           <input
             v-if="isEditing"
@@ -622,11 +757,23 @@ onUnmounted(() => {
           />
           <div
             v-else
-            class="text-xs font-medium text-gray-200 truncate cursor-text"
-            title="Double-click to rename"
-            @dblclick.stop="startEditing"
+            class="flex items-center gap-0.5"
           >
-            {{ track.name }}
+            <span
+              class="text-xs font-medium text-gray-200 truncate cursor-text"
+              title="Double-click to rename"
+              @dblclick.stop="startEditing"
+            >{{ track.name }}</span>
+            <!-- Track dropdown menu trigger -->
+            <button
+              type="button"
+              class="w-4 h-4 flex items-center justify-center rounded text-gray-500 hover:text-gray-200 hover:bg-gray-600 transition-colors shrink-0"
+              title="Track options"
+              @click.stop="toggleTrackMenu($event)"
+              @mousedown.stop
+            >
+              <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+            </button>
           </div>
           <div class="text-[10px] text-gray-500">
             {{ formattedDuration }}
@@ -636,9 +783,11 @@ onUnmounted(() => {
               title="Large file — playback, waveform, and transcription available. Export requires EDL engine (coming soon)."
             >LARGE</span>
           </div>
+
+          <!-- Track dropdown menu (teleported to body to escape overflow-hidden) -->
         </div>
 
-        <!-- Control buttons -->
+        <!-- Quick buttons: M, S, E -->
         <div class="flex items-center gap-0.5 shrink-0">
           <button
             type="button"
@@ -689,20 +838,40 @@ onUnmounted(() => {
             E
           </button>
 
-          <button
-            type="button"
-            class="w-5 h-5 text-[10px] font-bold rounded bg-gray-700 text-gray-400 hover:bg-red-600 hover:text-white transition-colors"
-            title="Delete"
-            @click.stop="emit('delete', track.id)"
-          >
-            X
-          </button>
+          <!-- Delete moved to dropdown menu -->
         </div>
       </div>
 
       <!-- Bottom row: meter + volume slider (dB scale, only when expanded) -->
+      <!-- Stereo view: per-lane volume controls -->
+      <template v-if="showVolumeSlider && isStereoView">
+        <div
+          v-for="ch in [0, 1]"
+          :key="`vol-${ch}`"
+          class="flex items-center gap-1"
+          :class="ch === 0 ? 'mt-auto' : ''"
+          @mousedown.stop
+          @dragstart.prevent
+        >
+          <span class="text-[8px] font-mono text-gray-500 w-2 shrink-0">{{ ch === 0 ? 'L' : 'R' }}</span>
+          <TrackMeter v-if="!track.muted" :track-id="track.id" :channel="ch" class="shrink-0" />
+          <InfiniteKnob
+            :model-value="laneVolumeDb(ch)"
+            :min="MIN_VOLUME_DB"
+            :max="MAX_VOLUME_DB"
+            :step="0.5"
+            :default-value="0"
+            :format-value="() => laneVolumeDbLabel(ch)"
+            class="flex-1"
+            @update:model-value="(db: number) => handleLaneVolumeDbChange(ch, db)"
+            @drag-start="handleVolumeDragStart"
+            @drag-end="handleVolumeDragEnd"
+          />
+        </div>
+      </template>
+      <!-- Mono view: single volume control -->
       <div
-        v-if="showVolumeSlider"
+        v-else-if="showVolumeSlider"
         class="flex items-center gap-1 mt-auto"
         @mousedown.stop
         @dragstart.prevent
@@ -756,18 +925,18 @@ onUnmounted(() => {
         <div
           v-for="ch in [0, 1]"
           :key="ch"
-          class="absolute left-0 right-0 overflow-hidden"
+          class="absolute left-0 right-0 overflow-hidden group/lane"
           :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
         >
           <!-- Lane label -->
-          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-20 pointer-events-none select-none">
+          <span class="absolute top-0 left-1 text-[9px] font-mono font-bold text-gray-400 z-20 pointer-events-none select-none">
             {{ ch === 0 ? 'L' : 'R' }}
           </span>
           <!-- Lane divider (between L and R) -->
           <div v-if="ch === 1" class="absolute top-0 left-0 right-0 h-px bg-gray-700/60 z-10 pointer-events-none" />
-          <!-- Clips for this channel -->
+          <!-- Clips for this channel (use lane clips if materialized, otherwise parent clips) -->
           <ClipRegion
-            v-for="clip in trackClips"
+            v-for="clip in getLaneClips(ch)"
             :key="`${clip.id}-ch${ch}`"
             :track="track"
             :clip="clip"
@@ -781,6 +950,14 @@ onUnmounted(() => {
             :channel-index="ch"
             @drag-start="handleClipDragStart"
             @trim-start="handleTrimStart"
+          />
+          <!-- Per-lane volume envelope -->
+          <VolumeEnvelope
+            v-if="!isImporting && containerWidth > 0"
+            :track="track"
+            :channel-lane="getChannelLane(ch)"
+            :container-width="containerWidth"
+            :duration="duration"
           />
         </div>
       </template>
@@ -803,9 +980,9 @@ onUnmounted(() => {
         />
       </template>
 
-      <!-- Volume automation envelope overlay -->
+      <!-- Volume automation envelope overlay (mono view only — stereo has per-lane envelopes in sub-lanes) -->
       <VolumeEnvelope
-        v-if="!isImporting && containerWidth > 0"
+        v-if="!isImporting && containerWidth > 0 && !isStereoView"
         :track="track"
         :container-width="containerWidth"
         :duration="duration"
@@ -905,6 +1082,50 @@ onUnmounted(() => {
         @click="(time) => playbackStore.seek(time)"
       />
     </div>
+
+    <!-- Track dropdown menu (teleported to body to escape overflow-hidden) -->
+    <Teleport to="body">
+      <div
+        v-if="showTrackMenu"
+        class="fixed z-[9999] w-48 bg-gray-800 border border-gray-600 rounded-md shadow-xl py-1 text-xs"
+        :style="menuStyle"
+        @mousedown.stop
+      >
+        <!-- Channel conversion -->
+        <template v-if="isStereoView">
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-l')">
+            Keep L channel only
+          </button>
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
+            Keep R channel only
+          </button>
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-mono')">
+            Convert to Mono (mix L+R)
+          </button>
+          <div class="border-t border-gray-700 my-1" />
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">
+            <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
+              <path v-if="isChannelLinked" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
+            </svg>
+            {{ isChannelLinked ? 'Unlink channels' : 'Link channels' }}
+          </button>
+          <div class="border-t border-gray-700 my-1" />
+        </template>
+        <template v-else-if="!isStereoView && (track.audioData.channels ?? 1) === 1">
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-stereo')">
+            Convert to Stereo
+          </button>
+          <div class="border-t border-gray-700 my-1" />
+        </template>
+        <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('rename')">
+          Rename
+        </button>
+        <button class="w-full text-left px-3 py-1.5 text-red-400 hover:bg-red-900/40 hover:text-red-300" @click="handleMenuAction('delete')">
+          Delete Track
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 

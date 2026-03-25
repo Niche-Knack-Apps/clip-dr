@@ -31,6 +31,8 @@ export interface AudioClipboard {
   sourceTrackId: string;
   waveformData: number[];
   copiedAt: number;
+  /** Which source channels were copied (e.g., [0] for L only, [0,1] for stereo) */
+  sourceChannels?: number[];
   /** Virtual source for large-file regions — audio materialized on paste */
   virtualSource?: {
     kind: 'mixdown';
@@ -161,45 +163,111 @@ export const useClipboardStore = defineStore('clipboard', () => {
       return false;
     }
 
-    // Extract samples from each channel
-    const samples: Float32Array[] = [];
-    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-      const channelData = buffer.getChannelData(ch);
-      const extracted = new Float32Array(sampleCount);
-      for (let i = 0; i < sampleCount; i++) {
-        extracted[i] = channelData[startSample + i];
-      }
-      samples.push(extracted);
+    // Determine which channels to copy — lane-aware
+    const selectedLane = tracksStore.getSelectedLane();
+    const selectedTrack = tracksStore.selectedTrack;
+    let channelsToCopy: number[];
+    if (selectedLane && selectedTrack?.channelLinked === false) {
+      // Unlinked + specific lane clip focused → copy only that channel
+      channelsToCopy = [selectedLane.channelIndex];
+    } else {
+      // Linked, no lane focused, or mono track → copy all channels
+      channelsToCopy = Array.from({ length: buffer.numberOfChannels }, (_, i) => i);
     }
 
-    // Create AudioBuffer for playback preview
     const ctx = audioStore.getAudioContext();
-    const newBuffer = ctx.createBuffer(
-      buffer.numberOfChannels,
-      sampleCount,
-      buffer.sampleRate
-    );
-    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-      // Copy channel data - create a new Float32Array to ensure correct type
-      const channelData = newBuffer.getChannelData(ch);
-      channelData.set(samples[ch]);
+
+    // When lanes are materialized and askew, each channel may have different
+    // clip offsets relative to the in/out region. Extract per-channel samples
+    // based on each lane's clip position, filling silence where a lane has no audio.
+    const track = tracksStore.selectedTrack;
+    const hasAskewLanes = track?.channelLanes && track.channelLanes.length > 0
+      && channelsToCopy.length > 1;
+
+    let newBuffer: AudioBuffer;
+
+    if (hasAskewLanes && track?.channelLanes) {
+      // Per-channel extraction with lane-aware offsets
+      const regionDuration = end - start;
+      const regionSamples = Math.floor(regionDuration * buffer.sampleRate);
+      newBuffer = ctx.createBuffer(channelsToCopy.length, regionSamples, buffer.sampleRate);
+
+      for (let ci = 0; ci < channelsToCopy.length; ci++) {
+        const ch = channelsToCopy[ci];
+        const lane = track.channelLanes.find(l => l.channelIndex === ch);
+        const outData = newBuffer.getChannelData(ci);
+        outData.fill(0); // silence by default
+
+        if (lane) {
+          // For each clip in this lane, copy the overlapping portion
+          for (const clip of lane.clips) {
+            const clipEnd = clip.clipStart + clip.duration;
+            // Overlap between clip and copy region (both in timeline time)
+            const overlapStart = Math.max(start + track.trackStart, clip.clipStart);
+            const overlapEnd = Math.min(end + track.trackStart, clipEnd);
+            if (overlapEnd <= overlapStart) continue;
+
+            // Source buffer position: use sourceOffset to find audio in buffer
+            const srcOffset = (clip.sourceOffset ?? 0) + (overlapStart - clip.clipStart);
+            const srcStartSample = Math.floor(srcOffset * buffer.sampleRate);
+            const overlapSamples = Math.floor((overlapEnd - overlapStart) * buffer.sampleRate);
+
+            // Destination position in the output buffer
+            const destStartSample = Math.floor((overlapStart - (start + track.trackStart)) * buffer.sampleRate);
+
+            const srcData = buffer.getChannelData(ch);
+            for (let i = 0; i < overlapSamples && srcStartSample + i < srcData.length && destStartSample + i < outData.length; i++) {
+              outData[destStartSample + i] = srcData[srcStartSample + i];
+            }
+          }
+        } else {
+          // No lane for this channel — extract directly from buffer (aligned)
+          const channelData = buffer.getChannelData(ch);
+          for (let i = 0; i < regionSamples && startSample + i < channelData.length; i++) {
+            outData[i] = channelData[startSample + i];
+          }
+        }
+      }
+    } else {
+      // Simple extraction: all channels at same offset (linked or mono)
+      const samples: Float32Array[] = [];
+      for (const ch of channelsToCopy) {
+        const channelData = buffer.getChannelData(ch);
+        const extracted = new Float32Array(sampleCount);
+        for (let i = 0; i < sampleCount; i++) {
+          extracted[i] = channelData[startSample + i];
+        }
+        samples.push(extracted);
+      }
+      newBuffer = ctx.createBuffer(channelsToCopy.length, sampleCount, buffer.sampleRate);
+      for (let ch = 0; ch < channelsToCopy.length; ch++) {
+        newBuffer.getChannelData(ch).set(samples[ch]);
+      }
     }
+
     clipboardBuffer.value = newBuffer;
 
     // Generate waveform for the clipboard content
     const waveformData = await tracksStore.generateWaveformFromBuffer(newBuffer);
 
+    // Extract samples array from the buffer for clipboard storage
+    const copiedSamples: Float32Array[] = [];
+    for (let ch = 0; ch < newBuffer.numberOfChannels; ch++) {
+      copiedSamples.push(new Float32Array(newBuffer.getChannelData(ch)));
+    }
+
     clipboard.value = {
-      samples,
+      samples: copiedSamples,
       sampleRate: buffer.sampleRate,
       duration: end - start,
       sourceRegion: { start, end },
       sourceTrackId: trackId,
       waveformData,
       copiedAt: Date.now(),
+      sourceChannels: channelsToCopy,
     };
 
-    console.log(`[Clipboard] Copied ${(end - start).toFixed(2)}s from track ${trackId}`);
+    console.log(`[Clipboard] Copied ${(end - start).toFixed(2)}s (${channelsToCopy.length}ch) from track ${trackId}`);
     return true;
   }
 
@@ -213,21 +281,36 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Cut');
     try {
-    // Priority 1: Selected clip - cut it to clipboard and slide remaining left
+    // Check I/O points first — when set, they take priority over selected clip
+    const { inPoint: ioIn, outPoint: ioOut } = selectionStore.inOutPoints;
+    const useIOFirst = (settingsStore.settings.clipboardUsesInOutPoints ?? true) && ioIn !== null && ioOut !== null;
+
+    // Priority 1: Selected clip — only when NO I/O points are set
     const selClip = tracksStore.selectedClip;
-    if (selClip) {
+    if (selClip && !useIOFirst) {
       const { trackId, clip } = selClip;
       const ctx = audioStore.getAudioContext();
 
       // Copy clip audio to clipboard (requires buffer — large-file clips can't be cut this way)
       if (!clip.buffer) return false;
+
+      // Lane-aware channel extraction: unlinked + lane clip → copy only that channel
+      const selectedLane = tracksStore.getSelectedLane();
+      const srcTrackForLane = tracksStore.tracks.find(t => t.id === trackId);
+      let cutChannels: number[];
+      if (selectedLane && srcTrackForLane?.channelLinked === false) {
+        cutChannels = [selectedLane.channelIndex];
+      } else {
+        cutChannels = Array.from({ length: clip.buffer.numberOfChannels }, (_, i) => i);
+      }
+
       const clonedBuffer = ctx.createBuffer(
-        clip.buffer.numberOfChannels,
+        cutChannels.length,
         clip.buffer.length,
         clip.buffer.sampleRate
       );
-      for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
-        clonedBuffer.getChannelData(ch).set(clip.buffer.getChannelData(ch));
+      for (let i = 0; i < cutChannels.length; i++) {
+        clonedBuffer.getChannelData(i).set(clip.buffer.getChannelData(cutChannels[i]));
       }
       clipboardBuffer.value = clonedBuffer;
 
@@ -245,6 +328,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
         sourceTrackId: trackId,
         waveformData: waveform,
         copiedAt: Date.now(),
+        sourceChannels: cutChannels,
         virtualSource: segSourceFile ? {
           kind: 'mixdown',
           segments: [{

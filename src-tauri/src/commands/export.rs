@@ -229,6 +229,9 @@ pub struct ExportEDLTrack {
     /// Linear fade-out duration in seconds at clip end (silence crossfade)
     #[serde(default)]
     pub fade_out: Option<f64>,
+    /// Source channel to extract (None = all channels, Some(0) = left, Some(1) = right)
+    #[serde(default)]
+    pub source_channel: Option<u8>,
 }
 
 /// Loaded audio source for EDL mixing
@@ -243,6 +246,8 @@ struct EdlSource {
     fade_in: f64,
     /// Linear fade-out duration in seconds
     fade_out: f64,
+    /// Source channel to extract (None = all channels interleaved)
+    source_channel: Option<u8>,
     pcm: PcmData,
     sample_rate: u32,
     channels: u16,
@@ -278,6 +283,7 @@ fn export_edl_inner(edl: &ExportEDL, app: &tauri::AppHandle) -> Result<String, S
             volume_envelope: track.volume_envelope.clone(),
             fade_in: track.fade_in.unwrap_or(0.0),
             fade_out: track.fade_out.unwrap_or(0.0),
+            source_channel: track.source_channel,
             pcm,
             sample_rate,
             channels,
@@ -354,7 +360,16 @@ fn mix_chunk(
 
             let out_base = i * output_channels;
 
-            if src_ch == 1 {
+            if let Some(ch_sel) = src.source_channel {
+                // Channel-specific extraction: route one source channel to the matching output channel
+                let ch_idx = interleaved_idx + (ch_sel as usize).min(src_ch.saturating_sub(1));
+                if ch_idx < samples.len() {
+                    let s = samples[ch_idx] * vol;
+                    // Route to the matching output channel (L→L, R→R)
+                    let out_ch = (ch_sel as usize).min(output_channels.saturating_sub(1));
+                    mix_buf[out_base + out_ch] += s;
+                }
+            } else if src_ch == 1 {
                 let s = samples[interleaved_idx] * vol;
                 mix_buf[out_base] += s;
                 if output_channels >= 2 {

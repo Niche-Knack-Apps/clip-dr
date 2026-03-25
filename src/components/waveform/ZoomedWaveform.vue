@@ -80,6 +80,17 @@ const inPoint = computed(() => selectionStore.inOutPoints.inPoint);
 const outPoint = computed(() => selectionStore.inOutPoints.outPoint);
 
 const waveformColor = computed(() => settingsStore.settings.waveformColor);
+
+// Show stereo split in zoomed view when channel lanes are on and any audible track is stereo
+const showStereoZoom = computed(() => {
+  if (!uiStore.showChannelLanes) return false;
+  const hasSolo = tracksStore.tracks.some(t => t.solo);
+  return tracksStore.tracks.some(t => {
+    if (hasSolo && !t.solo) return false;
+    if (!hasSolo && t.muted) return false;
+    return (t.channelMode === 'stereo' || (t.audioData.channels ?? 1) >= 2);
+  });
+});
 const playheadColor = computed(() => settingsStore.settings.playheadColor);
 const followPlayhead = computed(() => uiStore.followPlayhead);
 
@@ -466,7 +477,32 @@ onUnmounted(() => {
       @wheel.prevent="handleWheel"
       @contextmenu.prevent="handleContextMenu"
     >
+      <!-- Stereo split: two stacked channel canvases -->
+      <template v-if="showStereoZoom">
+        <div class="relative" :style="{ height: `${Math.floor(props.height / 2)}px` }">
+          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-10 pointer-events-none select-none">L</span>
+          <WaveformCanvas
+            :start-time="selection.start"
+            :end-time="selection.end"
+            :color="waveformColor"
+            :height="Math.floor(props.height / 2)"
+            :channel-index="0"
+          />
+        </div>
+        <div class="relative border-t border-gray-700/60" :style="{ height: `${Math.ceil(props.height / 2)}px` }">
+          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-10 pointer-events-none select-none">R</span>
+          <WaveformCanvas
+            :start-time="selection.start"
+            :end-time="selection.end"
+            :color="waveformColor"
+            :height="Math.ceil(props.height / 2)"
+            :channel-index="1"
+          />
+        </div>
+      </template>
+      <!-- Mono/composite: single canvas -->
       <WaveformCanvas
+        v-else
         :start-time="selection.start"
         :end-time="selection.end"
         :color="waveformColor"

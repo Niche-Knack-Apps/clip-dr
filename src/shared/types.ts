@@ -71,6 +71,8 @@ export interface TrackClip {
   sourceIn?: number;
   /** Total available duration from sourceIn in source file (immutable). Defines full recoverable range. */
   sourceDuration?: number;
+  /** Clip pairing identity across channel lanes. Shared between L/R counterparts when lanes diverge. */
+  linkedClipGroupId?: string;
 }
 
 /** A keyframe point on a volume automation envelope */
@@ -177,6 +179,29 @@ export interface Track {
   autoMuted?: boolean;
   /** Channel structure: derived from audioData.channels on import. */
   channelMode?: 'mono' | 'stereo';
+  /** Whether channel lanes are linked (default true). When linked, edits apply to both lanes. */
+  channelLinked?: boolean;
+  /** Per-lane state. Only present when lanes have diverged from parent EDL via independent editing. */
+  channelLanes?: ChannelLane[];
+}
+
+/** Source channel index (0=first/left, 1=second/right, etc.) */
+export type SourceChannel = number;
+
+/** Lane display kind */
+export type LaneKind = 'mono' | 'left' | 'right';
+
+/** Per-channel lane (only materialized when lanes diverge from parent EDL) */
+export interface ChannelLane {
+  id: string;
+  channelIndex: SourceChannel;
+  kind: LaneKind;
+  clips: TrackClip[];
+  waveformData?: number[];
+  /** Per-lane linear gain (default 1.0 = 0dB). Overrides track.volume for this channel. */
+  volume?: number;
+  /** Per-lane volume automation envelope. Overrides track.volumeEnvelope for this channel. */
+  volumeEnvelope?: VolumeAutomationPoint[];
 }
 
 
@@ -321,6 +346,8 @@ export interface WaveformLayer {
   sourcePath?: string;
   hasPeakPyramid?: boolean;
   clips?: WaveformLayerClip[];
+  /** Source channel index when this layer represents a specific channel lane (0=L, 1=R) */
+  channelIndex?: number;
 }
 
 export interface AudioMetadata {
@@ -440,6 +467,18 @@ export interface ProjectTrackClip {
   sourceIn?: number;
   /** Total available duration from sourceIn (v3+). Defines full recoverable range. */
   sourceDuration?: number;
+  /** Clip pairing identity across channel lanes */
+  linkedClipGroupId?: string;
+}
+
+/** A channel lane as serialized in a .clipdr project file */
+export interface ProjectChannelLane {
+  id: string;
+  channelIndex: number;
+  kind: string;
+  volume?: number;
+  volumeEnvelope?: VolumeAutomationPoint[];
+  clips: ProjectTrackClip[];
 }
 
 /** A track as serialized in a .clipdr project file */
@@ -459,6 +498,12 @@ export interface ProjectTrack {
   cachedAudioPath?: string | null;
   /** Present in v2+ files when track has been edited into multiple clips */
   clips?: ProjectTrackClip[];
+  /** Channel structure: 'mono' | 'stereo' */
+  channelMode?: 'mono' | 'stereo';
+  /** Whether channel lanes are linked (default true) */
+  channelLinked?: boolean;
+  /** Per-lane state (only present when lanes have been materialized) */
+  channelLanes?: ProjectChannelLane[];
 }
 
 /** .clipdr project file format */
@@ -471,6 +516,8 @@ export interface ProjectFile {
   selection: { inPoint: number | null; outPoint: number | null };
   /** v1-v2: flat array; v3: per-track Record<trackId, SilenceRegion[]> */
   silenceRegions: SilenceRegion[] | Record<string, SilenceRegion[]>;
+  /** UI state: whether channel lanes are expanded */
+  showChannelLanes?: boolean;
 }
 
 export interface ExportEDL {
@@ -497,5 +544,7 @@ export interface ExportEDLTrack {
   fade_in?: number;
   /** Linear fade-out duration in seconds at clip end (silence crossfade) */
   fade_out?: number;
+  /** Source channel to extract (undefined = all channels, 0 = left, 1 = right) */
+  source_channel?: number;
 }
 

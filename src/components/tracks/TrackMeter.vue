@@ -4,6 +4,8 @@ import { useMeterStore } from '@/stores/meter';
 import { useUIStore } from '@/stores/ui';
 interface Props {
   trackId: string;
+  /** Show only one channel: 0=L, 1=R, undefined=both (default) */
+  channel?: number;
 }
 
 const props = defineProps<Props>();
@@ -52,8 +54,8 @@ function handleClipClick() {
 
 <template>
   <div
-    class="flex gap-px items-end shrink-0 cursor-pointer"
-    :style="{ height: '20px', width: '14px' }"
+    class="relative flex gap-px items-end shrink-0 cursor-pointer"
+    :style="{ height: '20px', width: props.channel != null ? '7px' : '14px' }"
     @click.stop="handleMeterClick"
   >
     <!-- Clip indicator dot -->
@@ -68,7 +70,7 @@ function handleClipClick() {
     </div>
 
     <!-- Left channel -->
-    <div class="relative w-[5px] bg-gray-800 overflow-hidden" :style="{ height: `${meterHeight}px` }">
+    <div v-if="props.channel == null || props.channel === 0" class="relative w-[5px] bg-gray-800 overflow-hidden" :style="{ height: `${meterHeight}px` }">
       <!-- Gradient background (revealed by meter level) -->
       <div
         class="absolute inset-0"
@@ -93,7 +95,7 @@ function handleClipClick() {
     </div>
 
     <!-- Right channel -->
-    <div class="relative w-[5px] bg-gray-800 overflow-hidden" :style="{ height: `${meterHeight}px` }">
+    <div v-if="props.channel == null || props.channel === 1" class="relative w-[5px] bg-gray-800 overflow-hidden" :style="{ height: `${meterHeight}px` }">
       <div
         class="absolute inset-0"
         style="background: linear-gradient(to top, #22c55e 0%, #22c55e 57%, #eab308 57%, #eab308 90%, #ef4444 90%, #ef4444 100%)"

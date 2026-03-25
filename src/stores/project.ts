@@ -13,6 +13,7 @@ import { usePlaybackStore } from './playback';
 import { useAudioStore } from './audio';
 import { useTranscriptionStore } from './transcription';
 import { useSettingsStore } from './settings';
+import { useUIStore } from './ui';
 
 const APP_TITLE = 'Clip Dr.';
 
@@ -116,6 +117,30 @@ export const useProjectStore = defineStore('project', () => {
           source_kind: sourceKind(c, t),
           sourceIn: c.sourceIn,
           sourceDuration: c.sourceDuration,
+          linkedClipGroupId: c.linkedClipGroupId,
+        }));
+      }
+      // Persist channel lane state
+      if (t.channelMode) base.channelMode = t.channelMode;
+      if (t.channelLinked != null) base.channelLinked = t.channelLinked;
+      if (t.channelLanes) {
+        base.channelLanes = t.channelLanes.map(lane => ({
+          id: lane.id,
+          channelIndex: lane.channelIndex,
+          kind: lane.kind,
+          volume: lane.volume,
+          volumeEnvelope: lane.volumeEnvelope,
+          clips: lane.clips.map(c => ({
+            id: c.id,
+            clipStart: c.clipStart,
+            duration: c.duration,
+            sourceFile: stableSourcePath(c, t),
+            sourceOffset: c.sourceOffset ?? 0,
+            source_kind: sourceKind(c, t),
+            sourceIn: c.sourceIn,
+            sourceDuration: c.sourceDuration,
+            linkedClipGroupId: c.linkedClipGroupId,
+          })),
         }));
       }
       return base;
@@ -129,6 +154,7 @@ export const useProjectStore = defineStore('project', () => {
       }
     }
 
+    const uiStore = useUIStore();
     const now = new Date().toISOString();
     return {
       version: 3,
@@ -141,6 +167,7 @@ export const useProjectStore = defineStore('project', () => {
         outPoint: selectionStore.inOutPoints.outPoint,
       },
       silenceRegions: silenceMap,
+      showChannelLanes: uiStore.showChannelLanes || undefined,
     };
   }
 
@@ -254,35 +281,39 @@ export const useProjectStore = defineStore('project', () => {
         try {
           await audioStore.importFile(absPath, pt.trackStart);
 
-          // Find the just-imported track (last one added)
-          const lastTrack = tracksStore.tracks[tracksStore.tracks.length - 1];
-          if (lastTrack) {
-            idMap.set(pt.id, lastTrack.id);
-            // Capture the import duration as sourceDuration BEFORE overwriting with
-            // saved pt.duration. This is the full source file duration — needed by
-            // finalizeClipWaveforms to correctly slice the parent waveform for clips
-            // that reference arbitrary portions of the source (via sourceOffset).
-            const importDuration = lastTrack.duration;
-            if (!lastTrack.audioData.sourceDuration) {
-              lastTrack.audioData.sourceDuration = importDuration;
+          // Find the just-imported track (last one added).
+          // IMPORTANT: importFile() replaces the track object multiple times via spread
+          // (setImportBuffer, setImportReady), so we must re-read from the reactive array
+          // AFTER importFile returns, not use a stale reference from before.
+          const trackIdx = tracksStore.tracks.length - 1;
+          const importedTrackId = tracksStore.tracks[trackIdx]?.id;
+          if (importedTrackId) {
+            idMap.set(pt.id, importedTrackId);
+            // Capture import duration before overwriting
+            const importDuration = tracksStore.tracks[trackIdx].duration;
+            if (!tracksStore.tracks[trackIdx].audioData.sourceDuration) {
+              tracksStore.tracks[trackIdx].audioData.sourceDuration = importDuration;
             }
 
-            // Apply saved metadata directly (no history for initial load)
-            lastTrack.name = pt.name;
-            lastTrack.color = pt.color;
-            lastTrack.volume = pt.volume;
-            lastTrack.muted = pt.muted;
-            lastTrack.solo = pt.solo;
-            if (pt.tag) lastTrack.tag = pt.tag;
-            if (pt.timemarks) lastTrack.timemarks = pt.timemarks;
-            if (pt.volumeEnvelope) lastTrack.volumeEnvelope = pt.volumeEnvelope;
-
-            // Loader invariant: the saved pt.duration and pt.trackStart are the
-            // authoritative timeline values — they were captured after VBR correction
-            // at save time. The import bootstraps audio/waveform but its metadata
-            // duration reflects the full source file, not the track's timeline extent.
-            lastTrack.duration = pt.duration;
-            lastTrack.trackStart = pt.trackStart;
+            // Apply ALL saved metadata in a single reactive update to avoid stale refs.
+            // Re-read the current track object from the array (may have been replaced by import).
+            const current = tracksStore.tracks[trackIdx];
+            const updated = [...tracksStore.tracks];
+            updated[trackIdx] = {
+              ...current,
+              name: pt.name,
+              color: pt.color,
+              volume: pt.volume,
+              muted: pt.muted,
+              solo: pt.solo,
+              autoMuted: false,
+              tag: pt.tag ?? current.tag,
+              timemarks: pt.timemarks ?? current.timemarks,
+              volumeEnvelope: pt.volumeEnvelope ?? current.volumeEnvelope,
+              duration: pt.duration,
+              trackStart: pt.trackStart,
+            };
+            tracksStore.tracks = updated;
 
             // v2+: restore EDL clip state
             if ((project.version === 2 || project.version === 3) && pt.clips && pt.clips.length > 0) {
@@ -306,12 +337,71 @@ export const useProjectStore = defineStore('project', () => {
                 sourceIn: c.sourceIn ?? c.sourceOffset,
                 sourceDuration: c.sourceDuration ?? c.duration,
               }));
-              tracksStore.setTrackClips(lastTrack.id, reconstructed);
+              tracksStore.setTrackClips(importedTrackId, reconstructed);
+            }
+
+            // Restore channel lane state (re-read track — setTrackClips may have replaced it)
+            const laneTrack = tracksStore.tracks.find(t => t.id === importedTrackId);
+            if (laneTrack) {
+              if (pt.channelMode) laneTrack.channelMode = pt.channelMode;
+              if (pt.channelLinked != null) laneTrack.channelLinked = pt.channelLinked;
+              if (pt.channelLanes && pt.channelLanes.length > 0) {
+                laneTrack.channelLanes = pt.channelLanes.map(lane => ({
+                id: lane.id,
+                channelIndex: lane.channelIndex,
+                kind: lane.kind as import('@/shared/types').LaneKind,
+                volume: lane.volume,
+                volumeEnvelope: lane.volumeEnvelope,
+                clips: lane.clips.map(c => ({
+                  id: c.id,
+                  buffer: null,
+                  waveformData: [],
+                  clipStart: c.clipStart,
+                  duration: c.duration,
+                  sourceFile: c.sourceFile,
+                  sourceOffset: c.sourceOffset,
+                  sourceIn: c.sourceIn ?? c.sourceOffset,
+                  sourceDuration: c.sourceDuration ?? c.duration,
+                  linkedClipGroupId: c.linkedClipGroupId,
+                })),
+              }));
+              }
             }
           }
+          // Note: muted/solo/autoMuted are applied in a final batch AFTER all imports complete
+          // (see post-loop block below). Per-track muted/solo in the spread above is still set
+          // but may be overwritten by subsequent imports — the batch fix handles this.
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           errors.push(`Track "${pt.name}" (${absPath}): ${msg}`);
+        }
+      }
+
+      // Apply muted/solo/autoMuted AFTER all tracks are imported.
+      // During the import loop, createImportingTrack auto-mutes based on hasActiveSolo(),
+      // and subsequent array replacements (setImportBuffer, etc.) can overwrite per-track
+      // metadata applied mid-loop. Applying mute/solo as a final batch avoids all races.
+      {
+        const finalTracks = [...tracksStore.tracks];
+        let changed = false;
+        for (const pt of project.tracks) {
+          const newId = idMap.get(pt.id);
+          if (!newId) continue;
+          const idx = finalTracks.findIndex(t => t.id === newId);
+          if (idx === -1) continue;
+          const t = finalTracks[idx];
+          if (t.muted !== pt.muted || t.solo !== pt.solo || t.autoMuted !== false) {
+            finalTracks[idx] = { ...t, muted: pt.muted, solo: pt.solo, autoMuted: false };
+            changed = true;
+          }
+        }
+        if (changed) {
+          tracksStore.tracks = finalTracks;
+        }
+        // Solo implies selection — select the solo'd track (matches setTrackSolo behavior)
+        const soloTrack = tracksStore.tracks.find(t => t.solo);
+        if (soloTrack) {
+          tracksStore.selectTrack(soloTrack.id);
         }
       }
 
@@ -349,6 +439,11 @@ export const useProjectStore = defineStore('project', () => {
           }
           silenceStore.setPerTrackSilenceRegions(remapped);
         }
+      }
+
+      // Restore UI state
+      if (project.showChannelLanes) {
+        useUIStore().showChannelLanes = true;
       }
 
       // Auto-load transcription sidecars for each track (fire-and-forget)

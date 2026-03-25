@@ -340,6 +340,7 @@ export function useWaveform() {
     end: number,
     bucketCount: number,
     fallbackBuckets: WaveformBucket[],
+    channelIndex = 0,
   ): WaveformBucket[] {
     const viewRange = end - start;
     const bucketDuration = viewRange / bucketCount;
@@ -378,7 +379,7 @@ export function useWaveform() {
         const clipBucketCount = outEndIdx - outStartIdx;
         if (clipBucketCount <= 0) continue;
 
-        const peaks = extractHiResPeaksForRange(clip.buffer, rangeStart, rangeEnd, clipBucketCount);
+        const peaks = extractHiResPeaksForRange(clip.buffer, rangeStart, rangeEnd, clipBucketCount, channelIndex);
         for (let i = 0; i < clipBucketCount; i++) {
           output[outStartIdx + i] = peaks[i];
         }
@@ -426,7 +427,8 @@ export function useWaveform() {
     layer: WaveformLayer,
     start: number,
     end: number,
-    bucketCount: number
+    bucketCount: number,
+    channelIndex = 0,
   ): WaveformBucket[] {
     const data = layer.waveformData;
     if (!data.length || bucketCount <= 0) return [];
@@ -442,7 +444,7 @@ export function useWaveform() {
     // Clip-aware peak tiles for EDL layers
     if (rangeBuckets < bucketCount * 2 && layer.clips && layer.clips.length > 0) {
       const fallback = stretchFallbackBuckets(data, startBucket, endBucket, totalBuckets, bucketCount);
-      return getClipAwareBucketsForLayer(layer.clips, start, end, bucketCount, fallback);
+      return getClipAwareBucketsForLayer(layer.clips, start, end, bucketCount, fallback, channelIndex);
     }
 
     // Use peak tiles when overview data is insufficient (single-source-file path)
