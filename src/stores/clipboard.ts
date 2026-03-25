@@ -551,6 +551,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       // Use segment's file offset (correct), not timeline position (sourceRegion.start)
       const pasteSourceOffset = vs?.segments?.[0]?.sourceOffset ?? clipboard.value.sourceRegion.start;
 
+      const editTargets = tracksStore.getEditTargets();
       const success = await tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
@@ -558,7 +559,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
         playheadTime,
         ctx,
         pasteSourceFile,
-        pasteSourceOffset
+        pasteSourceOffset,
+        editTargets.channelIndex,
       );
 
       if (success) {

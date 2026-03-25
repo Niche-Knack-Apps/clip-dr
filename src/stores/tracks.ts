@@ -2818,7 +2818,8 @@ export const useTracksStore = defineStore('tracks', () => {
     playheadTime: number,
     audioContext: AudioContext,
     sourceFile?: string,
-    sourceOffset?: number
+    sourceOffset?: number,
+    channelIndex?: number | null,
   ): Promise<boolean> {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return false;
@@ -2909,6 +2910,32 @@ export const useTracksStore = defineStore('tracks', () => {
       }
       return p;
     });
+
+    // Lane-targeted paste: when channelIndex is set and track has unlinked lanes,
+    // insert only into that lane (don't modify parent clips or other lane)
+    if (channelIndex != null && track.channelLanes && track.channelLinked === false) {
+      const targetLane = track.channelLanes.find(l => l.channelIndex === channelIndex);
+      if (targetLane) {
+        targetLane.clips.push(newClip);
+        targetLane.clips.sort((a, b) => a.clipStart - b.clipStart);
+        targetLane.clips = [...targetLane.clips]; // new ref for reactivity
+
+        // Recompute bounds from all lane clips
+        const allClips = track.channelLanes.flatMap(l => l.clips);
+        const laneFirstStart = Math.min(...allClips.map(c => c.clipStart));
+        const laneLastEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
+        tracks.value[trackIndex] = {
+          ...tracks.value[trackIndex],
+          trackStart: laneFirstStart,
+          duration: laneLastEnd - laneFirstStart,
+        };
+        _cachedTrackMap = null;
+        triggerRef(tracks);
+        bumpSyncEpoch();
+        console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip into ${channelIndex === 0 ? 'L' : 'R'} lane at ${playheadTime.toFixed(2)}s`);
+        return true;
+      }
+    }
 
     // Detect channel count from pasted buffer — empty tracks start as mono (channels: 1)
     // but pasting a stereo clip should upgrade the track to stereo
