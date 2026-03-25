@@ -131,6 +131,7 @@ function handleMenuAction(action: string) {
   switch (action) {
     case 'keep-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
     case 'keep-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'to-mono': tracksStore.convertToMono(props.track.id); break;
     case 'to-stereo': tracksStore.convertToStereo(props.track.id); break;
     case 'link': tracksStore.toggleChannelLinked(props.track.id); break;
     case 'rename': startEditing(); break;
@@ -1094,6 +1095,9 @@ onUnmounted(() => {
           </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
             Keep R channel only
+          </button>
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-mono')">
+            Convert to Mono (mix L+R)
           </button>
           <div class="border-t border-gray-700 my-1" />
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">

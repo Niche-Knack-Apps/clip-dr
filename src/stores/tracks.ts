@@ -3431,6 +3431,72 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   /**
+   * Convert a stereo track to true mono by downmixing L+R (average of both channels).
+   */
+  function convertToMono(trackId: string): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.audioData.buffer || (track.audioData.channels ?? 1) < 2) return;
+
+    useHistoryStore().pushState('Convert to mono');
+
+    const src = track.audioData.buffer;
+    const ctx = typeof OfflineAudioContext !== 'undefined'
+      ? new OfflineAudioContext(1, Math.max(1, src.length), src.sampleRate)
+      : new AudioContext();
+    const newBuffer = ctx.createBuffer(1, src.length, src.sampleRate);
+    const lData = src.getChannelData(0);
+    const rData = src.getChannelData(1);
+    const monoData = newBuffer.getChannelData(0);
+    for (let i = 0; i < src.length; i++) {
+      monoData[i] = (lData[i] + rData[i]) * 0.5;
+    }
+
+    // Generate waveform from downmixed mono
+    const bucketCount = 1000;
+    const samplesPerBucket = Math.max(1, Math.ceil(src.length / bucketCount));
+    const waveform: number[] = [];
+    for (let i = 0; i < bucketCount; i++) {
+      const bStart = i * samplesPerBucket;
+      const bEnd = Math.min(bStart + samplesPerBucket, monoData.length);
+      let min = 0, max = 0;
+      for (let j = bStart; j < bEnd; j++) {
+        const s = monoData[j];
+        if (s < min) min = s;
+        if (s > max) max = s;
+      }
+      waveform.push(min, max);
+    }
+
+    // Update clip buffers to mono
+    let newClips = track.clips;
+    if (newClips) {
+      newClips = newClips.map(c => {
+        if (!c.buffer || c.buffer.numberOfChannels < 2) return c;
+        const clipBuf = ctx.createBuffer(1, c.buffer.length, c.buffer.sampleRate);
+        const cL = c.buffer.getChannelData(0);
+        const cR = c.buffer.getChannelData(1);
+        const cMono = clipBuf.getChannelData(0);
+        for (let i = 0; i < c.buffer.length; i++) cMono[i] = (cL[i] + cR[i]) * 0.5;
+        return { ...c, buffer: clipBuf };
+      });
+    }
+
+    tracks.value[idx] = {
+      ...tracks.value[idx],
+      audioData: { ...track.audioData, buffer: newBuffer, waveformData: waveform, channels: 1 },
+      clips: newClips,
+      channelMode: 'mono',
+      channelLanes: undefined,
+      channelLinked: true,
+    };
+    _cachedTrackMap = null;
+    triggerRef(tracks);
+    bumpSyncEpoch();
+  }
+
+  /**
    * Convert a mono track to stereo by duplicating the single channel to both L and R.
    */
   function convertToStereo(trackId: string): void {
@@ -3912,6 +3978,7 @@ export const useTracksStore = defineStore('tracks', () => {
     updateChannelLaneVolumePoint,
     removeChannelLaneVolumePoint,
     replaceWithChannel,
+    convertToMono,
     convertToStereo,
     getVolumeAtTime,
     adjustVolumeEnvelopeForCut,
