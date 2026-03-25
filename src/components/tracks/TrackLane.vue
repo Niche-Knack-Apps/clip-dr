@@ -28,7 +28,7 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const emit = defineEmits<{
-  select: [trackId: string];
+  select: [trackId: string, event?: MouseEvent];
   toggleMute: [trackId: string];
   toggleSolo: [trackId: string];
   delete: [trackId: string];
@@ -126,11 +126,21 @@ function toggleTrackMenu(event?: MouseEvent) {
   }
 }
 
+function handleLaneClick(ch: number) {
+  // Select this track + this specific channel
+  emit('select', props.track.id);
+  if (!isChannelLinked.value) {
+    tracksStore.selectChannel(ch);
+  }
+}
+
 function handleMenuAction(action: string) {
   showTrackMenu.value = false;
   switch (action) {
-    case 'keep-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
-    case 'keep-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'clone-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
+    case 'clone-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'keep-l': tracksStore.keepChannel(props.track.id, 0); break;
+    case 'keep-r': tracksStore.keepChannel(props.track.id, 1); break;
     case 'to-mono': tracksStore.convertToMono(props.track.id); break;
     case 'to-stereo': tracksStore.convertToStereo(props.track.id); break;
     case 'link': tracksStore.toggleChannelLinked(props.track.id); break;
@@ -430,6 +440,18 @@ function handleClipDragEnd(event: MouseEvent) {
   } else if (!wasDragging && clipId) {
     // Drag threshold not met - this was a click, select the clip
     emit('clipSelect', props.track.id, clipId);
+    // Select this track
+    emit('select', props.track.id);
+    // If unlinked stereo, detect which channel lane was clicked and select it
+    const t = tracksStore.getTrackById(props.track.id);
+    if (t?.channelLanes && !t.channelLinked) {
+      for (const lane of t.channelLanes) {
+        if (lane.clips.some(c => c.id === clipId)) {
+          tracksStore.selectChannel(lane.channelIndex);
+          break;
+        }
+      }
+    }
     // Also seek to clicked position (click landed on clip, didn't drag)
     const rect = containerRef.value?.getBoundingClientRect();
     if (rect && duration.value > 0) {
@@ -717,7 +739,7 @@ onUnmounted(() => {
       borderLeftColor: isSelected ? track.color : 'transparent',
       '--ring-color': isSelected ? track.color : undefined,
     }"
-    @click="emit('select', track.id)"
+    @click="emit('select', track.id, $event)"
   >
     <!-- Track controls (resizable) -->
     <div
@@ -925,8 +947,15 @@ onUnmounted(() => {
         <div
           v-for="ch in [0, 1]"
           :key="ch"
-          class="absolute left-0 right-0 overflow-hidden group/lane"
+          :data-channel-index="ch"
+          :class="[
+            'absolute left-0 right-0 overflow-hidden group/lane transition-opacity',
+            // Dim the non-selected lane when a specific channel is selected on this unlinked track
+            tracksStore.selectedChannelIndex !== null && tracksStore.selectedChannelIndex !== ch && !isChannelLinked
+              ? 'opacity-50' : 'opacity-100',
+          ]"
           :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
+          @click.stop="handleLaneClick(ch)"
         >
           <!-- Lane label -->
           <span class="absolute top-0 left-1 text-[9px] font-mono font-bold text-gray-400 z-20 pointer-events-none select-none">
@@ -1093,14 +1122,20 @@ onUnmounted(() => {
       >
         <!-- Channel conversion -->
         <template v-if="isStereoView">
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('clone-l')">
+            Clone L channel
+          </button>
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('clone-r')">
+            Clone R channel
+          </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-l')">
-            Keep L channel only
+            Keep L channel
           </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
-            Keep R channel only
+            Keep R channel
           </button>
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-mono')">
-            Convert to Mono (mix L+R)
+            Convert to Mono (L+R)
           </button>
           <div class="border-t border-gray-700 my-1" />
           <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">

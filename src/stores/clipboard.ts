@@ -33,6 +33,11 @@ export interface AudioClipboard {
   copiedAt: number;
   /** Which source channels were copied (e.g., [0] for L only, [0,1] for stereo) */
   sourceChannels?: number[];
+  /** Per-lane clip positions from askew unlinked stereo (relative to copy region start) */
+  laneClipOffsets?: {
+    channelIndex: number;
+    clips: { relativeStart: number; duration: number; sourceOffset: number }[];
+  }[];
   /** Virtual source for large-file regions — audio materialized on paste */
   virtualSource?: {
     kind: 'mixdown';
@@ -163,30 +168,30 @@ export const useClipboardStore = defineStore('clipboard', () => {
       return false;
     }
 
-    // Determine which channels to copy — lane-aware
-    const selectedLane = tracksStore.getSelectedLane();
+    // Determine which channels to copy — use getEditTargets for channel awareness
+    const targets = tracksStore.getEditTargets();
+    console.warn(`[Clipboard] copy: channelIndex=${targets.channelIndex}, buffer=${buffer.numberOfChannels}ch, trackId=${trackId}`);
     const selectedTrack = tracksStore.selectedTrack;
     let channelsToCopy: number[];
-    if (selectedLane && selectedTrack?.channelLinked === false) {
-      // Unlinked + specific lane clip focused → copy only that channel
-      channelsToCopy = [selectedLane.channelIndex];
+    if (targets.channelIndex != null && selectedTrack?.channelLinked === false) {
+      // Specific channel selected on unlinked track → copy only that channel
+      channelsToCopy = [targets.channelIndex];
     } else {
-      // Linked, no lane focused, or mono track → copy all channels
+      // All channels (linked, no channel selected, or mono)
       channelsToCopy = Array.from({ length: buffer.numberOfChannels }, (_, i) => i);
     }
 
     const ctx = audioStore.getAudioContext();
 
-    // When lanes are materialized and askew, each channel may have different
-    // clip offsets relative to the in/out region. Extract per-channel samples
-    // based on each lane's clip position, filling silence where a lane has no audio.
+    // When lanes are materialized, use lane-aware extraction that respects
+    // per-clip positions (even for single-channel copies — the raw buffer doesn't
+    // reflect moved lane clips, so the simple path would copy wrong sample offsets).
     const track = tracksStore.selectedTrack;
-    const hasAskewLanes = track?.channelLanes && track.channelLanes.length > 0
-      && channelsToCopy.length > 1;
+    const hasLanes = track?.channelLanes && track.channelLanes.length > 0;
 
     let newBuffer: AudioBuffer;
 
-    if (hasAskewLanes && track?.channelLanes) {
+    if (hasLanes && track?.channelLanes) {
       // Per-channel extraction with lane-aware offsets
       const regionDuration = end - start;
       const regionSamples = Math.floor(regionDuration * buffer.sampleRate);
@@ -246,6 +251,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     }
 
     clipboardBuffer.value = newBuffer;
+    console.warn(`[Clipboard] copy result: channelsToCopy=${JSON.stringify(channelsToCopy)}, newBuffer=${newBuffer.numberOfChannels}ch, hasLanes=${hasLanes}`);
 
     // Generate waveform for the clipboard content
     const waveformData = await tracksStore.generateWaveformFromBuffer(newBuffer);
@@ -254,6 +260,26 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const copiedSamples: Float32Array[] = [];
     for (let ch = 0; ch < newBuffer.numberOfChannels; ch++) {
       copiedSamples.push(new Float32Array(newBuffer.getChannelData(ch)));
+    }
+
+    // Capture per-lane clip offsets for askew stereo (so paste can reconstruct lanes)
+    let laneClipOffsets: AudioClipboard['laneClipOffsets'];
+    if (hasLanes && track?.channelLanes && channelsToCopy.length > 1) {
+      const regionStart = start + track.trackStart;
+      laneClipOffsets = track.channelLanes.map(lane => ({
+        channelIndex: lane.channelIndex,
+        clips: lane.clips
+          .filter(c => c.clipStart < end + track.trackStart && c.clipStart + c.duration > regionStart)
+          .map(c => {
+            const overlapStart = Math.max(c.clipStart, regionStart);
+            const overlapEnd = Math.min(c.clipStart + c.duration, end + track.trackStart);
+            return {
+              relativeStart: overlapStart - regionStart,
+              duration: overlapEnd - overlapStart,
+              sourceOffset: (c.sourceOffset ?? 0) + (overlapStart - c.clipStart),
+            };
+          }),
+      }));
     }
 
     clipboard.value = {
@@ -265,9 +291,10 @@ export const useClipboardStore = defineStore('clipboard', () => {
       waveformData,
       copiedAt: Date.now(),
       sourceChannels: channelsToCopy,
+      laneClipOffsets,
     };
 
-    console.log(`[Clipboard] Copied ${(end - start).toFixed(2)}s (${channelsToCopy.length}ch) from track ${trackId}`);
+    console.log(`[Clipboard] Copied ${(end - start).toFixed(2)}s (${channelsToCopy.length}ch) from track ${trackId}${laneClipOffsets ? ' (with lane offsets)' : ''}`);
     return true;
   }
 
@@ -372,9 +399,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const ctx = audioStore.getAudioContext();
 
     if (hasIOPoints) {
-      // Scope extraction to selected track (or all tracks if 'ALL'/null)
-      const selectedId = tracksStore.selectedTrackId;
-      const sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+      // Scope to selected tracks via getEditTargets (respects multi-selection)
+      const editTargets = tracksStore.getEditTargets();
+      const sourceTrackIds = editTargets.mode === 'all' ? undefined : editTargets.trackIds;
 
       // Determine if any overlapping track lacks an in-memory buffer
       const hasLargeFile = tracksStore.tracks.some(t => {
@@ -398,7 +425,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
 
       // Ripple delete — ALWAYS edit-only (no extraction)
-      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, { mode: 'edit-only' });
+      // Pass channelIndex and scoped trackIds so only selected tracks are affected
+      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, {
+        mode: 'edit-only',
+        channelIndex: editTargets.channelIndex,
+      }, sourceTrackIds);
 
       if (results.affectedCount > 0) {
         // Store clipboard with both buffer (if available) and segment metadata (always)
@@ -546,6 +577,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
       // Use segment's file offset (correct), not timeline position (sourceRegion.start)
       const pasteSourceOffset = vs?.segments?.[0]?.sourceOffset ?? clipboard.value.sourceRegion.start;
 
+      const editTargets = tracksStore.getEditTargets();
       const success = await tracksStore.insertClipAtPlayhead(
         selectedTrack.id,
         clonedBuffer,
@@ -553,7 +585,8 @@ export const useClipboardStore = defineStore('clipboard', () => {
         playheadTime,
         ctx,
         pasteSourceFile,
-        pasteSourceOffset
+        pasteSourceOffset,
+        editTargets.channelIndex,
       );
 
       if (success) {
@@ -584,6 +617,65 @@ export const useClipboardStore = defineStore('clipboard', () => {
       pasteTime,
       pasteSourcePath
     );
+
+    // Reconstruct askew channel lanes when pasting from an unlinked stereo source
+    if (clipboard.value.laneClipOffsets && clonedBuffer.numberOfChannels >= 2) {
+      const lanes: import('@/shared/types').ChannelLane[] = clipboard.value.laneClipOffsets.map(laneInfo => ({
+        id: generateId(),
+        channelIndex: laneInfo.channelIndex,
+        kind: laneInfo.channelIndex === 0 ? 'left' as const : 'right' as const,
+        volume: 1,
+        clips: laneInfo.clips.map(c => ({
+          id: generateId(),
+          buffer: clonedBuffer,
+          waveformData: [] as number[],
+          clipStart: pasteTime + c.relativeStart,
+          duration: c.duration,
+          sourceFile: undefined,
+          sourceOffset: c.sourceOffset,
+        })),
+      }));
+
+      // Generate per-channel waveforms for each lane clip
+      for (const lane of lanes) {
+        const ch = Math.min(lane.channelIndex, clonedBuffer.numberOfChannels - 1);
+        const channelData = clonedBuffer.getChannelData(ch);
+        for (const clip of lane.clips) {
+          const clipOffsetInTrack = clip.clipStart - pasteTime;
+          const startSample = Math.max(0, Math.floor(clipOffsetInTrack * clonedBuffer.sampleRate));
+          const endSample = Math.min(channelData.length, Math.floor((clipOffsetInTrack + clip.duration) * clonedBuffer.sampleRate));
+          const totalSamples = endSample - startSample;
+          const targetBuckets = Math.min(500, Math.max(50, totalSamples > 0 ? Math.ceil(totalSamples / 100) : 50));
+          const samplesPerBucket = Math.max(1, Math.ceil(totalSamples / targetBuckets));
+          const wf: number[] = [];
+          for (let i = 0; i < targetBuckets; i++) {
+            const bStart = startSample + i * samplesPerBucket;
+            const bEnd = Math.min(bStart + samplesPerBucket, endSample);
+            let min = 0, max = 0;
+            for (let j = bStart; j < bEnd; j++) {
+              const s = channelData[j];
+              if (s < min) min = s;
+              if (s > max) max = s;
+            }
+            wf.push(min, max);
+          }
+          clip.waveformData = wf;
+        }
+      }
+
+      // Apply lanes and set unlinked mode via store's setTrackProperty pattern
+      const trackIdx = tracksStore.tracks.findIndex(t => t.id === newTrack.id);
+      if (trackIdx !== -1) {
+        tracksStore.tracks[trackIdx] = {
+          ...tracksStore.tracks[trackIdx],
+          channelLanes: lanes,
+          channelLinked: false,
+          clips: undefined, // lanes are source of truth
+        };
+        // Trigger reactivity — tracks is a shallowRef, need array replacement
+        tracksStore.tracks = [...tracksStore.tracks];
+      }
+    }
 
     // Create EDL clips from stored segments for save/load round-trip
     if (vs?.segments && vs.segments.length > 0) {
@@ -638,15 +730,19 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const ctx = audioStore.getAudioContext();
       let cutCount = 0;
 
-      // Cut from every track that overlaps the I/O region (no ripple shift)
-      const trackIds = tracksStore.tracks.map(t => t.id);
+      // Scope to selected tracks via getEditTargets (respects multi-selection)
+      const editTargets = tracksStore.getEditTargets();
+      const trackIds = editTargets.trackIds;
       for (const trackId of trackIds) {
         const track = tracksStore.tracks.find(t => t.id === trackId);
         if (!track) continue;
         const trackEnd = track.trackStart + track.duration;
         if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx, { mode: 'edit-only' });
+        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx, {
+          mode: 'edit-only',
+          channelIndex: editTargets.channelIndex,
+        });
         if (result) cutCount++;
       }
 

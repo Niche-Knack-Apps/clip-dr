@@ -21,6 +21,8 @@ export type CutMode = 'edit-only' | 'extract-for-clipboard';
 export interface CutOptions {
   keepTrack?: boolean;
   mode?: CutMode;  // default: 'edit-only' — safe default, callers opt-in to extraction
+  /** When set, only operate on the specified channel lane (0=L, 1=R). null/undefined = all. */
+  channelIndex?: number | null;
 }
 
 export const useTracksStore = defineStore('tracks', () => {
@@ -91,7 +93,33 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // 'ALL' means composite view (default), string means specific track, null means nothing selected
-  const selectedTrackId = ref<string | 'ALL' | null>('ALL');
+  // ── Multi-Selection State ──
+  // Primary selection state: Set of selected track IDs
+  const selectedTrackIds = ref<Set<string>>(new Set());
+  // Selected channel within an unlinked stereo track (0=L, 1=R, null=both/all)
+  const selectedChannelIndex = ref<number | null>(null);
+  // Anchor for Shift+click range selection
+  const lastSelectedTrackId = ref<string | null>(null);
+
+  // Backward-compatible computed: derives from selectedTrackIds.
+  // When 0 selected → 'ALL'. When 1 → that ID. When multi → first ID.
+  // Setter routes through selectedTrackIds for all existing write sites.
+  const selectedTrackId = computed<string | 'ALL' | null>({
+    get() {
+      if (selectedTrackIds.value.size === 0) return 'ALL';
+      return [...selectedTrackIds.value][0];
+    },
+    set(val: string | 'ALL' | null) {
+      if (val === 'ALL' || val === null) {
+        selectedTrackIds.value = new Set();
+      } else {
+        selectedTrackIds.value = new Set([val]);
+      }
+      selectedChannelIndex.value = null;
+      lastSelectedTrackId.value = val === 'ALL' || val === null ? null : val;
+    },
+  });
+
   const viewMode = ref<ViewMode>('all');
 
   // Focused clip within a track (for highlight ring on specifically clicked clip)
@@ -106,6 +134,56 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Backward-compat alias: selectedClipId points to the focused clip
   const selectedClipId = focusedClipId;
+
+  // ── Selection Functions ──
+
+  /** Select a single track exclusively (deselects all others). */
+  function selectTrackExclusive(trackId: string): void {
+    selectedTrackIds.value = new Set([trackId]);
+    lastSelectedTrackId.value = trackId;
+    selectedChannelIndex.value = null;
+    focusedClipId.value = null;
+    viewMode.value = 'selected';
+  }
+
+  /** Toggle a track in the selection set (Ctrl+click). */
+  function selectTrackToggle(trackId: string): void {
+    const s = new Set(selectedTrackIds.value);
+    if (s.has(trackId)) s.delete(trackId); else s.add(trackId);
+    selectedTrackIds.value = s;
+    lastSelectedTrackId.value = trackId;
+    if (s.size === 0) viewMode.value = 'all';
+  }
+
+  /** Select a contiguous range of tracks (Shift+click). */
+  function selectTrackRange(trackId: string): void {
+    const ids = tracks.value.map(t => t.id);
+    const anchorIdx = lastSelectedTrackId.value ? ids.indexOf(lastSelectedTrackId.value) : 0;
+    const targetIdx = ids.indexOf(trackId);
+    if (anchorIdx === -1 || targetIdx === -1) return;
+    const [lo, hi] = [Math.min(anchorIdx, targetIdx), Math.max(anchorIdx, targetIdx)];
+    selectedTrackIds.value = new Set(ids.slice(lo, hi + 1));
+    viewMode.value = 'selected';
+  }
+
+  /** Select a specific channel on an unlinked stereo track (null = both). */
+  function selectChannel(channelIndex: number | null): void {
+    selectedChannelIndex.value = channelIndex;
+  }
+
+  /** Central dispatch: returns the current edit targets based on selection state.
+   *  ALL editing operations MUST call this to determine what to affect. */
+  function getEditTargets(): { trackIds: string[]; channelIndex: number | null; mode: 'all' | 'single' | 'multi' } {
+    const ids = [...selectedTrackIds.value];
+    if (ids.length === 0) {
+      return { trackIds: tracks.value.map(t => t.id), channelIndex: null, mode: 'all' };
+    }
+    return {
+      trackIds: ids,
+      channelIndex: selectedChannelIndex.value,
+      mode: ids.length === 1 ? 'single' : 'multi',
+    };
+  }
 
   // Pending drag position for single-clip tracks — decoupled from track.trackStart
   // to prevent timelineDuration from changing during drag (which causes clip resizing)
@@ -768,7 +846,8 @@ export const useTracksStore = defineStore('tracks', () => {
     sourceTrackId: string,
     clipId: string,
     targetTrackId: string,
-    newClipStart: number
+    newClipStart: number,
+    targetChannelIndex?: number | null,
   ): boolean {
     if (sourceTrackId === targetTrackId) return true;
 
@@ -776,9 +855,15 @@ export const useTracksStore = defineStore('tracks', () => {
     const targetTrack = getTrackById(targetTrackId);
     if (!sourceTrack || !targetTrack) return false;
 
-    // Resolve the clip being moved
-    const sourceClips = getTrackClips(sourceTrackId);
-    const movingClip = sourceClips.find(c => c.id === clipId);
+    // Resolve the clip being moved — search lanes first, then parent clips
+    let movingClip: TrackClip | undefined;
+    const found = findClipById(sourceTrackId, clipId);
+    if (found) {
+      movingClip = found.clip;
+    } else {
+      const sourceClips = getTrackClips(sourceTrackId);
+      movingClip = sourceClips.find(c => c.id === clipId);
+    }
     if (!movingClip) return false;
 
     const historyStore = useHistoryStore();
@@ -797,40 +882,59 @@ export const useTracksStore = defineStore('tracks', () => {
         sourceDuration: movingClip.sourceDuration,
       };
 
-      // Add clip to target track's clips array
       const targetIdx = tracks.value.findIndex(t => t.id === targetTrackId);
-      const existingTargetClips = targetTrack.clips && targetTrack.clips.length > 0
-        ? [...targetTrack.clips]
-        : [];
 
-      // If target is a single-buffer track, convert its audio to a clip first
-      if (existingTargetClips.length === 0 && targetTrack.audioData.buffer) {
-        existingTargetClips.push({
-          id: targetTrack.id + '-converted',
-          buffer: targetTrack.audioData.buffer,
-          waveformData: [...targetTrack.audioData.waveformData],
-          clipStart: targetTrack.trackStart,
-          duration: targetTrack.duration,
-          sourceFile: targetTrack.cachedAudioPath || targetTrack.sourcePath,
-          sourceOffset: 0,
-        });
+      // Lane-targeted insertion: when target is unlinked stereo and a channel is specified
+      if (targetChannelIndex != null && targetTrack.channelLanes && targetTrack.channelLinked === false) {
+        const targetLane = targetTrack.channelLanes.find(l => l.channelIndex === targetChannelIndex);
+        if (targetLane) {
+          targetLane.clips = [...targetLane.clips, newClip];
+          // Recalculate track bounds from all lane clips
+          const allClips = targetTrack.channelLanes.flatMap(l => l.clips);
+          const tFirst = Math.min(...allClips.map(c => c.clipStart));
+          const tLast = Math.max(...allClips.map(c => c.clipStart + c.duration));
+          tracks.value[targetIdx] = {
+            ...tracks.value[targetIdx],
+            trackStart: tFirst,
+            duration: tLast - tFirst,
+          };
+          _cachedTrackMap = null;
+        }
+      } else {
+        // Standard insertion: add to parent clips array
+        const existingTargetClips = targetTrack.clips && targetTrack.clips.length > 0
+          ? [...targetTrack.clips]
+          : [];
+
+        // If target is a single-buffer track, convert its audio to a clip first
+        if (existingTargetClips.length === 0 && targetTrack.audioData.buffer) {
+          existingTargetClips.push({
+            id: targetTrack.id + '-converted',
+            buffer: targetTrack.audioData.buffer,
+            waveformData: [...targetTrack.audioData.waveformData],
+            clipStart: targetTrack.trackStart,
+            duration: targetTrack.duration,
+            sourceFile: targetTrack.cachedAudioPath || targetTrack.sourcePath,
+            sourceOffset: 0,
+          });
+        }
+
+        existingTargetClips.push(newClip);
+
+        // Recalculate target bounds
+        const tFirst = Math.min(...existingTargetClips.map(c => c.clipStart));
+        const tLast = Math.max(...existingTargetClips.map(c => c.clipStart + c.duration));
+
+        tracks.value[targetIdx] = {
+          ...targetTrack,
+          clips: existingTargetClips,
+          // Clear single-buffer audioData when converting to multi-clip
+          // (data now lives in clips; leaving it creates duplicate synthetic clips)
+          audioData: { ...targetTrack.audioData, buffer: null },
+          trackStart: tFirst,
+          duration: tLast - tFirst,
+        };
       }
-
-      existingTargetClips.push(newClip);
-
-      // Recalculate target bounds
-      const tFirst = Math.min(...existingTargetClips.map(c => c.clipStart));
-      const tLast = Math.max(...existingTargetClips.map(c => c.clipStart + c.duration));
-
-      tracks.value[targetIdx] = {
-        ...targetTrack,
-        clips: existingTargetClips,
-        // Clear single-buffer audioData when converting to multi-clip
-        // (data now lives in clips; leaving it creates duplicate synthetic clips)
-        audioData: { ...targetTrack.audioData, buffer: null },
-        trackStart: tFirst,
-        duration: tLast - tFirst,
-      };
 
       // Clear activeDrag if it was for the source track (drag is done)
       if (activeDrag.value?.trackId === sourceTrackId) {
@@ -843,7 +947,7 @@ export const useTracksStore = defineStore('tracks', () => {
       triggerRef(tracks);
       bumpSyncEpoch();
 
-      console.log(`[Tracks] Moved clip ${clipId} from ${sourceTrack.name} to ${targetTrack.name}`);
+      console.log(`[Tracks] Moved clip ${clipId} from ${sourceTrack.name} to ${targetTrack.name}${targetChannelIndex != null ? ` (lane ${targetChannelIndex})` : ''}`);
       return true;
     } finally {
       historyStore.endBatch();
@@ -871,10 +975,13 @@ export const useTracksStore = defineStore('tracks', () => {
     const { keepTrack = false } = opts;
 
     // ── Lane-aware path: when channel lanes are materialized, cut from each lane ──
+    const cutChannelIndex = opts.channelIndex;
     if (track.channelLanes && track.channelLanes.length > 0) {
       let anyChanged = false;
       for (const lane of track.channelLanes) {
         if (lane.clips.length === 0) continue;
+        // When channelIndex specified, only process that lane
+        if (cutChannelIndex != null && lane.channelIndex !== cutChannelIndex) continue;
         const newLaneClips: TrackClip[] = [];
         for (const clip of lane.clips) {
           const clipEnd = clip.clipStart + clip.duration;
@@ -1849,17 +1956,19 @@ export const useTracksStore = defineStore('tracks', () => {
     }
   }
 
-  // Ripple delete: cut [inPoint, outPoint] from ALL tracks and close the gap
+  // Ripple delete: cut [inPoint, outPoint] from selected tracks and close the gap
   async function rippleDeleteRegion(
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext,
-    opts: CutOptions = {}
+    opts: CutOptions = {},
+    scopeTrackIds?: string[]
   ): Promise<{ affectedCount: number; buffers: AudioBuffer[]; waveforms: number[][] }> {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Ripple delete');
     // Bump epoch on all tracks that will be affected so concurrent ops can detect stale state
     for (const t of tracks.value) {
+      if (scopeTrackIds && !scopeTrackIds.includes(t.id)) continue;
       const trackEnd = t.trackStart + t.duration;
       if (t.trackStart < outPoint && trackEnd > inPoint) bumpEpoch(t.id);
     }
@@ -1870,8 +1979,8 @@ export const useTracksStore = defineStore('tracks', () => {
     };
     let affectedCount = 0;
 
-    // Step 1: Cut the region from every track that overlaps [inPoint, outPoint]
-    const trackIds = tracks.value.map(t => t.id);
+    // Step 1: Cut the region from tracks that overlap [inPoint, outPoint]
+    const trackIds = scopeTrackIds ?? tracks.value.map(t => t.id);
     for (const trackId of trackIds) {
       const track = getTrackById(trackId);
       if (!track) continue;
@@ -1911,7 +2020,8 @@ export const useTracksStore = defineStore('tracks', () => {
     inPoint: number,
     outPoint: number,
     audioContext: AudioContext,
-    trackIds?: string[]
+    trackIds?: string[],
+    channelIndex?: number | null,
   ): Promise<{ buffer: AudioBuffer; waveformData: number[] } | null> {
     const regionDuration = outPoint - inPoint;
     if (regionDuration <= 0) return null;
@@ -1932,8 +2042,15 @@ export const useTracksStore = defineStore('tracks', () => {
       if (hasLanes) {
         // Per-lane extraction: each lane contributes only its channel
         sampleRate = track.audioData.sampleRate || 44100;
-        maxChannels = Math.max(maxChannels, track.audioData.channels || 2);
+        // When extracting a single channel, output is mono
+        if (channelIndex != null) {
+          maxChannels = 1;
+        } else {
+          maxChannels = Math.max(maxChannels, track.audioData.channels || 2);
+        }
         for (const lane of track.channelLanes!) {
+          // When channelIndex is specified, only process the matching lane
+          if (channelIndex != null && lane.channelIndex !== channelIndex) continue;
           for (const clip of lane.clips) {
             const clipEnd = clip.clipStart + clip.duration;
             if (clip.clipStart >= outPoint || clipEnd <= inPoint) continue;
@@ -1948,15 +2065,23 @@ export const useTracksStore = defineStore('tracks', () => {
               const length = Math.floor((overlapEnd - overlapStart) * buffer.sampleRate);
               if (length <= 0) continue;
 
-              // Extract only this lane's channel into a multi-channel buffer
-              // with silence on other channels (mixing will combine them)
-              const chCount = track.audioData.channels || buffer.numberOfChannels;
-              const extractedBuffer = audioContext.createBuffer(chCount, length, buffer.sampleRate);
               const srcCh = Math.min(lane.channelIndex, buffer.numberOfChannels - 1);
               const src = buffer.getChannelData(srcCh);
-              const dest = extractedBuffer.getChannelData(lane.channelIndex);
-              for (let i = 0; i < length && startSample + i < src.length; i++) dest[i] = src[startSample + i];
-              contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
+
+              if (channelIndex != null) {
+                // Single-channel extraction: output as mono (1ch)
+                const extractedBuffer = audioContext.createBuffer(1, length, buffer.sampleRate);
+                const dest = extractedBuffer.getChannelData(0);
+                for (let i = 0; i < length && startSample + i < src.length; i++) dest[i] = src[startSample + i];
+                contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
+              } else {
+                // Multi-channel: extract into the correct channel with silence on others
+                const chCount = track.audioData.channels || buffer.numberOfChannels;
+                const extractedBuffer = audioContext.createBuffer(chCount, length, buffer.sampleRate);
+                const dest = extractedBuffer.getChannelData(lane.channelIndex);
+                for (let i = 0; i < length && startSample + i < src.length; i++) dest[i] = src[startSample + i];
+                contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
+              }
             } else if (clip.sourceFile) {
               const regionOffset = overlapStart - clip.clipStart;
               const fileStart = (clip.sourceOffset ?? 0) + regionOffset;
@@ -1964,7 +2089,16 @@ export const useTracksStore = defineStore('tracks', () => {
               const rustBuffer = await invokeExtractRegion(clip.sourceFile, fileStart, fileEnd, audioContext);
               if (rustBuffer) {
                 sampleRate = rustBuffer.sampleRate;
-                contributions.push({ buffer: rustBuffer, offsetInRegion: overlapStart - inPoint });
+                // For single-channel: downmix Rust result to mono (just the target channel)
+                if (channelIndex != null && rustBuffer.numberOfChannels > 1) {
+                  const ch = Math.min(channelIndex, rustBuffer.numberOfChannels - 1);
+                  const monoBuf = audioContext.createBuffer(1, rustBuffer.length, rustBuffer.sampleRate);
+                  const srcData = rustBuffer.getChannelData(ch);
+                  monoBuf.getChannelData(0).set(srcData);
+                  contributions.push({ buffer: monoBuf, offsetInRegion: overlapStart - inPoint });
+                } else {
+                  contributions.push({ buffer: rustBuffer, offsetInRegion: overlapStart - inPoint });
+                }
               }
             }
           }
@@ -1985,7 +2119,6 @@ export const useTracksStore = defineStore('tracks', () => {
           // In-memory path: slice AudioBuffer directly
           const buffer = clip.buffer;
           sampleRate = buffer.sampleRate;
-          maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
 
           const relStart = overlapStart - clip.clipStart;
           const relEnd = overlapEnd - clip.clipStart;
@@ -1994,13 +2127,25 @@ export const useTracksStore = defineStore('tracks', () => {
           const length = endSample - startSample;
           if (length <= 0) continue;
 
-          const extractedBuffer = audioContext.createBuffer(buffer.numberOfChannels, length, buffer.sampleRate);
-          for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+          if (channelIndex != null && buffer.numberOfChannels > 1) {
+            // Single-channel extraction from non-lane stereo clip: output as mono
+            maxChannels = 1;
+            const ch = Math.min(channelIndex, buffer.numberOfChannels - 1);
+            const extractedBuffer = audioContext.createBuffer(1, length, buffer.sampleRate);
             const src = buffer.getChannelData(ch);
-            const dest = extractedBuffer.getChannelData(ch);
+            const dest = extractedBuffer.getChannelData(0);
             for (let i = 0; i < length; i++) dest[i] = src[startSample + i];
+            contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
+          } else {
+            maxChannels = Math.max(maxChannels, buffer.numberOfChannels);
+            const extractedBuffer = audioContext.createBuffer(buffer.numberOfChannels, length, buffer.sampleRate);
+            for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+              const src = buffer.getChannelData(ch);
+              const dest = extractedBuffer.getChannelData(ch);
+              for (let i = 0; i < length; i++) dest[i] = src[startSample + i];
+            }
+            contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
           }
-          contributions.push({ buffer: extractedBuffer, offsetInRegion: overlapStart - inPoint });
         } else if (clip.sourceFile) {
           // EDL path: Rust extraction with sourceOffset
           const regionOffset = overlapStart - clip.clipStart;
@@ -2429,8 +2574,17 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = getTrackById(trackId);
     if (!track) return null;
 
-    const clips = getTrackClips(trackId);
-    const clip = clips.find(c => c.id === clipId);
+    // Search lane clips first (they have priority after materialization), then parent clips,
+    // then synthetic clips (for single-buffer tracks with no explicit clips array)
+    let clip: TrackClip | undefined;
+    const found = findClipById(trackId, clipId);
+    if (found) {
+      clip = found.clip;
+    } else {
+      // Fallback: check getTrackClips which synthesizes clips for single-buffer tracks
+      const syntheticClips = getTrackClips(trackId);
+      clip = syntheticClips.find(c => c.id === clipId);
+    }
     if (!clip) return null;
 
     const clipEnd = clip.clipStart + clip.duration;
@@ -2474,6 +2628,9 @@ export const useTracksStore = defineStore('tracks', () => {
     }
     const sampleRate = buffer.sampleRate;
     const channels = buffer.numberOfChannels;
+    // Use clip.duration (not buffer.length) to bound extraction — the buffer may be
+    // longer than the clip's visible duration after a prior delete/trim operation.
+    const clipSamples = Math.min(buffer.length, Math.floor(clip.duration * sampleRate));
     const splitSample = Math.floor(relSplit * sampleRate);
 
     // Create "before" buffer
@@ -2484,9 +2641,9 @@ export const useTracksStore = defineStore('tracks', () => {
       for (let i = 0; i < splitSample; i++) dest[i] = src[i];
     }
 
-    // Create "after" buffer
-    const afterLength = buffer.length - splitSample;
-    const afterBuffer = audioContext.createBuffer(channels, afterLength, sampleRate);
+    // Create "after" buffer — only include samples up to clip.duration, not buffer end
+    const afterLength = clipSamples - splitSample;
+    const afterBuffer = audioContext.createBuffer(channels, Math.max(1, afterLength), sampleRate);
     for (let ch = 0; ch < channels; ch++) {
       const src = buffer.getChannelData(ch);
       const dest = afterBuffer.getChannelData(ch);
@@ -2530,7 +2687,8 @@ export const useTracksStore = defineStore('tracks', () => {
   async function splitAtPlayhead(
     trackId: string,
     playheadTime: number,
-    audioContext: AudioContext
+    audioContext: AudioContext,
+    channelIndex?: number | null,
   ): Promise<boolean> {
     let track = getTrackById(trackId);
     if (!track) return false;
@@ -2542,8 +2700,38 @@ export const useTracksStore = defineStore('tracks', () => {
     let clip: TrackClip | undefined;
     let targetLane: import('@/shared/types').ChannelLane | null = null;
 
+    // When channelIndex is null and track has unlinked lanes, split ALL lanes independently
+    if (track.channelLanes && channelIndex == null && track.channelLinked === false) {
+      const trackIndex = tracks.value.findIndex(t => t.id === trackId);
+      const currentTrack = tracks.value[trackIndex];
+      let anySplit = false;
+      for (const lane of currentTrack.channelLanes ?? []) {
+        const laneClip = lane.clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
+        if (!laneClip) continue;
+        const laneResult = await splitClipAtTime(trackId, laneClip.id, playheadTime, audioContext);
+        if (laneResult) {
+          lane.clips = lane.clips.map(c => c.id === laneClip.id ? [laneResult.before, laneResult.after] : [c]).flat();
+          anySplit = true;
+        }
+      }
+      if (anySplit) {
+        for (const lane of currentTrack.channelLanes ?? []) {
+          lane.clips = [...lane.clips];
+        }
+        _cachedTrackMap = null;
+        triggerRef(tracks);
+        bumpSyncEpoch();
+        useHistoryStore().pushState('Split clip');
+        console.log(`[Tracks] Split all lanes at playhead ${playheadTime.toFixed(3)}s in track ${trackId}`);
+        return true;
+      }
+      // Fall through to parent clip search if no lane clips found
+    }
+
     if (track.channelLanes) {
       for (const lane of track.channelLanes) {
+        // When channelIndex is specified, only search that specific lane
+        if (channelIndex != null && lane.channelIndex !== channelIndex) continue;
         clip = lane.clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
         if (clip) { targetLane = lane; break; }
       }
@@ -2563,8 +2751,8 @@ export const useTracksStore = defineStore('tracks', () => {
     if (targetLane) {
       // Split within a lane
       targetLane.clips = targetLane.clips.map(c => c.id === clip!.id ? [result.before, result.after] : [c]).flat();
-      // Linked: also split paired clip in other lane
-      if (currentTrack.channelLinked !== false && currentTrack.channelLanes) {
+      // Linked: also split paired clip in other lane (when linked and no specific channel selected)
+      if (channelIndex == null && currentTrack.channelLinked !== false && currentTrack.channelLanes) {
         const linked = findLinkedClip(currentTrack, clip, targetLane);
         if (linked) {
           const linkedResult = await splitClipAtTime(trackId, linked.clip.id, playheadTime, audioContext);
@@ -2725,7 +2913,8 @@ export const useTracksStore = defineStore('tracks', () => {
     playheadTime: number,
     audioContext: AudioContext,
     sourceFile?: string,
-    sourceOffset?: number
+    sourceOffset?: number,
+    channelIndex?: number | null,
   ): Promise<boolean> {
     const trackIndex = tracks.value.findIndex(t => t.id === trackId);
     if (trackIndex === -1) return false;
@@ -2816,6 +3005,32 @@ export const useTracksStore = defineStore('tracks', () => {
       }
       return p;
     });
+
+    // Lane-targeted paste: when channelIndex is set and track has unlinked lanes,
+    // insert only into that lane (don't modify parent clips or other lane)
+    if (channelIndex != null && track.channelLanes && track.channelLinked === false) {
+      const targetLane = track.channelLanes.find(l => l.channelIndex === channelIndex);
+      if (targetLane) {
+        targetLane.clips.push(newClip);
+        targetLane.clips.sort((a, b) => a.clipStart - b.clipStart);
+        targetLane.clips = [...targetLane.clips]; // new ref for reactivity
+
+        // Recompute bounds from all lane clips
+        const allClips = track.channelLanes.flatMap(l => l.clips);
+        const laneFirstStart = Math.min(...allClips.map(c => c.clipStart));
+        const laneLastEnd = Math.max(...allClips.map(c => c.clipStart + c.duration));
+        tracks.value[trackIndex] = {
+          ...tracks.value[trackIndex],
+          trackStart: laneFirstStart,
+          duration: laneLastEnd - laneFirstStart,
+        };
+        _cachedTrackMap = null;
+        triggerRef(tracks);
+        bumpSyncEpoch();
+        console.log(`[Tracks] Inserted ${pasteDuration.toFixed(2)}s clip into ${channelIndex === 0 ? 'L' : 'R'} lane at ${playheadTime.toFixed(2)}s`);
+        return true;
+      }
+    }
 
     // Detect channel count from pasted buffer — empty tracks start as mono (channels: 1)
     // but pasting a stereo clip should upgrade the track to stereo
@@ -3442,20 +3657,110 @@ export const useTracksStore = defineStore('tracks', () => {
     useHistoryStore().pushState('Convert to mono');
 
     const src = track.audioData.buffer;
+    const sampleRate = src.sampleRate;
     const ctx = typeof OfflineAudioContext !== 'undefined'
-      ? new OfflineAudioContext(1, Math.max(1, src.length), src.sampleRate)
+      ? new OfflineAudioContext(1, Math.max(1, src.length), sampleRate)
       : new AudioContext();
-    const newBuffer = ctx.createBuffer(1, src.length, src.sampleRate);
-    const lData = src.getChannelData(0);
-    const rData = src.getChannelData(1);
-    const monoData = newBuffer.getChannelData(0);
-    for (let i = 0; i < src.length; i++) {
-      monoData[i] = (lData[i] + rData[i]) * 0.5;
+
+    let monoBuffer: AudioBuffer;
+    let newClips: TrackClip[] | undefined;
+    let newTrackStart = track.trackStart;
+    let newDuration = track.duration;
+
+    // Lane-aware path: when channel lanes are materialized, mixdown respecting timeline positions
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      // Find union extent of all lane clips
+      const allLaneClips = track.channelLanes.flatMap(l => l.clips);
+      if (allLaneClips.length === 0) {
+        // No lane clips — fall through to simple path
+        monoBuffer = ctx.createBuffer(1, src.length, sampleRate);
+        const lData = src.getChannelData(0);
+        const rData = src.getChannelData(1);
+        const monoData = monoBuffer.getChannelData(0);
+        for (let i = 0; i < src.length; i++) monoData[i] = (lData[i] + rData[i]) * 0.5;
+        newClips = track.clips;
+      } else {
+        const minStart = Math.min(...allLaneClips.map(c => c.clipStart));
+        const maxEnd = Math.max(...allLaneClips.map(c => c.clipStart + c.duration));
+        const totalDuration = maxEnd - minStart;
+        const totalSamples = Math.max(1, Math.ceil(totalDuration * sampleRate));
+
+        monoBuffer = ctx.createBuffer(1, totalSamples, sampleRate);
+        const monoData = monoBuffer.getChannelData(0);
+        // Track how many channels contribute at each sample for averaging
+        const countBuf = new Float32Array(totalSamples);
+
+        for (const lane of track.channelLanes) {
+          const laneVol = lane.volume ?? 1.0;
+          const ch = Math.min(lane.channelIndex, src.numberOfChannels - 1);
+          const srcData = src.getChannelData(ch);
+
+          for (const clip of lane.clips) {
+            if (!clip.buffer && !srcData) continue;
+            const clipBuf = clip.buffer ?? src;
+            const clipCh = Math.min(lane.channelIndex, clipBuf.numberOfChannels - 1);
+            const clipData = clipBuf.getChannelData(clipCh);
+            const clipOffsetInTrack = clip.clipStart - minStart;
+            const destStart = Math.max(0, Math.floor(clipOffsetInTrack * sampleRate));
+            const srcStart = clip.sourceOffset != null ? Math.floor(clip.sourceOffset * sampleRate) : 0;
+            const clipSamples = Math.min(
+              Math.floor(clip.duration * sampleRate),
+              clipData.length - srcStart,
+            );
+
+            for (let i = 0; i < clipSamples && destStart + i < totalSamples; i++) {
+              const s = srcStart + i < clipData.length ? clipData[srcStart + i] : 0;
+              monoData[destStart + i] += s * laneVol;
+              countBuf[destStart + i] += 1;
+            }
+          }
+        }
+
+        // Average where both channels overlap
+        for (let i = 0; i < totalSamples; i++) {
+          if (countBuf[i] > 1) monoData[i] /= countBuf[i];
+        }
+
+        // Merge all lane clips into a single flat clips array
+        newClips = allLaneClips
+          .sort((a, b) => a.clipStart - b.clipStart)
+          .map(c => ({
+            ...c,
+            id: generateId(),
+            buffer: monoBuffer,
+            linkedClipGroupId: undefined,
+          }));
+
+        newTrackStart = minStart;
+        newDuration = totalDuration;
+      }
+    } else {
+      // Simple path: no lanes, just average L+R sample-by-sample
+      monoBuffer = ctx.createBuffer(1, src.length, sampleRate);
+      const lData = src.getChannelData(0);
+      const rData = src.getChannelData(1);
+      const monoData = monoBuffer.getChannelData(0);
+      for (let i = 0; i < src.length; i++) monoData[i] = (lData[i] + rData[i]) * 0.5;
+
+      // Update clip buffers to mono
+      newClips = track.clips;
+      if (newClips) {
+        newClips = newClips.map(c => {
+          if (!c.buffer || c.buffer.numberOfChannels < 2) return c;
+          const clipBuf = ctx.createBuffer(1, c.buffer.length, c.buffer.sampleRate);
+          const cL = c.buffer.getChannelData(0);
+          const cR = c.buffer.getChannelData(1);
+          const cMono = clipBuf.getChannelData(0);
+          for (let i = 0; i < c.buffer.length; i++) cMono[i] = (cL[i] + cR[i]) * 0.5;
+          return { ...c, buffer: clipBuf };
+        });
+      }
     }
 
-    // Generate waveform from downmixed mono
+    // Generate waveform from mono buffer
     const bucketCount = 1000;
-    const samplesPerBucket = Math.max(1, Math.ceil(src.length / bucketCount));
+    const monoData = monoBuffer.getChannelData(0);
+    const samplesPerBucket = Math.max(1, Math.ceil(monoBuffer.length / bucketCount));
     const waveform: number[] = [];
     for (let i = 0; i < bucketCount; i++) {
       const bStart = i * samplesPerBucket;
@@ -3469,16 +3774,72 @@ export const useTracksStore = defineStore('tracks', () => {
       waveform.push(min, max);
     }
 
-    // Update clip buffers to mono
+    tracks.value[idx] = {
+      ...tracks.value[idx],
+      audioData: { ...track.audioData, buffer: monoBuffer, waveformData: waveform, channels: 1 },
+      clips: newClips,
+      trackStart: newTrackStart,
+      duration: newDuration,
+      channelMode: 'mono',
+      channelLanes: undefined,
+      channelLinked: true,
+    };
+    _cachedTrackMap = null;
+    triggerRef(tracks);
+    bumpSyncEpoch();
+  }
+
+  /**
+   * Extract a single channel as true mono (no averaging, just the raw channel data).
+   * Stereo → mono with only the specified channel's audio.
+   */
+  function keepChannel(trackId: string, channelIndex: number): void {
+    const idx = tracks.value.findIndex(t => t.id === trackId);
+    if (idx === -1) return;
+    const track = tracks.value[idx];
+    if (!track.audioData.buffer || (track.audioData.channels ?? 1) < 2) return;
+
+    useHistoryStore().pushState(channelIndex === 0 ? 'Keep L channel' : 'Keep R channel');
+
+    const src = track.audioData.buffer;
+    const ctx = typeof OfflineAudioContext !== 'undefined'
+      ? new OfflineAudioContext(1, Math.max(1, src.length), src.sampleRate)
+      : new AudioContext();
+    const newBuffer = ctx.createBuffer(1, src.length, src.sampleRate);
+    const keptData = src.getChannelData(channelIndex);
+    newBuffer.getChannelData(0).set(keptData);
+
+    // Generate waveform from kept channel
+    const bucketCount = 1000;
+    const samplesPerBucket = Math.max(1, Math.ceil(src.length / bucketCount));
+    const waveform: number[] = [];
+    for (let i = 0; i < bucketCount; i++) {
+      const bStart = i * samplesPerBucket;
+      const bEnd = Math.min(bStart + samplesPerBucket, keptData.length);
+      let min = 0, max = 0;
+      for (let j = bStart; j < bEnd; j++) {
+        const s = keptData[j];
+        if (s < min) min = s;
+        if (s > max) max = s;
+      }
+      waveform.push(min, max);
+    }
+
+    // If lanes materialized, adopt kept lane's clip positions
     let newClips = track.clips;
+    if (track.channelLanes && track.channelLanes.length > 0) {
+      const keptLane = track.channelLanes.find(l => l.channelIndex === channelIndex);
+      if (keptLane && keptLane.clips.length > 0) {
+        newClips = keptLane.clips.map(c => ({ ...c, linkedClipGroupId: undefined }));
+      }
+    }
+
+    // Update clip buffers to mono (extract only the kept channel)
     if (newClips) {
       newClips = newClips.map(c => {
         if (!c.buffer || c.buffer.numberOfChannels < 2) return c;
         const clipBuf = ctx.createBuffer(1, c.buffer.length, c.buffer.sampleRate);
-        const cL = c.buffer.getChannelData(0);
-        const cR = c.buffer.getChannelData(1);
-        const cMono = clipBuf.getChannelData(0);
-        for (let i = 0; i < c.buffer.length; i++) cMono[i] = (cL[i] + cR[i]) * 0.5;
+        clipBuf.getChannelData(0).set(c.buffer.getChannelData(channelIndex));
         return { ...c, buffer: clipBuf };
       });
     }
@@ -3902,6 +4263,13 @@ export const useTracksStore = defineStore('tracks', () => {
     trackMap,
     getTrackById,
     selectedTrackId,
+    selectedTrackIds,
+    selectedChannelIndex,
+    selectTrackExclusive,
+    selectTrackToggle,
+    selectTrackRange,
+    selectChannel,
+    getEditTargets,
     selectedClipId,
     focusedClipId,
     selectedTrackClipIds,
@@ -3980,6 +4348,7 @@ export const useTracksStore = defineStore('tracks', () => {
     removeChannelLaneVolumePoint,
     replaceWithChannel,
     convertToMono,
+    keepChannel,
     convertToStereo,
     getVolumeAtTime,
     adjustVolumeEnvelopeForCut,

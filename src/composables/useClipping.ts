@@ -44,18 +44,19 @@ export function useClipping() {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Create clip');
     try {
-      // Scope extraction to audible tracks (respects solo/mute like playback/export).
-      // When solo is active, extract only from solo'd tracks.
-      // When no solo, extract from selected track (or all if 'ALL'/null).
+      // Scope extraction via getEditTargets (respects multi-selection + solo + channel).
+      const targets = tracksStore.getEditTargets();
       const hasSolo = tracksStore.tracks.some(t => t.solo);
       let sourceTrackIds: string[] | undefined;
+      // Always respect channel selection (even when solo is active)
+      const clipChannelIndex = targets.channelIndex;
       if (hasSolo) {
-        // Solo active: extract from solo'd tracks only (matches playback behavior)
         sourceTrackIds = tracksStore.tracks.filter(t => t.solo).map(t => t.id);
       } else {
-        const selectedId = tracksStore.selectedTrackId;
-        sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+        sourceTrackIds = targets.mode === 'all' ? undefined : targets.trackIds;
       }
+
+      console.warn(`[Clipping] createClip: clipChannelIndex=${clipChannelIndex}, hasSolo=${hasSolo}, sourceTrackIds=${sourceTrackIds?.join(',') ?? 'all'}`);
 
       // Detect large files (same check as clipboard.cut)
       const hasLargeFile = tracksStore.tracks.some(t => {
@@ -74,7 +75,9 @@ export function useClipping() {
           console.log('[Clipping] No segments found in I/O region');
           return null;
         }
-        const { sampleRate, channels } = tracksStore.getContributingFormat(inPoint, outPoint, sourceTrackIds);
+        const { sampleRate, channels: rawChannels } = tracksStore.getContributingFormat(inPoint, outPoint, sourceTrackIds);
+        // Single-channel clip → mono output
+        const channels = clipChannelIndex != null ? 1 : rawChannels;
         const waveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint, sourceTrackIds);
         const clipName = `Clip ${tracksStore.tracks.length + 1}`;
         const totalDuration = outPoint - inPoint;
@@ -123,7 +126,7 @@ export function useClipping() {
         // Small file: extract audio AND create EDL clips for save/load round-trip
         const segments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint, sourceTrackIds);
         const ctx = audioStore.getAudioContext();
-        const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds);
+        const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds, clipChannelIndex);
         if (!extracted) {
           console.warn('[Clipping] No audio found in I/O region');
           return null;

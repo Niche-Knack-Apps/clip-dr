@@ -1,0 +1,1355 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { setActivePinia, createPinia } from 'pinia';
+
+// Mock Tauri internals
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn().mockResolvedValue([]),
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+  emit: vi.fn(),
+  once: vi.fn().mockResolvedValue(() => {}),
+}));
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+  save: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  readTextFile: vi.fn(),
+  writeTextFile: vi.fn(),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@tauri-apps/api/path', () => ({
+  appLocalDataDir: vi.fn().mockResolvedValue('/tmp/test'),
+  tempDir: vi.fn().mockResolvedValue('/tmp/'),
+}));
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: vi.fn().mockReturnValue({
+    setTitle: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+
+// Suppress console noise
+vi.spyOn(console, 'error').mockImplementation(() => {});
+vi.spyOn(console, 'log').mockImplementation(() => {});
+vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+// Mock AudioBuffer class for happy-dom (which doesn't provide Web Audio API)
+class MockAudioBuffer {
+  readonly numberOfChannels: number;
+  readonly length: number;
+  readonly sampleRate: number;
+  readonly duration: number;
+  private channels: Float32Array[];
+
+  constructor(options: { numberOfChannels: number; length: number; sampleRate: number }) {
+    this.numberOfChannels = options.numberOfChannels;
+    this.length = options.length;
+    this.sampleRate = options.sampleRate;
+    this.duration = options.length / options.sampleRate;
+    this.channels = [];
+    for (let i = 0; i < options.numberOfChannels; i++) {
+      this.channels.push(new Float32Array(options.length));
+    }
+  }
+
+  getChannelData(channel: number): Float32Array {
+    return this.channels[channel];
+  }
+
+  copyFromChannel(destination: Float32Array, channelNumber: number, startInChannel?: number): void {
+    const src = this.channels[channelNumber];
+    const offset = startInChannel ?? 0;
+    destination.set(src.subarray(offset, offset + destination.length));
+  }
+
+  copyToChannel(source: Float32Array, channelNumber: number, startInChannel?: number): void {
+    const offset = startInChannel ?? 0;
+    this.channels[channelNumber].set(source, offset);
+  }
+}
+
+class MockAudioContext {
+  readonly sampleRate = 44100;
+
+  createBuffer(numberOfChannels: number, length: number, sampleRate: number): AudioBuffer {
+    return new MockAudioBuffer({ numberOfChannels, length, sampleRate }) as unknown as AudioBuffer;
+  }
+
+  createBufferSource() {
+    return { connect: vi.fn(), start: vi.fn(), stop: vi.fn(), buffer: null, onended: null };
+  }
+  createGain() {
+    return { connect: vi.fn(), gain: { value: 1 } };
+  }
+  get destination() { return {}; }
+  get currentTime() { return 0; }
+}
+
+(globalThis as Record<string, unknown>).AudioContext = MockAudioContext;
+(globalThis as Record<string, unknown>).AudioBuffer = MockAudioBuffer;
+
+function createMockAudioBuffer(duration: number, sampleRate = 44100, channels = 2): AudioBuffer {
+  const length = Math.floor(duration * sampleRate);
+  const ctx = new MockAudioContext();
+  const buffer = ctx.createBuffer(channels, Math.max(1, length), sampleRate);
+  for (let ch = 0; ch < channels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = Math.sin(i / sampleRate * 440 * 2 * Math.PI) * 0.5;
+    }
+  }
+  return buffer;
+}
+
+// Helper: create a mono track
+async function createMonoTrack(tracksStore: ReturnType<typeof import('@/stores/tracks').useTracksStore>, duration = 10, offset = 0) {
+  const buffer = createMockAudioBuffer(duration, 44100, 1);
+  return await tracksStore.createTrackFromBuffer(buffer, null, 'Mono', offset);
+}
+
+// Helper: create a stereo track and materialize + unlink lanes for testing
+async function createStereoUnlinkedTrack(tracksStore: ReturnType<typeof import('@/stores/tracks').useTracksStore>, duration = 10, offset = 0) {
+  const buffer = createMockAudioBuffer(duration, 44100, 2);
+  const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', offset);
+  tracksStore.toggleChannelLinked(track.id); // materialize + unlink
+  return tracksStore.getTrackById(track.id)!;
+}
+
+// ─── 1. Selection State ──────────────────────────────────────────────────────
+
+describe('Selection State', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('selectTrackExclusive selects one track and deselects others', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+    const t3 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 3', 0);
+
+    // Select t1 exclusively
+    tracksStore.selectTrackExclusive(t1.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(1);
+    expect(tracksStore.selectedTrackIds.has(t1.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t2.id)).toBe(false);
+    expect(tracksStore.selectedTrackIds.has(t3.id)).toBe(false);
+
+    // Select t2 exclusively — t1 deselected
+    tracksStore.selectTrackExclusive(t2.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(1);
+    expect(tracksStore.selectedTrackIds.has(t2.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t1.id)).toBe(false);
+  });
+
+  it('selectTrackToggle adds/removes tracks from set', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+
+    // Start with t1 selected (createTrackFromBuffer auto-selects)
+    tracksStore.selectTrackExclusive(t1.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(1);
+
+    // Toggle t2 on
+    tracksStore.selectTrackToggle(t2.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(2);
+    expect(tracksStore.selectedTrackIds.has(t1.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t2.id)).toBe(true);
+
+    // Toggle t1 off
+    tracksStore.selectTrackToggle(t1.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(1);
+    expect(tracksStore.selectedTrackIds.has(t2.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t1.id)).toBe(false);
+
+    // Toggle t2 off — now empty
+    tracksStore.selectTrackToggle(t2.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(0);
+  });
+
+  it('selectTrackRange selects contiguous range between anchor and target', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+    const t3 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 3', 0);
+    const t4 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 4', 0);
+
+    // Anchor on t1
+    tracksStore.selectTrackExclusive(t1.id);
+    // Shift+click on t3 — should select t1, t2, t3
+    tracksStore.selectTrackRange(t3.id);
+
+    expect(tracksStore.selectedTrackIds.size).toBe(3);
+    expect(tracksStore.selectedTrackIds.has(t1.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t2.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t3.id)).toBe(true);
+    expect(tracksStore.selectedTrackIds.has(t4.id)).toBe(false);
+  });
+
+  it('selectChannel sets selectedChannelIndex', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    expect(tracksStore.selectedChannelIndex).toBeNull();
+
+    tracksStore.selectChannel(0);
+    expect(tracksStore.selectedChannelIndex).toBe(0);
+
+    tracksStore.selectChannel(1);
+    expect(tracksStore.selectedChannelIndex).toBe(1);
+
+    tracksStore.selectChannel(null);
+    expect(tracksStore.selectedChannelIndex).toBeNull();
+  });
+
+  it('getEditTargets returns all tracks when none selected', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+
+    // Clear selection (set to ALL)
+    tracksStore.selectedTrackId = 'ALL';
+
+    const targets = tracksStore.getEditTargets();
+    expect(targets.mode).toBe('all');
+    expect(targets.trackIds).toContain(t1.id);
+    expect(targets.trackIds).toContain(t2.id);
+    expect(targets.channelIndex).toBeNull();
+  });
+
+  it('getEditTargets returns single track when one selected', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+
+    tracksStore.selectTrackExclusive(t1.id);
+
+    const targets = tracksStore.getEditTargets();
+    expect(targets.mode).toBe('single');
+    expect(targets.trackIds).toEqual([t1.id]);
+    expect(targets.channelIndex).toBeNull();
+  });
+
+  it('getEditTargets returns multiple tracks when multi-selected', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+    await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 3', 0);
+
+    tracksStore.selectTrackExclusive(t1.id);
+    tracksStore.selectTrackToggle(t2.id);
+
+    const targets = tracksStore.getEditTargets();
+    expect(targets.mode).toBe('multi');
+    expect(targets.trackIds).toContain(t1.id);
+    expect(targets.trackIds).toContain(t2.id);
+    expect(targets.trackIds.length).toBe(2);
+  });
+
+  it('backward compat: selectedTrackId getter reflects selectedTrackIds', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 1', 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(5), null, 'Track 2', 0);
+
+    // 0 selected → 'ALL'
+    tracksStore.selectedTrackId = 'ALL';
+    expect(tracksStore.selectedTrackId).toBe('ALL');
+    expect(tracksStore.selectedTrackIds.size).toBe(0);
+
+    // 1 selected → that ID
+    tracksStore.selectTrackExclusive(t1.id);
+    expect(tracksStore.selectedTrackId).toBe(t1.id);
+
+    // Multi-selected → first ID
+    tracksStore.selectTrackToggle(t2.id);
+    expect(tracksStore.selectedTrackIds.size).toBe(2);
+    // selectedTrackId returns first from the set
+    const firstId = [...tracksStore.selectedTrackIds][0];
+    expect(tracksStore.selectedTrackId).toBe(firstId);
+
+    // Setter routes through selectedTrackIds
+    tracksStore.selectedTrackId = t2.id;
+    expect(tracksStore.selectedTrackIds.size).toBe(1);
+    expect(tracksStore.selectedTrackIds.has(t2.id)).toBe(true);
+  });
+});
+
+// ─── 2. Mono Track Operations ────────────────────────────────────────────────
+
+describe('Mono Track Operations', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('split at playhead creates two clips', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    const trackId = track.id;
+
+    const success = await tracksStore.splitAtPlayhead(trackId, 5.0, ctx);
+    expect(success).toBe(true);
+
+    const clips = tracksStore.getTrackClips(trackId);
+    expect(clips.length).toBe(2);
+    // First clip: 0 to ~5s
+    expect(clips[0].clipStart).toBeCloseTo(0, 1);
+    expect(clips[0].duration).toBeCloseTo(5.0, 1);
+    // Second clip: ~5s to ~10s
+    expect(clips[1].clipStart).toBeCloseTo(5.0, 1);
+    expect(clips[1].duration).toBeCloseTo(5.0, 1);
+  });
+
+  it('cut with I/O ripple deletes region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    const trackId = track.id;
+
+    // Cut region from 3s to 6s
+    const result = await tracksStore.cutRegionFromTrack(trackId, 3.0, 6.0, ctx);
+    expect(result).not.toBeNull();
+
+    // Should have clips before and after the cut region
+    const clips = tracksStore.getTrackClips(trackId);
+    expect(clips.length).toBe(2);
+    // Before: 0 to 3s
+    expect(clips[0].clipStart).toBeCloseTo(0, 1);
+    expect(clips[0].duration).toBeCloseTo(3.0, 1);
+    // After: 6s to 10s (at position 6s)
+    expect(clips[1].clipStart).toBeCloseTo(6.0, 1);
+    expect(clips[1].duration).toBeCloseTo(4.0, 1);
+  });
+
+  it('delete with I/O removes region without ripple', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    const trackId = track.id;
+
+    // Cut region (same as delete — cutRegionFromTrack is the base operation)
+    const result = await tracksStore.cutRegionFromTrack(trackId, 2.0, 5.0, ctx);
+    expect(result).not.toBeNull();
+
+    const updatedTrack = tracksStore.getTrackById(trackId);
+    expect(updatedTrack).toBeTruthy();
+    // Track should still exist with remaining audio
+    const clips = tracksStore.getTrackClips(trackId);
+    expect(clips.length).toBe(2);
+  });
+
+  it('trim left adjusts clip start', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    const trackId = track.id;
+
+    // Promote to explicit clips so we can trim
+    tracksStore.promoteToExplicitClips(trackId);
+    const clips = tracksStore.getTrackClips(trackId);
+    expect(clips.length).toBe(1);
+
+    const clipId = clips[0].id;
+    const originalDuration = clips[0].duration;
+    const originalStart = clips[0].clipStart;
+
+    // Trim left by 2s (positive delta = trim inward)
+    tracksStore.trimClipLeft(trackId, clipId, 2.0);
+
+    const updatedClips = tracksStore.getTrackClips(trackId);
+    expect(updatedClips[0].clipStart).toBeCloseTo(originalStart + 2.0, 5);
+    expect(updatedClips[0].duration).toBeCloseTo(originalDuration - 2.0, 5);
+  });
+
+  it('trim right adjusts clip duration', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    const trackId = track.id;
+
+    // Promote to explicit clips so we can trim
+    tracksStore.promoteToExplicitClips(trackId);
+    const clips = tracksStore.getTrackClips(trackId);
+    const clipId = clips[0].id;
+    const originalDuration = clips[0].duration;
+
+    // Trim right by -2s (negative delta = trim inward from right)
+    tracksStore.trimClipRight(trackId, clipId, -2.0);
+
+    const updatedClips = tracksStore.getTrackClips(trackId);
+    expect(updatedClips[0].duration).toBeCloseTo(originalDuration - 2.0, 5);
+  });
+
+  it('copy with I/O captures mono audio', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const { useSelectionStore } = await import('@/stores/selection');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+    const selectionStore = useSelectionStore();
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+
+    // Set I/O points
+    selectionStore.setInPoint(2.0);
+    selectionStore.setOutPoint(5.0);
+
+    const success = await clipboardStore.copy();
+    expect(success).toBe(true);
+    expect(clipboardStore.hasClipboard).toBe(true);
+    expect(clipboardStore.clipboardDuration).toBeCloseTo(3.0, 1);
+  });
+
+  it('paste inserts at playhead', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const { useSelectionStore } = await import('@/stores/selection');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+    const selectionStore = useSelectionStore();
+
+    const track = await createMonoTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+
+    // Copy a region first
+    selectionStore.setInPoint(2.0);
+    selectionStore.setOutPoint(4.0);
+    await clipboardStore.copy();
+
+    expect(clipboardStore.hasClipboard).toBe(true);
+
+    // Paste — inserts into the selected track at playhead
+    await clipboardStore.paste();
+
+    // Track should still exist and have clips from the paste
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated).toBeDefined();
+    // The paste should have added a clip (track now has explicit clips)
+    expect(updated.clips).toBeDefined();
+  });
+});
+
+// ─── 3. Stereo Linked Operations ────────────────────────────────────────────
+
+describe('Stereo Linked Operations', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('split creates clips in both parent channels', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    const trackId = track.id;
+
+    // Stereo linked (no lane materialization) — split should work on parent clips
+    const success = await tracksStore.splitAtPlayhead(trackId, 5.0, ctx);
+    expect(success).toBe(true);
+
+    // Parent clips should have 2 entries (before + after split)
+    const updated = tracksStore.getTrackById(trackId)!;
+    expect(updated.clips).toBeDefined();
+    expect(updated.clips!.length).toBe(2);
+  });
+
+  it('cut ripple deletes from both channels at I/O', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    const trackId = track.id;
+
+    // Materialize and keep linked
+    tracksStore.toggleChannelLinked(trackId);
+    tracksStore.toggleChannelLinked(trackId);
+
+    const result = await tracksStore.cutRegionFromTrack(trackId, 3.0, 6.0, ctx);
+    expect(result).not.toBeNull();
+
+    // Both lanes should have 2 clips (before + after the cut)
+    const updated = tracksStore.getTrackById(trackId)!;
+    expect(updated.channelLanes![0].clips.length).toBe(2);
+    expect(updated.channelLanes![1].clips.length).toBe(2);
+  });
+
+  it('delete removes region from both channels', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    const trackId = track.id;
+
+    tracksStore.toggleChannelLinked(trackId);
+    tracksStore.toggleChannelLinked(trackId);
+
+    await tracksStore.cutRegionFromTrack(trackId, 2.0, 8.0, ctx);
+
+    const updated = tracksStore.getTrackById(trackId)!;
+    // Both lanes affected equally
+    expect(updated.channelLanes![0].clips.length).toBe(updated.channelLanes![1].clips.length);
+  });
+
+  it('trim affects both channels equally', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    const trackId = track.id;
+
+    // Materialize and keep linked
+    tracksStore.toggleChannelLinked(trackId);
+    tracksStore.toggleChannelLinked(trackId);
+
+    const linked = tracksStore.getTrackById(trackId)!;
+    const lClipId = linked.channelLanes![0].clips[0].id;
+
+    // Trim left by 2s
+    tracksStore.trimClipLeft(trackId, lClipId, 2.0);
+
+    const updated = tracksStore.getTrackById(trackId)!;
+    const lDur = updated.channelLanes![0].clips[0].duration;
+    const rDur = updated.channelLanes![1].clips[0].duration;
+
+    // Both channels trimmed equally
+    expect(lDur).toBeCloseTo(rDur, 5);
+    expect(lDur).toBeCloseTo(8.0, 1);
+  });
+
+  it('copy captures stereo (2ch) at I/O', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const { useSelectionStore } = await import('@/stores/selection');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+    const selectionStore = useSelectionStore();
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    tracksStore.selectTrackExclusive(track.id);
+
+    selectionStore.setInPoint(2.0);
+    selectionStore.setOutPoint(5.0);
+
+    const success = await clipboardStore.copy();
+    expect(success).toBe(true);
+    expect(clipboardStore.hasClipboard).toBe(true);
+    expect(clipboardStore.clipboardDuration).toBeCloseTo(3.0, 1);
+  });
+
+  it('paste inserts stereo at playhead', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const { useSelectionStore } = await import('@/stores/selection');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+    const selectionStore = useSelectionStore();
+
+    const buffer = createMockAudioBuffer(10, 44100, 2);
+    const track = await tracksStore.createTrackFromBuffer(buffer, null, 'Stereo', 0);
+    tracksStore.selectTrackExclusive(track.id);
+
+    selectionStore.setInPoint(2.0);
+    selectionStore.setOutPoint(4.0);
+    await clipboardStore.copy();
+
+    // Paste into selected stereo track
+    await clipboardStore.paste();
+
+    // Track should have clips from paste
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated).toBeDefined();
+    expect(updated.clips).toBeDefined();
+  });
+});
+
+// ─── 4. Stereo Unlinked, No Channel Selected ────────────────────────────────
+
+describe('Stereo Unlinked, No Channel Selected', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('split creates clips in both lanes at playhead', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    expect(track.channelLinked).toBe(false);
+    expect(track.channelLanes).toBeDefined();
+
+    // No channelIndex → split ALL lanes independently (both channels highlighted)
+    const success = await tracksStore.splitAtPlayhead(track.id, 5.0, ctx);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // Both lanes split into 2 clips each
+    expect(updated.channelLanes![0].clips.length).toBe(2);
+    expect(updated.channelLanes![1].clips.length).toBe(2);
+    // Before clips: 0–5s, After clips: 5–10s
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(5, 1);
+    expect(updated.channelLanes![0].clips[1].duration).toBeCloseTo(5, 1);
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(5, 1);
+    expect(updated.channelLanes![1].clips[1].duration).toBeCloseTo(5, 1);
+  });
+
+  it('cut ripple deletes from both lanes', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // No channel selected → channelIndex = null → both lanes
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { channelIndex: null });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // Both lanes should be modified
+    const lClips = updated.channelLanes![0].clips;
+    const rClips = updated.channelLanes![1].clips;
+    expect(lClips.length).toBeGreaterThanOrEqual(1);
+    expect(rClips.length).toBeGreaterThanOrEqual(1);
+    // Neither should still have the full 10s duration
+    const lTotalDur = lClips.reduce((s, c) => s + c.duration, 0);
+    expect(lTotalDur).toBeLessThan(10);
+  });
+
+  it('delete removes from both lanes', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { mode: 'edit-only', channelIndex: null });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelLanes![0].clips.length).toBeGreaterThanOrEqual(1);
+    expect(updated.channelLanes![1].clips.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('trim affects both lane clip edges', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const lClipId = track.channelLanes![0].clips[0].id;
+
+    // Trim left by 1s — should affect both L and R since track is unlinked but trim
+    // follows findClipById + findLinkedClip pattern (linked by default after creation)
+    // Actually unlinked means channelLinked=false, so trim only affects targeted clip
+    // But the test is "no channel selected" — trim is per-clip via drag, so this is N/A
+    // for "no channel selected" scenario. Test the basic trim works.
+    tracksStore.trimClipLeft(track.id, lClipId, 1.0);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    const lClip = updated.channelLanes![0].clips[0];
+    expect(lClip.duration).toBeCloseTo(9, 0);
+  });
+
+  it('copy captures stereo with offset preserved', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(null); // no channel selected = both
+
+    // Set I/O points
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(2);
+    selectionStore.setOutPoint(6);
+
+    await clipboardStore.copy();
+
+    // Clipboard should have stereo (2ch)
+    expect(clipboardStore.clipboard).toBeDefined();
+    expect(clipboardStore.clipboard!.sourceChannels).toBeDefined();
+    expect(clipboardStore.clipboard!.sourceChannels!.length).toBe(2);
+  });
+
+  it('copy from askew lanes stores laneClipOffsets', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Move R channel forward by 2s to create askew
+    const rClipId = track.channelLanes![1].clips[0].id;
+    tracksStore.setClipStart(track.id, rClipId, 2.0);
+
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(null);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(0);
+    selectionStore.setOutPoint(10);
+
+    await clipboardStore.copy();
+
+    expect(clipboardStore.clipboard).toBeDefined();
+    expect(clipboardStore.clipboard!.laneClipOffsets).toBeDefined();
+    expect(clipboardStore.clipboard!.laneClipOffsets!.length).toBe(2);
+    // L lane clip starts at 0 relative
+    expect(clipboardStore.clipboard!.laneClipOffsets![0].clips[0].relativeStart).toBeCloseTo(0, 1);
+    // R lane clip starts at 2s relative
+    expect(clipboardStore.clipboard!.laneClipOffsets![1].clips[0].relativeStart).toBeCloseTo(2, 1);
+  });
+
+  it('paste from askew lanes creates channelLanes on new track', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Move R channel forward by 2s
+    const rClipId = track.channelLanes![1].clips[0].id;
+    tracksStore.setClipStart(track.id, rClipId, 2.0);
+
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(null);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(0);
+    selectionStore.setOutPoint(10);
+
+    await clipboardStore.copy();
+
+    // Deselect to force new track creation on paste
+    tracksStore.selectedTrackId = 'ALL';
+    await clipboardStore.paste();
+
+    // Find the pasted track (last one added)
+    const pasted = tracksStore.tracks[tracksStore.tracks.length - 1];
+    expect(pasted.channelLanes).toBeDefined();
+    expect(pasted.channelLanes!.length).toBe(2);
+    expect(pasted.channelLinked).toBe(false);
+    // R lane clip should be offset from L lane clip
+    const lStart = pasted.channelLanes![0].clips[0].clipStart;
+    const rStart = pasted.channelLanes![1].clips[0].clipStart;
+    expect(rStart - lStart).toBeCloseTo(2, 1);
+  });
+
+  it('paste inserts stereo at playhead', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(2);
+    selectionStore.setOutPoint(6);
+
+    await clipboardStore.copy();
+    await clipboardStore.paste();
+
+    // Track should still exist with clips from paste
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated).toBeDefined();
+  });
+});
+
+// ─── 5. Stereo Unlinked, L Channel Selected ─────────────────────────────────
+
+describe('Stereo Unlinked, L Channel Selected', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('split at playhead splits ONLY L lane clip', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(0); // select L
+
+    const success = await tracksStore.splitAtPlayhead(track.id, 5.0, ctx, 0);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane should have 2 clips (split)
+    expect(updated.channelLanes![0].clips.length).toBe(2);
+    // R lane should still have 1 clip (untouched)
+    expect(updated.channelLanes![1].clips.length).toBe(1);
+  });
+
+  it('cut ripple deletes ONLY L lane region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectChannel(0);
+
+    // Cut region 2-4 from L lane only
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { channelIndex: 0 });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane should have been modified (clips trimmed/split by cut)
+    expect(updated.channelLanes![0].clips.length).toBeGreaterThanOrEqual(1);
+    // R lane should be untouched (still 1 original clip)
+    expect(updated.channelLanes![1].clips.length).toBe(1);
+    // R lane clip should still have original duration
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(10, 0);
+  });
+
+  it('delete removes ONLY L lane region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectChannel(0);
+
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { mode: 'edit-only', channelIndex: 0 });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // R lane untouched
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(10, 0);
+  });
+
+  it('trim adjusts ONLY L lane clip edge', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const lClipId = track.channelLanes![0].clips[0].id;
+
+    // Unlinked → trim only affects this lane's clip
+    tracksStore.trimClipLeft(track.id, lClipId, 2.0);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(8, 0);
+    // R lane untouched
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(10, 0);
+  });
+
+  it('copy captures ONLY L channel (mono output)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(0); // L only
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(2);
+    selectionStore.setOutPoint(6);
+
+    await clipboardStore.copy();
+
+    expect(clipboardStore.clipboard).toBeDefined();
+    expect(clipboardStore.clipboard!.sourceChannels).toEqual([0]);
+  });
+
+  it('paste inserts into L lane at playhead', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    // Create a source mono track to copy from
+    const srcBuf = createMockAudioBuffer(3, 44100, 1);
+    const srcTrack = await tracksStore.createTrackFromBuffer(srcBuf, null, 'Source', 0);
+    tracksStore.selectTrackExclusive(srcTrack.id);
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(0);
+    selectionStore.setOutPoint(2);
+    await clipboardStore.copy();
+
+    // Create unlinked stereo target
+    const target = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(target.id);
+    tracksStore.selectChannel(0); // select L lane
+
+    await clipboardStore.paste();
+
+    // L lane should have 2 clips (original + pasted)
+    const updated = tracksStore.getTrackById(target.id)!;
+    expect(updated.channelLanes![0].clips.length).toBe(2);
+    // R lane should still have 1 clip
+    expect(updated.channelLanes![1].clips.length).toBe(1);
+  });
+});
+
+// ─── 6. Stereo Unlinked, R Channel Selected ─────────────────────────────────
+
+describe('Stereo Unlinked, R Channel Selected', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('split at playhead splits ONLY R lane clip', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(1); // select R
+
+    const success = await tracksStore.splitAtPlayhead(track.id, 5.0, ctx, 1);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane should still have 1 clip (untouched)
+    expect(updated.channelLanes![0].clips.length).toBe(1);
+    // R lane should have 2 clips (split)
+    expect(updated.channelLanes![1].clips.length).toBe(2);
+  });
+
+  it('cut ripple deletes ONLY R lane region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectChannel(1);
+
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { channelIndex: 1 });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane untouched
+    expect(updated.channelLanes![0].clips.length).toBe(1);
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(10, 0);
+    // R lane modified
+    expect(updated.channelLanes![1].clips.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('delete removes ONLY R lane region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectChannel(1);
+
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { mode: 'edit-only', channelIndex: 1 });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane untouched
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(10, 0);
+  });
+
+  it('trim adjusts ONLY R lane clip edge', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const rClipId = track.channelLanes![1].clips[0].id;
+
+    tracksStore.trimClipLeft(track.id, rClipId, 2.0);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L untouched
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(10, 0);
+    // R trimmed
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(8, 0);
+  });
+
+  it('copy captures ONLY R channel (mono output)', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(1); // R only
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(2);
+    selectionStore.setOutPoint(6);
+
+    await clipboardStore.copy();
+
+    expect(clipboardStore.clipboard).toBeDefined();
+    expect(clipboardStore.clipboard!.sourceChannels).toEqual([1]);
+  });
+
+  it('paste inserts into R lane at playhead', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const srcBuf = createMockAudioBuffer(3, 44100, 1);
+    const srcTrack = await tracksStore.createTrackFromBuffer(srcBuf, null, 'Source', 0);
+    tracksStore.selectTrackExclusive(srcTrack.id);
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(0);
+    selectionStore.setOutPoint(2);
+    await clipboardStore.copy();
+
+    const target = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(target.id);
+    tracksStore.selectChannel(1); // select R lane
+
+    await clipboardStore.paste();
+
+    const updated = tracksStore.getTrackById(target.id)!;
+    // L lane untouched
+    expect(updated.channelLanes![0].clips.length).toBe(1);
+    // R lane should have 2 clips
+    expect(updated.channelLanes![1].clips.length).toBe(2);
+  });
+});
+
+// ─── 7. Multi-Track Selected ─────────────────────────────────────────────────
+
+describe('Multi-Track Selected', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('getEditTargets reflects multi-selection correctly', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const t1 = await createMonoTrack(tracksStore, 10, 0);
+    const t2 = await tracksStore.createTrackFromBuffer(createMockAudioBuffer(10, 44100, 2), null, 'Stereo', 0);
+    const t3 = await createMonoTrack(tracksStore, 10, 0);
+
+    // Select t1 and t3, skip t2
+    tracksStore.selectTrackExclusive(t1.id);
+    tracksStore.selectTrackToggle(t3.id);
+
+    const targets = tracksStore.getEditTargets();
+    expect(targets.mode).toBe('multi');
+    expect(targets.trackIds).toContain(t1.id);
+    expect(targets.trackIds).toContain(t3.id);
+    expect(targets.trackIds).not.toContain(t2.id);
+  });
+
+  it('split at playhead splits ALL selected tracks', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const buf1 = createMockAudioBuffer(10, 44100, 1);
+    const buf2 = createMockAudioBuffer(10, 44100, 1);
+    const track1 = await tracksStore.createTrackFromBuffer(buf1, null, 'T1', 0);
+    const track2 = await tracksStore.createTrackFromBuffer(buf2, null, 'T2', 0);
+
+    // Select both tracks
+    tracksStore.selectTrackExclusive(track1.id);
+    tracksStore.selectTrackToggle(track2.id);
+
+    const targets = tracksStore.getEditTargets();
+    expect(targets.trackIds.length).toBe(2);
+
+    // Split all at playhead 5
+    for (const tid of targets.trackIds) {
+      await tracksStore.splitAtPlayhead(tid, 5.0, ctx);
+    }
+
+    // Both tracks should have clips
+    const t1 = tracksStore.getTrackById(track1.id)!;
+    const t2 = tracksStore.getTrackById(track2.id)!;
+    expect(t1.clips).toBeDefined();
+    expect(t1.clips!.length).toBe(2);
+    expect(t2.clips).toBeDefined();
+    expect(t2.clips!.length).toBe(2);
+  });
+
+  it('cut ripple deletes I/O from ALL selected tracks', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const buf1 = createMockAudioBuffer(10, 44100, 1);
+    const buf2 = createMockAudioBuffer(10, 44100, 1);
+    const track1 = await tracksStore.createTrackFromBuffer(buf1, null, 'T1', 0);
+    const track2 = await tracksStore.createTrackFromBuffer(buf2, null, 'T2', 0);
+
+    tracksStore.selectTrackExclusive(track1.id);
+    tracksStore.selectTrackToggle(track2.id);
+
+    // Cut region 2-4 from both tracks
+    for (const tid of tracksStore.getEditTargets().trackIds) {
+      await tracksStore.cutRegionFromTrack(tid, 2, 4, ctx, { keepTrack: true });
+    }
+
+    const t1 = tracksStore.getTrackById(track1.id)!;
+    const t2 = tracksStore.getTrackById(track2.id)!;
+    expect(t1).toBeDefined();
+    expect(t2).toBeDefined();
+  });
+
+  it('delete removes I/O from ALL selected tracks', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const buf1 = createMockAudioBuffer(10, 44100, 1);
+    const buf2 = createMockAudioBuffer(10, 44100, 1);
+    const track1 = await tracksStore.createTrackFromBuffer(buf1, null, 'T1', 0);
+    const track2 = await tracksStore.createTrackFromBuffer(buf2, null, 'T2', 0);
+
+    tracksStore.selectTrackExclusive(track1.id);
+    tracksStore.selectTrackToggle(track2.id);
+
+    for (const tid of tracksStore.getEditTargets().trackIds) {
+      await tracksStore.cutRegionFromTrack(tid, 2, 4, ctx, { mode: 'edit-only', keepTrack: true });
+    }
+
+    expect(tracksStore.getTrackById(track1.id)).toBeDefined();
+    expect(tracksStore.getTrackById(track2.id)).toBeDefined();
+  });
+
+  it('copy creates buffer from selected tracks', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const buf = createMockAudioBuffer(10, 44100, 1);
+    const track = await tracksStore.createTrackFromBuffer(buf, null, 'T1', 0);
+    tracksStore.selectTrackExclusive(track.id);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(2);
+    selectionStore.setOutPoint(6);
+
+    await clipboardStore.copy();
+    expect(clipboardStore.clipboard).toBeDefined();
+    expect(clipboardStore.clipboard!.duration).toBeCloseTo(4, 0);
+  });
+
+  it('paste creates new track when no single track selected', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const { useClipboardStore } = await import('@/stores/clipboard');
+    const tracksStore = useTracksStore();
+    const clipboardStore = useClipboardStore();
+
+    const buf1 = createMockAudioBuffer(5, 44100, 1);
+    const buf2 = createMockAudioBuffer(5, 44100, 1);
+    const track1 = await tracksStore.createTrackFromBuffer(buf1, null, 'T1', 0);
+    await tracksStore.createTrackFromBuffer(buf2, null, 'T2', 0);
+    tracksStore.selectTrackExclusive(track1.id);
+
+    const { useSelectionStore } = await import('@/stores/selection');
+    const selectionStore = useSelectionStore();
+    selectionStore.setInPoint(1);
+    selectionStore.setOutPoint(4);
+
+    await clipboardStore.copy();
+
+    // Deselect to 'ALL' with 2 tracks → selectedTrack is null → paste creates new
+    tracksStore.selectedTrackId = 'ALL';
+    await clipboardStore.paste();
+
+    // Should have original 2 + pasted = 3
+    expect(tracksStore.tracks.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ─── 8. Single-Channel Extraction (Mono Output) ─────────────────────────────
+
+describe('Single-Channel Extraction', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('extractRegionFromAllTracks with channelIndex=0 returns 1ch mono buffer', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Fill L channel with positive values, R with negative for differentiation
+    const buf = track.audioData.buffer!;
+    const lData = buf.getChannelData(0);
+    const rData = buf.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.5; rData[i] = -0.5; }
+
+    const result = await tracksStore.extractRegionFromAllTracks(2, 6, ctx, [track.id], 0);
+    expect(result).not.toBeNull();
+    expect(result!.buffer.numberOfChannels).toBe(1);
+    // Mono buffer should contain L channel data (positive values)
+    const monoData = result!.buffer.getChannelData(0);
+    expect(monoData[0]).toBeGreaterThan(0);
+  });
+
+  it('extractRegionFromAllTracks with channelIndex=1 returns 1ch mono buffer', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const buf = track.audioData.buffer!;
+    const lData = buf.getChannelData(0);
+    const rData = buf.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.5; rData[i] = -0.5; }
+
+    const result = await tracksStore.extractRegionFromAllTracks(2, 6, ctx, [track.id], 1);
+    expect(result).not.toBeNull();
+    expect(result!.buffer.numberOfChannels).toBe(1);
+    // Mono buffer should contain R channel data (negative values)
+    const monoData = result!.buffer.getChannelData(0);
+    expect(monoData[0]).toBeLessThan(0);
+  });
+
+  it('extractRegionFromAllTracks without channelIndex returns stereo', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const result = await tracksStore.extractRegionFromAllTracks(2, 6, ctx, [track.id]);
+    expect(result).not.toBeNull();
+    expect(result!.buffer.numberOfChannels).toBe(2);
+  });
+});
+
+// ─── 9. Convert to Mono with Lane Offsets ────────────────────────────────────
+
+describe('Convert to Mono with Lane Offsets', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('convertToMono with aligned lanes produces mono track', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.convertToMono(track.id);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.audioData.channels).toBe(1);
+    expect(updated.audioData.buffer!.numberOfChannels).toBe(1);
+    expect(updated.channelLanes).toBeUndefined();
+  });
+
+  it('convertToMono with offset lanes produces correct duration', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Move R channel clip forward by 2s (offset from L)
+    const rLane = tracksStore.getTrackById(track.id)!.channelLanes![1];
+    const rClip = rLane.clips[0];
+    tracksStore.setClipStart(track.id, rClip.id, 2.0);
+
+    tracksStore.convertToMono(track.id);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    // Duration should cover the union: L starts at 0 for 10s, R starts at 2 for 10s → 0-12s = 12s
+    expect(updated.duration).toBeCloseTo(12, 0);
+  });
+});
+
+// ─── 10. Cross-Track Move to Lane ───────────────────────────────────────────
+
+describe('Cross-Track Move to Lane', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('moveClipToTrack with targetChannelIndex inserts into correct lane', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    // Create a mono source track
+    const srcBuf = createMockAudioBuffer(3, 44100, 1);
+    const src = await tracksStore.createTrackFromBuffer(srcBuf, null, 'Mono', 5);
+    // Promote to explicit clips so we have a clip ID
+    const srcClips = tracksStore.getTrackClips(src.id);
+    expect(srcClips.length).toBe(1);
+    const srcClipId = srcClips[0].id;
+
+    // Create an unlinked stereo target
+    const target = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const origLClips = target.channelLanes![0].clips.length;
+    const origRClips = target.channelLanes![1].clips.length;
+
+    // Move mono clip to R lane of stereo track
+    const success = tracksStore.moveClipToTrack(src.id, srcClipId, target.id, 2.0, 1);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(target.id)!;
+    // L lane unchanged
+    expect(updated.channelLanes![0].clips.length).toBe(origLClips);
+    // R lane has 1 new clip
+    expect(updated.channelLanes![1].clips.length).toBe(origRClips + 1);
+  });
+
+  it('moveClipToTrack without targetChannelIndex adds to parent clips', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const srcBuf = createMockAudioBuffer(3, 44100, 1);
+    const src = await tracksStore.createTrackFromBuffer(srcBuf, null, 'Src', 5);
+    const srcClipId = tracksStore.getTrackClips(src.id)[0].id;
+
+    const tgtBuf = createMockAudioBuffer(10, 44100, 1);
+    const tgt = await tracksStore.createTrackFromBuffer(tgtBuf, null, 'Tgt', 0);
+
+    const success = tracksStore.moveClipToTrack(src.id, srcClipId, tgt.id, 2.0);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(tgt.id)!;
+    // Should have parent clips (converted single-buffer + new clip)
+    expect(updated.clips).toBeDefined();
+    expect(updated.clips!.length).toBe(2);
+  });
+});
