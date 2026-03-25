@@ -125,6 +125,53 @@ export interface SystemAudioInfo {
   cpal_monitor_device: string | null;
 }
 
+// ── Waveform Ring Buffer (zero-allocation, zero-copy) ──
+
+export interface WaveformSample {
+  peak: number;
+  channelPeaks: Float32Array;
+  time: number;
+}
+
+export class WaveformRingBuffer {
+  readonly buffer: WaveformSample[];
+  head = 0;
+  count = 0;
+  version = 0;
+  private readonly channels: number;
+
+  constructor(readonly capacity = 600, channels = 1) {
+    this.channels = channels;
+    this.buffer = Array.from({ length: capacity }, () => ({
+      peak: 0,
+      channelPeaks: new Float32Array(channels),
+      time: 0,
+    }));
+  }
+
+  push(peak: number, time: number, channelPeaks?: number[]) {
+    const slot = this.buffer[this.head];
+    slot.peak = peak;
+    slot.time = time;
+    if (channelPeaks) {
+      for (let i = 0; i < this.channels && i < channelPeaks.length; i++) {
+        slot.channelPeaks[i] = channelPeaks[i];
+      }
+    } else {
+      slot.channelPeaks[0] = peak;
+    }
+    this.head = (this.head + 1) % this.capacity;
+    if (this.count < this.capacity) this.count++;
+    this.version++;
+  }
+
+  getView() {
+    return { buffer: this.buffer, head: this.head, count: this.count, version: this.version };
+  }
+
+  clear() { this.head = 0; this.count = 0; this.version++; }
+}
+
 export const useRecordingStore = defineStore('recording', () => {
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
@@ -133,6 +180,7 @@ export const useRecordingStore = defineStore('recording', () => {
   const isRecording = ref(false);
   const isPreparing = ref(false);
   const isMonitoring = ref(false);
+  const isFinalizing = ref(false);
   const currentLevel = ref(0);
   const recordingDuration = ref(0);
   const recordingPath = ref<string | null>(null);
@@ -157,6 +205,33 @@ export const useRecordingStore = defineStore('recording', () => {
   const activeSessions = computed(() =>
     sessions.value.filter(s => s.active)
   );
+
+  /** Monitor view is active when recording or finalizing (ephemeral UI mode) */
+  const monitorViewActive = computed(() =>
+    isRecording.value || sessions.value.some(s => s.active) || isFinalizing.value
+  );
+
+  // ── Waveform history ring buffers (per-session, ephemeral) ──
+  const waveformHistories = new Map<string, WaveformRingBuffer>();
+
+  function getOrCreateWaveformHistory(sessionId: string, channels = 1): WaveformRingBuffer {
+    let buf = waveformHistories.get(sessionId);
+    if (!buf) {
+      buf = new WaveformRingBuffer(600, channels);
+      waveformHistories.set(sessionId, buf);
+    }
+    return buf;
+  }
+
+  function getWaveformView(sessionId: string) {
+    const buf = waveformHistories.get(sessionId);
+    if (!buf) return null;
+    return buf.getView();
+  }
+
+  function clearWaveformHistory(sessionId: string) {
+    waveformHistories.delete(sessionId);
+  }
 
   // Timemark state
   const timemarks = ref<TimeMark[]>([]);
@@ -506,13 +581,15 @@ export const useRecordingStore = defineStore('recording', () => {
       };
       sessions.value = [session];
 
-      // Start polling level (100ms = 10Hz, sufficient for visual meter)
+      // Start polling level (100ms = 10Hz, sufficient for visual meter + waveform history)
       levelPollInterval = window.setInterval(async () => {
         try {
           currentLevel.value = await invoke<number>('get_recording_level');
-          // Sync session level
+          // Sync session level + push to waveform history
           if (sessions.value.length > 0) {
             sessions.value[0].level = currentLevel.value;
+            const buf = getOrCreateWaveformHistory(sessions.value[0].sessionId);
+            buf.push(currentLevel.value, recordingDuration.value);
           }
         } catch (e) {
           // Ignore polling errors
@@ -593,19 +670,32 @@ export const useRecordingStore = defineStore('recording', () => {
       isRecording.value = false;
       isLocked.value = false;
       currentLevel.value = 0;
-      sessions.value = [];
+      // Keep sessions visible during finalization (monitor mode stays active)
+      for (const s of sessions.value) s.active = false;
+      isFinalizing.value = true;
 
       console.log(`[Recording] Stopped: path=${result.path}, duration=${result.duration?.toFixed(1)}s, rate=${result.sample_rate}, ch=${result.channels}, extra_segments=${result.extra_segments?.length ?? 0}`);
 
       // Brief delay to let OS flush file writes
       await new Promise(r => setTimeout(r, 200));
 
-      // Create track(s) from the recorded audio (fire-and-forget so dialog closes immediately)
+      // Create track(s) from the recorded audio, then exit monitor mode
       if (result.path) {
-        createTrackFromRecording(result).catch(e => {
+        createTrackFromRecording(result).then(() => {
+          // Cleanup: clear sessions + waveform histories after import completes
+          for (const s of sessions.value) clearWaveformHistory(s.sessionId);
+          sessions.value = [];
+          isFinalizing.value = false;
+        }).catch(e => {
           console.error('[Recording] Background import failed:', e);
           error.value = e instanceof Error ? e.message : String(e);
+          for (const s of sessions.value) clearWaveformHistory(s.sessionId);
+          sessions.value = [];
+          isFinalizing.value = false;
         });
+      } else {
+        sessions.value = [];
+        isFinalizing.value = false;
       }
 
       return result;
@@ -614,6 +704,7 @@ export const useRecordingStore = defineStore('recording', () => {
       error.value = e instanceof Error ? e.message : String(e);
       isRecording.value = false;
       isLocked.value = false;
+      isFinalizing.value = false;
       return null;
     }
   }
@@ -886,13 +977,17 @@ export const useRecordingStore = defineStore('recording', () => {
         duration: 0,
       }));
 
-      // Poll per-session levels
+      // Poll per-session levels + push to waveform history
       levelPollInterval = window.setInterval(async () => {
         try {
           const levels = await invoke<SessionLevel[]>('get_session_levels');
           for (const sl of levels) {
             const session = sessions.value.find(s => s.sessionId === sl.session_id);
-            if (session) session.level = sl.level;
+            if (session) {
+              session.level = sl.level;
+              const buf = getOrCreateWaveformHistory(session.sessionId);
+              buf.push(sl.level, recordingDuration.value);
+            }
           }
           // Update shared level to max of all sessions
           currentLevel.value = levels.length > 0
@@ -1321,6 +1416,8 @@ export const useRecordingStore = defineStore('recording', () => {
     isRecording,
     isPreparing,
     isMonitoring,
+    isFinalizing,
+    monitorViewActive,
     currentLevel,
     recordingDuration,
     recordingPath,
@@ -1400,6 +1497,10 @@ export const useRecordingStore = defineStore('recording', () => {
     cancelSchedule,
     extendSchedule,
     removeScheduleEndTime,
+    // Waveform history (monitor mode)
+    getWaveformView,
+    getOrCreateWaveformHistory,
+    clearWaveformHistory,
     // Crash recovery
     orphanedRecordings,
     scanOrphanedRecordings,
