@@ -3368,7 +3368,10 @@ export const useTracksStore = defineStore('tracks', () => {
     useHistoryStore().pushState(keepChannelIndex === 0 ? 'Replace with L channel' : 'Replace with R channel');
 
     const src = track.audioData.buffer;
-    const ctx = new (globalThis as unknown as { AudioContext: typeof AudioContext }).AudioContext();
+    // Use OfflineAudioContext (no user gesture needed) with AudioContext fallback for tests
+    const ctx = typeof OfflineAudioContext !== 'undefined'
+      ? new OfflineAudioContext(2, 1, 44100)
+      : new AudioContext();
     const newBuffer = ctx.createBuffer(2, src.length, src.sampleRate);
     const keptData = src.getChannelData(keepChannelIndex);
     newBuffer.getChannelData(0).set(keptData);
@@ -3438,7 +3441,10 @@ export const useTracksStore = defineStore('tracks', () => {
     useHistoryStore().pushState('Convert to stereo');
 
     const src = track.audioData.buffer;
-    const ctx = new (globalThis as unknown as { AudioContext: typeof AudioContext }).AudioContext();
+    // Use OfflineAudioContext (no user gesture needed) with AudioContext fallback for tests
+    const ctx = typeof OfflineAudioContext !== 'undefined'
+      ? new OfflineAudioContext(2, 1, 44100)
+      : new AudioContext();
     const newBuffer = ctx.createBuffer(2, src.length, src.sampleRate);
     const monoData = src.getChannelData(0);
     newBuffer.getChannelData(0).set(monoData);
