@@ -97,16 +97,26 @@ const DRAG_THRESHOLD = 5;
 // Rename state
 const isEditing = ref(false);
 const showTrackMenu = ref(false);
-const menuOpenUpward = ref(false);
+const menuPosition = ref({ top: 0, left: 0, openUp: false });
+
+const menuStyle = computed(() => {
+  const p = menuPosition.value;
+  if (p.openUp) {
+    return { left: `${p.left}px`, bottom: `${globalThis.innerHeight - p.top + 4}px` };
+  }
+  return { left: `${p.left}px`, top: `${p.top}px` };
+});
 
 function toggleTrackMenu(event?: MouseEvent) {
   showTrackMenu.value = !showTrackMenu.value;
-  if (showTrackMenu.value) {
-    // Detect if menu should open upward (bottom half of viewport)
-    if (event) {
-      const rect = (event.target as HTMLElement).getBoundingClientRect();
-      menuOpenUpward.value = rect.bottom > window.innerHeight * 0.6;
-    }
+  if (showTrackMenu.value && event) {
+    const rect = (event.target as HTMLElement).getBoundingClientRect();
+    const openUp = rect.bottom > window.innerHeight * 0.6;
+    menuPosition.value = {
+      top: openUp ? rect.top : rect.bottom + 4,
+      left: rect.left,
+      openUp,
+    };
     // Close on click outside
     const close = () => {
       showTrackMenu.value = false;
@@ -770,46 +780,7 @@ onUnmounted(() => {
             >LARGE</span>
           </div>
 
-          <!-- Track dropdown menu -->
-          <div
-            v-if="showTrackMenu"
-            :class="[
-              'absolute left-0 z-50 w-48 bg-gray-800 border border-gray-600 rounded-md shadow-lg py-1 text-xs',
-              menuOpenUpward ? 'bottom-full mb-1' : 'top-full mt-1',
-            ]"
-            @mousedown.stop
-          >
-            <!-- Channel conversion -->
-            <template v-if="isStereoView">
-              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-l')">
-                Keep L channel only
-              </button>
-              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
-                Keep R channel only
-              </button>
-              <div class="border-t border-gray-700 my-1" />
-              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">
-                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
-                  <path v-if="isChannelLinked" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                  <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
-                </svg>
-                {{ isChannelLinked ? 'Unlink channels' : 'Link channels' }}
-              </button>
-              <div class="border-t border-gray-700 my-1" />
-            </template>
-            <template v-else-if="!isStereoView && (track.audioData.channels ?? 1) === 1">
-              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-stereo')">
-                Convert to Stereo
-              </button>
-              <div class="border-t border-gray-700 my-1" />
-            </template>
-            <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('rename')">
-              Rename
-            </button>
-            <button class="w-full text-left px-3 py-1.5 text-red-400 hover:bg-red-900/40 hover:text-red-300" @click="handleMenuAction('delete')">
-              Delete Track
-            </button>
-          </div>
+          <!-- Track dropdown menu (teleported to body to escape overflow-hidden) -->
         </div>
 
         <!-- Quick buttons: M, S, E -->
@@ -1107,6 +1078,47 @@ onUnmounted(() => {
         @click="(time) => playbackStore.seek(time)"
       />
     </div>
+
+    <!-- Track dropdown menu (teleported to body to escape overflow-hidden) -->
+    <Teleport to="body">
+      <div
+        v-if="showTrackMenu"
+        class="fixed z-[9999] w-48 bg-gray-800 border border-gray-600 rounded-md shadow-xl py-1 text-xs"
+        :style="menuStyle"
+        @mousedown.stop
+      >
+        <!-- Channel conversion -->
+        <template v-if="isStereoView">
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-l')">
+            Keep L channel only
+          </button>
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
+            Keep R channel only
+          </button>
+          <div class="border-t border-gray-700 my-1" />
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">
+            <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
+              <path v-if="isChannelLinked" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
+            </svg>
+            {{ isChannelLinked ? 'Unlink channels' : 'Link channels' }}
+          </button>
+          <div class="border-t border-gray-700 my-1" />
+        </template>
+        <template v-else-if="!isStereoView && (track.audioData.channels ?? 1) === 1">
+          <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-stereo')">
+            Convert to Stereo
+          </button>
+          <div class="border-t border-gray-700 my-1" />
+        </template>
+        <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('rename')">
+          Rename
+        </button>
+        <button class="w-full text-left px-3 py-1.5 text-red-400 hover:bg-red-900/40 hover:text-red-300" @click="handleMenuAction('delete')">
+          Delete Track
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
