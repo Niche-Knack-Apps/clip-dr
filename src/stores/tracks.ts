@@ -3370,7 +3370,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const src = track.audioData.buffer;
     // Use OfflineAudioContext (no user gesture needed) with AudioContext fallback for tests
     const ctx = typeof OfflineAudioContext !== 'undefined'
-      ? new OfflineAudioContext(2, 1, 44100)
+      ? new OfflineAudioContext(2, Math.max(1, src.length), src.sampleRate)
       : new AudioContext();
     const newBuffer = ctx.createBuffer(2, src.length, src.sampleRate);
     const keptData = src.getChannelData(keepChannelIndex);
@@ -3417,6 +3417,7 @@ export const useTracksStore = defineStore('tracks', () => {
       });
     }
 
+    console.warn(`[Tracks] replaceWithChannel: newBuffer=${newBuffer.numberOfChannels}ch ${newBuffer.length}samples, waveform=${waveform.length}pts, clips=${newClips?.length ?? 'none'}`);
     tracks.value[idx] = {
       ...tracks.value[idx],
       audioData: { ...track.audioData, buffer: newBuffer, waveformData: waveform },
@@ -3443,7 +3444,7 @@ export const useTracksStore = defineStore('tracks', () => {
     const src = track.audioData.buffer;
     // Use OfflineAudioContext (no user gesture needed) with AudioContext fallback for tests
     const ctx = typeof OfflineAudioContext !== 'undefined'
-      ? new OfflineAudioContext(2, 1, 44100)
+      ? new OfflineAudioContext(2, Math.max(1, src.length), src.sampleRate)
       : new AudioContext();
     const newBuffer = ctx.createBuffer(2, src.length, src.sampleRate);
     const monoData = src.getChannelData(0);
