@@ -44,17 +44,14 @@ export function useClipping() {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Create clip');
     try {
-      // Scope extraction to audible tracks (respects solo/mute like playback/export).
-      // When solo is active, extract only from solo'd tracks.
-      // When no solo, extract from selected track (or all if 'ALL'/null).
+      // Scope extraction via getEditTargets (respects multi-selection + solo).
       const hasSolo = tracksStore.tracks.some(t => t.solo);
       let sourceTrackIds: string[] | undefined;
       if (hasSolo) {
-        // Solo active: extract from solo'd tracks only (matches playback behavior)
         sourceTrackIds = tracksStore.tracks.filter(t => t.solo).map(t => t.id);
       } else {
-        const selectedId = tracksStore.selectedTrackId;
-        sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+        const targets = tracksStore.getEditTargets();
+        sourceTrackIds = targets.mode === 'all' ? undefined : targets.trackIds;
       }
 
       // Detect large files (same check as clipboard.cut)

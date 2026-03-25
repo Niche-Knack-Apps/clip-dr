@@ -647,9 +647,44 @@ describe('Stereo Unlinked, L Channel Selected', () => {
     setActivePinia(createPinia());
   });
 
-  it.todo('split at playhead splits ONLY L lane clip — requires channel-aware splitAtPlayhead');
+  it('split at playhead splits ONLY L lane clip', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
 
-  it.todo('cut ripple deletes ONLY L lane region — requires channel-aware cutRegionFromTrack');
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(0); // select L
+
+    const success = await tracksStore.splitAtPlayhead(track.id, 5.0, ctx, 0);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane should have 2 clips (split)
+    expect(updated.channelLanes![0].clips.length).toBe(2);
+    // R lane should still have 1 clip (untouched)
+    expect(updated.channelLanes![1].clips.length).toBe(1);
+  });
+
+  it('cut ripple deletes ONLY L lane region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectChannel(0);
+
+    // Cut region 2-4 from L lane only
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { channelIndex: 0 });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane should have been modified (clips trimmed/split by cut)
+    expect(updated.channelLanes![0].clips.length).toBeGreaterThanOrEqual(1);
+    // R lane should be untouched (still 1 original clip)
+    expect(updated.channelLanes![1].clips.length).toBe(1);
+    // R lane clip should still have original duration
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(10, 0);
+  });
 
   it.todo('delete removes ONLY L lane region — requires channel-aware deleteClipFromTrack');
 
@@ -667,9 +702,42 @@ describe('Stereo Unlinked, R Channel Selected', () => {
     setActivePinia(createPinia());
   });
 
-  it.todo('split at playhead splits ONLY R lane clip — requires channel-aware splitAtPlayhead');
+  it('split at playhead splits ONLY R lane clip', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
 
-  it.todo('cut ripple deletes ONLY R lane region — requires channel-aware cutRegionFromTrack');
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectTrackExclusive(track.id);
+    tracksStore.selectChannel(1); // select R
+
+    const success = await tracksStore.splitAtPlayhead(track.id, 5.0, ctx, 1);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane should still have 1 clip (untouched)
+    expect(updated.channelLanes![0].clips.length).toBe(1);
+    // R lane should have 2 clips (split)
+    expect(updated.channelLanes![1].clips.length).toBe(2);
+  });
+
+  it('cut ripple deletes ONLY R lane region', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.selectChannel(1);
+
+    await tracksStore.cutRegionFromTrack(track.id, 2, 4, ctx, { channelIndex: 1 });
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    // L lane untouched
+    expect(updated.channelLanes![0].clips.length).toBe(1);
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(10, 0);
+    // R lane modified
+    expect(updated.channelLanes![1].clips.length).toBeGreaterThanOrEqual(1);
+  });
 
   it.todo('delete removes ONLY R lane region — requires channel-aware deleteClipFromTrack');
 

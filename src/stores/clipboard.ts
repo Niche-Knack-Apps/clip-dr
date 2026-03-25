@@ -163,15 +163,15 @@ export const useClipboardStore = defineStore('clipboard', () => {
       return false;
     }
 
-    // Determine which channels to copy — lane-aware
-    const selectedLane = tracksStore.getSelectedLane();
+    // Determine which channels to copy — use getEditTargets for channel awareness
+    const targets = tracksStore.getEditTargets();
     const selectedTrack = tracksStore.selectedTrack;
     let channelsToCopy: number[];
-    if (selectedLane && selectedTrack?.channelLinked === false) {
-      // Unlinked + specific lane clip focused → copy only that channel
-      channelsToCopy = [selectedLane.channelIndex];
+    if (targets.channelIndex != null && selectedTrack?.channelLinked === false) {
+      // Specific channel selected on unlinked track → copy only that channel
+      channelsToCopy = [targets.channelIndex];
     } else {
-      // Linked, no lane focused, or mono track → copy all channels
+      // All channels (linked, no channel selected, or mono)
       channelsToCopy = Array.from({ length: buffer.numberOfChannels }, (_, i) => i);
     }
 
@@ -398,7 +398,12 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
 
       // Ripple delete — ALWAYS edit-only (no extraction)
-      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, { mode: 'edit-only' });
+      // Pass channelIndex from getEditTargets so channel-specific cuts work
+      const editTargets = tracksStore.getEditTargets();
+      const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, {
+        mode: 'edit-only',
+        channelIndex: editTargets.channelIndex,
+      });
 
       if (results.affectedCount > 0) {
         // Store clipboard with both buffer (if available) and segment metadata (always)
@@ -646,7 +651,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
         const trackEnd = track.trackStart + track.duration;
         if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx, { mode: 'edit-only' });
+        const editTargets = tracksStore.getEditTargets();
+        const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx, {
+          mode: 'edit-only',
+          channelIndex: editTargets.channelIndex,
+        });
         if (result) cutCount++;
       }
 

@@ -279,10 +279,12 @@ useKeyboardShortcuts({
   onJumpLayerEnd: () => playbackStore.jumpToLayerEnd(),
   // Split & trim
   onSplit: async () => {
-    const trackId = tracksStore.selectedTrackId;
-    if (!trackId || trackId === 'ALL') return;
+    const targets = tracksStore.getEditTargets();
+    if (targets.mode === 'all') return; // Split needs explicit selection
     const ctx = audioStore.getAudioContext();
-    await tracksStore.splitAtPlayhead(trackId, playbackStore.currentTime, ctx);
+    for (const trackId of targets.trackIds) {
+      await tracksStore.splitAtPlayhead(trackId, playbackStore.currentTime, ctx, targets.channelIndex);
+    }
   },
   onTrimStart: async () => {
     const trackId = tracksStore.selectedTrackId;

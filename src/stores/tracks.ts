@@ -21,6 +21,8 @@ export type CutMode = 'edit-only' | 'extract-for-clipboard';
 export interface CutOptions {
   keepTrack?: boolean;
   mode?: CutMode;  // default: 'edit-only' — safe default, callers opt-in to extraction
+  /** When set, only operate on the specified channel lane (0=L, 1=R). null/undefined = all. */
+  channelIndex?: number | null;
 }
 
 export const useTracksStore = defineStore('tracks', () => {
@@ -947,10 +949,13 @@ export const useTracksStore = defineStore('tracks', () => {
     const { keepTrack = false } = opts;
 
     // ── Lane-aware path: when channel lanes are materialized, cut from each lane ──
+    const cutChannelIndex = opts.channelIndex;
     if (track.channelLanes && track.channelLanes.length > 0) {
       let anyChanged = false;
       for (const lane of track.channelLanes) {
         if (lane.clips.length === 0) continue;
+        // When channelIndex specified, only process that lane
+        if (cutChannelIndex != null && lane.channelIndex !== cutChannelIndex) continue;
         const newLaneClips: TrackClip[] = [];
         for (const clip of lane.clips) {
           const clipEnd = clip.clipStart + clip.duration;
@@ -2505,8 +2510,17 @@ export const useTracksStore = defineStore('tracks', () => {
     const track = getTrackById(trackId);
     if (!track) return null;
 
-    const clips = getTrackClips(trackId);
-    const clip = clips.find(c => c.id === clipId);
+    // Search lane clips first (they have priority after materialization), then parent clips,
+    // then synthetic clips (for single-buffer tracks with no explicit clips array)
+    let clip: TrackClip | undefined;
+    const found = findClipById(trackId, clipId);
+    if (found) {
+      clip = found.clip;
+    } else {
+      // Fallback: check getTrackClips which synthesizes clips for single-buffer tracks
+      const syntheticClips = getTrackClips(trackId);
+      clip = syntheticClips.find(c => c.id === clipId);
+    }
     if (!clip) return null;
 
     const clipEnd = clip.clipStart + clip.duration;
@@ -2606,7 +2620,8 @@ export const useTracksStore = defineStore('tracks', () => {
   async function splitAtPlayhead(
     trackId: string,
     playheadTime: number,
-    audioContext: AudioContext
+    audioContext: AudioContext,
+    channelIndex?: number | null,
   ): Promise<boolean> {
     let track = getTrackById(trackId);
     if (!track) return false;
@@ -2620,6 +2635,8 @@ export const useTracksStore = defineStore('tracks', () => {
 
     if (track.channelLanes) {
       for (const lane of track.channelLanes) {
+        // When channelIndex is specified, only search that specific lane
+        if (channelIndex != null && lane.channelIndex !== channelIndex) continue;
         clip = lane.clips.find(c => playheadTime > c.clipStart + 0.001 && playheadTime < c.clipStart + c.duration - 0.001);
         if (clip) { targetLane = lane; break; }
       }
@@ -2639,8 +2656,8 @@ export const useTracksStore = defineStore('tracks', () => {
     if (targetLane) {
       // Split within a lane
       targetLane.clips = targetLane.clips.map(c => c.id === clip!.id ? [result.before, result.after] : [c]).flat();
-      // Linked: also split paired clip in other lane
-      if (currentTrack.channelLinked !== false && currentTrack.channelLanes) {
+      // Linked: also split paired clip in other lane (skip when specific channel selected)
+      if (channelIndex == null && currentTrack.channelLinked !== false && currentTrack.channelLanes) {
         const linked = findLinkedClip(currentTrack, clip, targetLane);
         if (linked) {
           const linkedResult = await splitClipAtTime(trackId, linked.clip.id, playheadTime, audioContext);
