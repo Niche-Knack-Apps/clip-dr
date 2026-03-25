@@ -96,6 +96,31 @@ const DRAG_THRESHOLD = 5;
 
 // Rename state
 const isEditing = ref(false);
+const showTrackMenu = ref(false);
+
+function toggleTrackMenu() {
+  showTrackMenu.value = !showTrackMenu.value;
+  if (showTrackMenu.value) {
+    // Close on click outside
+    const close = (e: MouseEvent) => {
+      showTrackMenu.value = false;
+      document.removeEventListener('mousedown', close);
+    };
+    setTimeout(() => document.addEventListener('mousedown', close), 0);
+  }
+}
+
+function handleMenuAction(action: string) {
+  showTrackMenu.value = false;
+  switch (action) {
+    case 'keep-l': tracksStore.replaceWithChannel(props.track.id, 0); break;
+    case 'keep-r': tracksStore.replaceWithChannel(props.track.id, 1); break;
+    case 'to-stereo': tracksStore.convertToStereo(props.track.id); break;
+    case 'link': tracksStore.toggleChannelLinked(props.track.id); break;
+    case 'rename': startEditing(); break;
+    case 'delete': emit('delete', props.track.id); break;
+  }
+}
 const editName = ref('');
 const inputRef = ref<HTMLInputElement | null>(null);
 
@@ -698,7 +723,7 @@ onUnmounted(() => {
           :style="{ backgroundColor: track.color }"
         />
 
-        <div class="flex-1 min-w-0">
+        <div class="flex-1 min-w-0 relative">
           <!-- Editable name -->
           <input
             v-if="isEditing"
@@ -712,11 +737,23 @@ onUnmounted(() => {
           />
           <div
             v-else
-            class="text-xs font-medium text-gray-200 truncate cursor-text"
-            title="Double-click to rename"
-            @dblclick.stop="startEditing"
+            class="flex items-center gap-0.5"
           >
-            {{ track.name }}
+            <span
+              class="text-xs font-medium text-gray-200 truncate cursor-text"
+              title="Double-click to rename"
+              @dblclick.stop="startEditing"
+            >{{ track.name }}</span>
+            <!-- Track dropdown menu trigger -->
+            <button
+              type="button"
+              class="w-4 h-4 flex items-center justify-center rounded text-gray-500 hover:text-gray-200 hover:bg-gray-600 transition-colors shrink-0"
+              title="Track options"
+              @click.stop="toggleTrackMenu"
+              @mousedown.stop
+            >
+              <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+            </button>
           </div>
           <div class="text-[10px] text-gray-500">
             {{ formattedDuration }}
@@ -726,40 +763,48 @@ onUnmounted(() => {
               title="Large file — playback, waveform, and transcription available. Export requires EDL engine (coming soon)."
             >LARGE</span>
           </div>
+
+          <!-- Track dropdown menu -->
+          <div
+            v-if="showTrackMenu"
+            class="absolute top-full left-0 mt-1 z-50 w-48 bg-gray-800 border border-gray-600 rounded-md shadow-lg py-1 text-xs"
+            @mousedown.stop
+          >
+            <!-- Channel conversion -->
+            <template v-if="isStereoView">
+              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-l')">
+                Keep L channel only
+              </button>
+              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('keep-r')">
+                Keep R channel only
+              </button>
+              <div class="border-t border-gray-700 my-1" />
+              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white flex items-center gap-2" @click="handleMenuAction('link')">
+                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
+                  <path v-if="isChannelLinked" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                  <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
+                </svg>
+                {{ isChannelLinked ? 'Unlink channels' : 'Link channels' }}
+              </button>
+              <div class="border-t border-gray-700 my-1" />
+            </template>
+            <template v-else-if="!isStereoView && (track.audioData.channels ?? 1) === 1">
+              <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('to-stereo')">
+                Convert to Stereo
+              </button>
+              <div class="border-t border-gray-700 my-1" />
+            </template>
+            <button class="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white" @click="handleMenuAction('rename')">
+              Rename
+            </button>
+            <button class="w-full text-left px-3 py-1.5 text-red-400 hover:bg-red-900/40 hover:text-red-300" @click="handleMenuAction('delete')">
+              Delete Track
+            </button>
+          </div>
         </div>
 
-        <!-- Control buttons -->
+        <!-- Quick buttons: M, S, E -->
         <div class="flex items-center gap-0.5 shrink-0">
-          <!-- Channel link toggle (stereo tracks only, visible in stereo view) -->
-          <button
-            v-if="isStereoView"
-            type="button"
-            :class="[
-              'w-5 h-5 flex items-center justify-center rounded transition-colors',
-              isChannelLinked
-                ? 'bg-cyan-700 text-cyan-200'
-                : 'bg-gray-700 text-gray-500 hover:bg-gray-600',
-            ]"
-            :title="isChannelLinked ? 'Channels linked — unlink for independent editing' : 'Channels unlinked — click to relink'"
-            @click.stop="tracksStore.toggleChannelLinked(track.id)"
-          >
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
-              <path v-if="isChannelLinked" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-              <path v-else d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71M4 4l16 16" />
-            </svg>
-          </button>
-          <!-- Mono-to-stereo button (mono tracks only, visible when channel lanes UI is on) -->
-          <button
-            v-if="uiStore.showChannelLanes && !isStereoView"
-            type="button"
-            class="w-5 h-5 flex items-center justify-center rounded transition-colors bg-gray-700 text-gray-400 hover:bg-cyan-700 hover:text-cyan-200"
-            title="Convert to stereo (duplicate to both channels)"
-            @click.stop="tracksStore.convertToStereo(track.id)"
-          >
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
           <button
             type="button"
             :class="[
@@ -809,14 +854,7 @@ onUnmounted(() => {
             E
           </button>
 
-          <button
-            type="button"
-            class="w-5 h-5 text-[10px] font-bold rounded bg-gray-700 text-gray-400 hover:bg-red-600 hover:text-white transition-colors"
-            title="Delete"
-            @click.stop="emit('delete', track.id)"
-          >
-            X
-          </button>
+          <!-- Delete moved to dropdown menu -->
         </div>
       </div>
 
@@ -906,18 +944,10 @@ onUnmounted(() => {
           class="absolute left-0 right-0 overflow-hidden group/lane"
           :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
         >
-          <!-- Lane label + delete channel button -->
-          <div class="absolute top-0 left-1 z-20 flex items-center gap-1 pointer-events-auto">
-            <span class="text-[9px] font-mono font-bold text-gray-400 select-none">{{ ch === 0 ? 'L' : 'R' }}</span>
-            <button
-              type="button"
-              class="w-4 h-4 flex items-center justify-center rounded text-gray-500 hover:text-red-400 hover:bg-red-900/40 transition-colors opacity-0 group-hover/lane:opacity-100"
-              :title="ch === 0 ? 'Delete L channel (keep R on both)' : 'Delete R channel (keep L on both)'"
-              @click.stop="tracksStore.replaceWithChannel(track.id, ch === 0 ? 1 : 0)"
-            >
-              <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-            </button>
-          </div>
+          <!-- Lane label -->
+          <span class="absolute top-0 left-1 text-[9px] font-mono font-bold text-gray-400 z-20 pointer-events-none select-none">
+            {{ ch === 0 ? 'L' : 'R' }}
+          </span>
           <!-- Lane divider (between L and R) -->
           <div v-if="ch === 1" class="absolute top-0 left-0 right-0 h-px bg-gray-700/60 z-10 pointer-events-none" />
           <!-- Clips for this channel (use lane clips if materialized, otherwise parent clips) -->
