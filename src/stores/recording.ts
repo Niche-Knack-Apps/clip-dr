@@ -680,22 +680,33 @@ export const useRecordingStore = defineStore('recording', () => {
       await new Promise(r => setTimeout(r, 200));
 
       // Create track(s) from the recorded audio, then exit monitor mode
-      if (result.path) {
-        createTrackFromRecording(result).then(() => {
-          // Cleanup: clear sessions + waveform histories after import completes
-          for (const s of sessions.value) clearWaveformHistory(s.sessionId);
-          sessions.value = [];
-          isFinalizing.value = false;
-        }).catch(e => {
-          console.error('[Recording] Background import failed:', e);
-          error.value = e instanceof Error ? e.message : String(e);
-          for (const s of sessions.value) clearWaveformHistory(s.sessionId);
-          sessions.value = [];
-          isFinalizing.value = false;
-        });
-      } else {
+      const exitMonitor = () => {
+        for (const s of sessions.value) clearWaveformHistory(s.sessionId);
         sessions.value = [];
         isFinalizing.value = false;
+        console.log('[Recording] Monitor mode exited');
+      };
+
+      if (result.path) {
+        // Safety timeout: exit monitor after 30s even if import hangs
+        const safetyTimeout = setTimeout(() => {
+          if (isFinalizing.value) {
+            console.warn('[Recording] Safety timeout: forcing monitor exit after 30s');
+            exitMonitor();
+          }
+        }, 30000);
+
+        createTrackFromRecording(result).then(() => {
+          clearTimeout(safetyTimeout);
+          exitMonitor();
+        }).catch(e => {
+          clearTimeout(safetyTimeout);
+          console.error('[Recording] Background import failed:', e);
+          error.value = e instanceof Error ? e.message : String(e);
+          exitMonitor();
+        });
+      } else {
+        exitMonitor();
       }
 
       return result;
