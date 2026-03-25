@@ -440,6 +440,18 @@ function handleClipDragEnd(event: MouseEvent) {
   } else if (!wasDragging && clipId) {
     // Drag threshold not met - this was a click, select the clip
     emit('clipSelect', props.track.id, clipId);
+    // Select this track
+    emit('select', props.track.id);
+    // If unlinked stereo, detect which channel lane was clicked and select it
+    const t = tracksStore.getTrackById(props.track.id);
+    if (t?.channelLanes && !t.channelLinked) {
+      for (const lane of t.channelLanes) {
+        if (lane.clips.some(c => c.id === clipId)) {
+          tracksStore.selectChannel(lane.channelIndex);
+          break;
+        }
+      }
+    }
     // Also seek to clicked position (click landed on clip, didn't drag)
     const rect = containerRef.value?.getBoundingClientRect();
     if (rect && duration.value > 0) {
@@ -935,6 +947,7 @@ onUnmounted(() => {
         <div
           v-for="ch in [0, 1]"
           :key="ch"
+          :data-channel-index="ch"
           :class="[
             'absolute left-0 right-0 overflow-hidden group/lane transition-opacity',
             // Dim the non-selected lane when a specific channel is selected on this unlinked track

@@ -44,14 +44,16 @@ export function useClipping() {
     const historyStore = useHistoryStore();
     historyStore.beginBatch('Create clip');
     try {
-      // Scope extraction via getEditTargets (respects multi-selection + solo).
+      // Scope extraction via getEditTargets (respects multi-selection + solo + channel).
       const hasSolo = tracksStore.tracks.some(t => t.solo);
       let sourceTrackIds: string[] | undefined;
+      let clipChannelIndex: number | null = null;
       if (hasSolo) {
         sourceTrackIds = tracksStore.tracks.filter(t => t.solo).map(t => t.id);
       } else {
         const targets = tracksStore.getEditTargets();
         sourceTrackIds = targets.mode === 'all' ? undefined : targets.trackIds;
+        clipChannelIndex = targets.channelIndex;
       }
 
       // Detect large files (same check as clipboard.cut)
@@ -71,7 +73,9 @@ export function useClipping() {
           console.log('[Clipping] No segments found in I/O region');
           return null;
         }
-        const { sampleRate, channels } = tracksStore.getContributingFormat(inPoint, outPoint, sourceTrackIds);
+        const { sampleRate, channels: rawChannels } = tracksStore.getContributingFormat(inPoint, outPoint, sourceTrackIds);
+        // Single-channel clip → mono output
+        const channels = clipChannelIndex != null ? 1 : rawChannels;
         const waveform = tracksStore.sliceWaveformForRegion(inPoint, outPoint, sourceTrackIds);
         const clipName = `Clip ${tracksStore.tracks.length + 1}`;
         const totalDuration = outPoint - inPoint;
@@ -120,7 +124,7 @@ export function useClipping() {
         // Small file: extract audio AND create EDL clips for save/load round-trip
         const segments = tracksStore.collectVirtualClipboardSegments(inPoint, outPoint, sourceTrackIds);
         const ctx = audioStore.getAudioContext();
-        const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds);
+        const extracted = await tracksStore.extractRegionFromAllTracks(inPoint, outPoint, ctx, sourceTrackIds, clipChannelIndex);
         if (!extracted) {
           console.warn('[Clipping] No audio found in I/O region');
           return null;

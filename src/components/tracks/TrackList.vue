@@ -63,6 +63,7 @@ const canDrag = ref(false);
 const clipDraggingTrackId = ref<string | null>(null);
 const clipDraggingClipId = ref<string | null>(null);
 const clipDragTargetTrackId = ref<string | null>(null);
+const clipDragTargetChannelIndex = ref<number | null>(null);
 const clipDragPreviewStart = ref<number>(0);
 const clipDragStartY = ref(0);
 const CROSS_TRACK_THRESHOLD = 20; // pixels of vertical movement to trigger cross-track intent
@@ -520,11 +521,20 @@ function handleClipDrag(trackId: string, clipId: string, newClipStart: number, m
     const deltaY = Math.abs(mouseEvent.clientY - clipDragStartY.value);
     if (deltaY < CROSS_TRACK_THRESHOLD) {
       clipDragTargetTrackId.value = clipDraggingTrackId.value;
+      clipDragTargetChannelIndex.value = null;
     } else {
       const el = document.elementFromPoint(mouseEvent.clientX, mouseEvent.clientY);
       const trackEl = el?.closest('[data-track-id]');
       if (trackEl) {
         clipDragTargetTrackId.value = trackEl.getAttribute('data-track-id');
+        // Detect target channel lane via data-channel-index attribute
+        const laneEl = el?.closest('[data-channel-index]');
+        if (laneEl) {
+          const chStr = laneEl.getAttribute('data-channel-index');
+          clipDragTargetChannelIndex.value = chStr != null ? parseInt(chStr, 10) : null;
+        } else {
+          clipDragTargetChannelIndex.value = null;
+        }
       }
     }
   }
@@ -537,7 +547,7 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
     // Cross-track drop: go straight to moveClipToTrack (skip setClipStart/finalize
     // on source — those would commit the clip at the new position on the source track,
     // then moveClipToTrack would duplicate it onto the target)
-    tracksStore.moveClipToTrack(trackId, clipId, clipDragTargetTrackId.value!, newClipStart);
+    tracksStore.moveClipToTrack(trackId, clipId, clipDragTargetTrackId.value!, newClipStart, clipDragTargetChannelIndex.value);
 
     // Transfer silence regions that overlap the clip's original range to the target track
     if (clipDragOriginalStart !== null && clipDragOriginalDuration !== null) {
@@ -575,6 +585,7 @@ async function handleClipDragEnd(trackId: string, clipId: string, newClipStart: 
   clipDraggingTrackId.value = null;
   clipDraggingClipId.value = null;
   clipDragTargetTrackId.value = null;
+  clipDragTargetChannelIndex.value = null;
   dragScrollContainerRect.value = null;
 }
 

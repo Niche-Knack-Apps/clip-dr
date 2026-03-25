@@ -372,9 +372,9 @@ export const useClipboardStore = defineStore('clipboard', () => {
     const ctx = audioStore.getAudioContext();
 
     if (hasIOPoints) {
-      // Scope extraction to selected track (or all tracks if 'ALL'/null)
-      const selectedId = tracksStore.selectedTrackId;
-      const sourceTrackIds = (selectedId && selectedId !== 'ALL') ? [selectedId] : undefined;
+      // Scope to selected tracks via getEditTargets (respects multi-selection)
+      const editTargets = tracksStore.getEditTargets();
+      const sourceTrackIds = editTargets.mode === 'all' ? undefined : editTargets.trackIds;
 
       // Determine if any overlapping track lacks an in-memory buffer
       const hasLargeFile = tracksStore.tracks.some(t => {
@@ -398,12 +398,11 @@ export const useClipboardStore = defineStore('clipboard', () => {
       }
 
       // Ripple delete — ALWAYS edit-only (no extraction)
-      // Pass channelIndex from getEditTargets so channel-specific cuts work
-      const editTargets = tracksStore.getEditTargets();
+      // Pass channelIndex and scoped trackIds so only selected tracks are affected
       const results = await tracksStore.rippleDeleteRegion(inPoint, outPoint, ctx, {
         mode: 'edit-only',
         channelIndex: editTargets.channelIndex,
-      });
+      }, sourceTrackIds);
 
       if (results.affectedCount > 0) {
         // Store clipboard with both buffer (if available) and segment metadata (always)
@@ -645,15 +644,15 @@ export const useClipboardStore = defineStore('clipboard', () => {
       const ctx = audioStore.getAudioContext();
       let cutCount = 0;
 
-      // Cut from every track that overlaps the I/O region (no ripple shift)
-      const trackIds = tracksStore.tracks.map(t => t.id);
+      // Scope to selected tracks via getEditTargets (respects multi-selection)
+      const editTargets = tracksStore.getEditTargets();
+      const trackIds = editTargets.trackIds;
       for (const trackId of trackIds) {
         const track = tracksStore.tracks.find(t => t.id === trackId);
         if (!track) continue;
         const trackEnd = track.trackStart + track.duration;
         if (track.trackStart >= outPoint || trackEnd <= inPoint) continue;
 
-        const editTargets = tracksStore.getEditTargets();
         const result = await tracksStore.cutRegionFromTrack(trackId, inPoint, outPoint, ctx, {
           mode: 'edit-only',
           channelIndex: editTargets.channelIndex,

@@ -616,17 +616,19 @@ describe('Stereo Unlinked, No Channel Selected', () => {
     expect(track.channelLinked).toBe(false);
     expect(track.channelLanes).toBeDefined();
 
+    // No channelIndex → split ALL lanes independently (both channels highlighted)
     const success = await tracksStore.splitAtPlayhead(track.id, 5.0, ctx);
     expect(success).toBe(true);
 
-    // Unlinked split: currently splits the clip found in the first lane (L) only,
-    // because the code finds the first clip spanning the playhead.
-    // Both lanes start with aligned clips so L lane gets split.
     const updated = tracksStore.getTrackById(track.id)!;
-    // L lane split into 2
+    // Both lanes split into 2 clips each
     expect(updated.channelLanes![0].clips.length).toBe(2);
-    // R lane remains 1 clip (unlinked — no linked pairing propagation)
-    expect(updated.channelLanes![1].clips.length).toBe(1);
+    expect(updated.channelLanes![1].clips.length).toBe(2);
+    // Before clips: 0–5s, After clips: 5–10s
+    expect(updated.channelLanes![0].clips[0].duration).toBeCloseTo(5, 1);
+    expect(updated.channelLanes![0].clips[1].duration).toBeCloseTo(5, 1);
+    expect(updated.channelLanes![1].clips[0].duration).toBeCloseTo(5, 1);
+    expect(updated.channelLanes![1].clips[1].duration).toBeCloseTo(5, 1);
   });
 
   it('cut ripple deletes from both lanes', async () => {
@@ -1129,5 +1131,159 @@ describe('Multi-Track Selected', () => {
 
     // Should have original 2 + pasted = 3
     expect(tracksStore.tracks.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ─── 8. Single-Channel Extraction (Mono Output) ─────────────────────────────
+
+describe('Single-Channel Extraction', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('extractRegionFromAllTracks with channelIndex=0 returns 1ch mono buffer', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Fill L channel with positive values, R with negative for differentiation
+    const buf = track.audioData.buffer!;
+    const lData = buf.getChannelData(0);
+    const rData = buf.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.5; rData[i] = -0.5; }
+
+    const result = await tracksStore.extractRegionFromAllTracks(2, 6, ctx, [track.id], 0);
+    expect(result).not.toBeNull();
+    expect(result!.buffer.numberOfChannels).toBe(1);
+    // Mono buffer should contain L channel data (positive values)
+    const monoData = result!.buffer.getChannelData(0);
+    expect(monoData[0]).toBeGreaterThan(0);
+  });
+
+  it('extractRegionFromAllTracks with channelIndex=1 returns 1ch mono buffer', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const buf = track.audioData.buffer!;
+    const lData = buf.getChannelData(0);
+    const rData = buf.getChannelData(1);
+    for (let i = 0; i < lData.length; i++) { lData[i] = 0.5; rData[i] = -0.5; }
+
+    const result = await tracksStore.extractRegionFromAllTracks(2, 6, ctx, [track.id], 1);
+    expect(result).not.toBeNull();
+    expect(result!.buffer.numberOfChannels).toBe(1);
+    // Mono buffer should contain R channel data (negative values)
+    const monoData = result!.buffer.getChannelData(0);
+    expect(monoData[0]).toBeLessThan(0);
+  });
+
+  it('extractRegionFromAllTracks without channelIndex returns stereo', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+    const ctx = new MockAudioContext() as unknown as AudioContext;
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const result = await tracksStore.extractRegionFromAllTracks(2, 6, ctx, [track.id]);
+    expect(result).not.toBeNull();
+    expect(result!.buffer.numberOfChannels).toBe(2);
+  });
+});
+
+// ─── 9. Convert to Mono with Lane Offsets ────────────────────────────────────
+
+describe('Convert to Mono with Lane Offsets', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('convertToMono with aligned lanes produces mono track', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    tracksStore.convertToMono(track.id);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    expect(updated.audioData.channels).toBe(1);
+    expect(updated.audioData.buffer!.numberOfChannels).toBe(1);
+    expect(updated.channelLanes).toBeUndefined();
+  });
+
+  it('convertToMono with offset lanes produces correct duration', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const track = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    // Move R channel clip forward by 2s (offset from L)
+    const rLane = tracksStore.getTrackById(track.id)!.channelLanes![1];
+    const rClip = rLane.clips[0];
+    tracksStore.setClipStart(track.id, rClip.id, 2.0);
+
+    tracksStore.convertToMono(track.id);
+
+    const updated = tracksStore.getTrackById(track.id)!;
+    expect(updated.channelMode).toBe('mono');
+    // Duration should cover the union: L starts at 0 for 10s, R starts at 2 for 10s → 0-12s = 12s
+    expect(updated.duration).toBeCloseTo(12, 0);
+  });
+});
+
+// ─── 10. Cross-Track Move to Lane ───────────────────────────────────────────
+
+describe('Cross-Track Move to Lane', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('moveClipToTrack with targetChannelIndex inserts into correct lane', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    // Create a mono source track
+    const srcBuf = createMockAudioBuffer(3, 44100, 1);
+    const src = await tracksStore.createTrackFromBuffer(srcBuf, null, 'Mono', 5);
+    // Promote to explicit clips so we have a clip ID
+    const srcClips = tracksStore.getTrackClips(src.id);
+    expect(srcClips.length).toBe(1);
+    const srcClipId = srcClips[0].id;
+
+    // Create an unlinked stereo target
+    const target = await createStereoUnlinkedTrack(tracksStore, 10, 0);
+    const origLClips = target.channelLanes![0].clips.length;
+    const origRClips = target.channelLanes![1].clips.length;
+
+    // Move mono clip to R lane of stereo track
+    const success = tracksStore.moveClipToTrack(src.id, srcClipId, target.id, 2.0, 1);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(target.id)!;
+    // L lane unchanged
+    expect(updated.channelLanes![0].clips.length).toBe(origLClips);
+    // R lane has 1 new clip
+    expect(updated.channelLanes![1].clips.length).toBe(origRClips + 1);
+  });
+
+  it('moveClipToTrack without targetChannelIndex adds to parent clips', async () => {
+    const { useTracksStore } = await import('@/stores/tracks');
+    const tracksStore = useTracksStore();
+
+    const srcBuf = createMockAudioBuffer(3, 44100, 1);
+    const src = await tracksStore.createTrackFromBuffer(srcBuf, null, 'Src', 5);
+    const srcClipId = tracksStore.getTrackClips(src.id)[0].id;
+
+    const tgtBuf = createMockAudioBuffer(10, 44100, 1);
+    const tgt = await tracksStore.createTrackFromBuffer(tgtBuf, null, 'Tgt', 0);
+
+    const success = tracksStore.moveClipToTrack(src.id, srcClipId, tgt.id, 2.0);
+    expect(success).toBe(true);
+
+    const updated = tracksStore.getTrackById(tgt.id)!;
+    // Should have parent clips (converted single-buffer + new clip)
+    expect(updated.clips).toBeDefined();
+    expect(updated.clips!.length).toBe(2);
   });
 });
