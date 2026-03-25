@@ -12,12 +12,12 @@ const formattedDuration = computed(() => {
   return `${m}:${s.toString().padStart(2, '0')}.${tenths}`;
 });
 
-function stopAll() {
+async function stopAll() {
   if (recordingStore.isLocked) return;
-  // Stop all active sessions (works for both device sessions and main recording)
-  const activeSessions = recordingStore.sessions.filter(s => s.active);
-  for (const session of activeSessions) {
-    recordingStore.stopDeviceSession(session.sessionId);
+  // Snapshot IDs then stop sequentially (avoids IPC race from parallel stops)
+  const ids = recordingStore.sessions.filter(s => s.active).map(s => s.sessionId);
+  for (const id of ids) {
+    await recordingStore.stopDeviceSession(id);
   }
 }
 </script>

@@ -1161,6 +1161,19 @@ export const useRecordingStore = defineStore('recording', () => {
   /** Start recording from a single device. Does not affect other active sessions. */
   async function startDeviceSession(deviceId: string, sessionId: string): Promise<string | null> {
     error.value = null;
+
+    // Guard: remove any stale/inactive sessions for this device
+    const stale = sessions.value.filter(s => s.deviceId === deviceId && !s.active);
+    if (stale.length > 0) {
+      for (const s of stale) clearWaveformHistory(s.sessionId);
+      sessions.value = sessions.value.filter(s => !(s.deviceId === deviceId && !s.active));
+    }
+    // Guard: reject if device is already actively recording
+    if (sessions.value.some(s => s.deviceId === deviceId && s.active)) {
+      console.warn(`[Recording] Device ${deviceId} already recording — ignoring duplicate start`);
+      return null;
+    }
+
     try {
       // Set recording epoch on first session start (for timeline sync)
       // Base position respects placement setting
@@ -1233,28 +1246,31 @@ export const useRecordingStore = defineStore('recording', () => {
 
   /** Stop a single recording session by ID. Other sessions continue. */
   async function stopDeviceSession(sessionId: string): Promise<SessionResult | null> {
-    // Capture session timing BEFORE it gets removed
+    // Capture session timing BEFORE removal
     const session = sessions.value.find(s => s.sessionId === sessionId);
-    const sessionStartTime = session?.startTime ?? Date.now();
+    if (!session) {
+      console.warn(`[Recording] stopDeviceSession: session '${sessionId}' not found — already stopped`);
+      return null;
+    }
+    const sessionStartTime = session.startTime;
     const epochVal = recordingEpoch.value;
     const basePos = recordingBasePosition.value;
 
+    // Immediately remove session from array (prevents ghost accumulation)
+    clearWaveformHistory(sessionId);
+    sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
+
+    // Stop on Rust side
     let result: SessionResult | null = null;
     try {
       result = await invoke<SessionResult>('stop_session', { sessionId });
       console.log(`[Recording] Session '${sessionId}' stopped: ${result.result.duration.toFixed(1)}s`);
     } catch (e) {
-      // Handle gracefully: session may already be gone or captured 0 samples.
-      // Still clean up frontend state so the UI doesn't get stuck.
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[Recording] stop_session('${sessionId}') error (cleaning up frontend state): ${msg}`);
+      console.warn(`[Recording] stop_session('${sessionId}') error: ${msg}`);
     }
 
-    // Mark session inactive (keep in list for monitor mode during finalization)
-    const sess = sessions.value.find(s => s.sessionId === sessionId);
-    if (sess) sess.active = false;
-
-    // If no more active sessions, transition to finalizing
+    // If no more active sessions, transition to finalizing then exit
     const hasActive = sessions.value.some(s => s.active);
     if (!hasActive) {
       isRecording.value = false;
@@ -1264,47 +1280,34 @@ export const useRecordingStore = defineStore('recording', () => {
       recordingBasePosition.value = null;
       if (levelPollInterval) { clearInterval(levelPollInterval); levelPollInterval = null; }
       if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
-      isFinalizing.value = true;
-      // Clean up scheduled recording if it was in 'recording' status
       if (schedule.value && schedule.value.status === 'recording') {
         schedule.value = { ...schedule.value, status: 'completed' };
-        if (scheduleCheckInterval) {
-          clearInterval(scheduleCheckInterval);
-          scheduleCheckInterval = null;
-        }
-        console.log('[Recording] Scheduled recording completed (manual stop)');
+        if (scheduleCheckInterval) { clearInterval(scheduleCheckInterval); scheduleCheckInterval = null; }
         setTimeout(() => { schedule.value = null; }, 2000);
       }
     }
 
-    const exitMonitorIfDone = () => {
-      if (!sessions.value.some(s => s.active)) {
-        for (const s of sessions.value) clearWaveformHistory(s.sessionId);
-        sessions.value = [];
-        isFinalizing.value = false;
-        console.log('[Recording] Monitor mode exited (device session)');
-      }
-    };
-
-    // Import the recording if we got a successful result
+    // Import the recording in background (session already removed from UI)
     if (result?.result?.path) {
-      // Brief delay for OS file flush
+      // Set finalizing if this was the last session (keeps monitor view briefly visible)
+      if (!hasActive) isFinalizing.value = true;
       await new Promise(r => setTimeout(r, 200));
-
-      // Compute timeline position: base + offset from epoch
       const offsetSeconds = (epochVal !== null && placement.value !== 'zero')
         ? (sessionStartTime - epochVal) / 1000
         : 0;
       const trackStart = (basePos ?? tracksStore.timelineDuration) + offsetSeconds;
-
       createTrackFromRecording(result.result, trackStart).then(() => {
-        exitMonitorIfDone();
+        if (!sessions.value.some(s => s.active)) {
+          isFinalizing.value = false;
+          console.log('[Recording] Monitor mode exited');
+        }
       }).catch(e => {
-        console.error('[Recording] Background import failed for session:', sessionId, e);
-        exitMonitorIfDone();
+        console.error('[Recording] Import failed for session:', sessionId, e);
+        if (!sessions.value.some(s => s.active)) isFinalizing.value = false;
       });
-    } else {
-      exitMonitorIfDone();
+    } else if (!hasActive) {
+      // No result to import — exit monitor immediately
+      isFinalizing.value = false;
     }
 
     return result;
