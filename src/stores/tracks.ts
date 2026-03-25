@@ -91,7 +91,33 @@ export const useTracksStore = defineStore('tracks', () => {
   }
 
   // 'ALL' means composite view (default), string means specific track, null means nothing selected
-  const selectedTrackId = ref<string | 'ALL' | null>('ALL');
+  // ── Multi-Selection State ──
+  // Primary selection state: Set of selected track IDs
+  const selectedTrackIds = ref<Set<string>>(new Set());
+  // Selected channel within an unlinked stereo track (0=L, 1=R, null=both/all)
+  const selectedChannelIndex = ref<number | null>(null);
+  // Anchor for Shift+click range selection
+  const lastSelectedTrackId = ref<string | null>(null);
+
+  // Backward-compatible computed: derives from selectedTrackIds.
+  // When 0 selected → 'ALL'. When 1 → that ID. When multi → first ID.
+  // Setter routes through selectedTrackIds for all existing write sites.
+  const selectedTrackId = computed<string | 'ALL' | null>({
+    get() {
+      if (selectedTrackIds.value.size === 0) return 'ALL';
+      return [...selectedTrackIds.value][0];
+    },
+    set(val: string | 'ALL' | null) {
+      if (val === 'ALL' || val === null) {
+        selectedTrackIds.value = new Set();
+      } else {
+        selectedTrackIds.value = new Set([val]);
+      }
+      selectedChannelIndex.value = null;
+      lastSelectedTrackId.value = val === 'ALL' || val === null ? null : val;
+    },
+  });
+
   const viewMode = ref<ViewMode>('all');
 
   // Focused clip within a track (for highlight ring on specifically clicked clip)
@@ -106,6 +132,56 @@ export const useTracksStore = defineStore('tracks', () => {
 
   // Backward-compat alias: selectedClipId points to the focused clip
   const selectedClipId = focusedClipId;
+
+  // ── Selection Functions ──
+
+  /** Select a single track exclusively (deselects all others). */
+  function selectTrackExclusive(trackId: string): void {
+    selectedTrackIds.value = new Set([trackId]);
+    lastSelectedTrackId.value = trackId;
+    selectedChannelIndex.value = null;
+    focusedClipId.value = null;
+    viewMode.value = 'selected';
+  }
+
+  /** Toggle a track in the selection set (Ctrl+click). */
+  function selectTrackToggle(trackId: string): void {
+    const s = new Set(selectedTrackIds.value);
+    if (s.has(trackId)) s.delete(trackId); else s.add(trackId);
+    selectedTrackIds.value = s;
+    lastSelectedTrackId.value = trackId;
+    if (s.size === 0) viewMode.value = 'all';
+  }
+
+  /** Select a contiguous range of tracks (Shift+click). */
+  function selectTrackRange(trackId: string): void {
+    const ids = tracks.value.map(t => t.id);
+    const anchorIdx = lastSelectedTrackId.value ? ids.indexOf(lastSelectedTrackId.value) : 0;
+    const targetIdx = ids.indexOf(trackId);
+    if (anchorIdx === -1 || targetIdx === -1) return;
+    const [lo, hi] = [Math.min(anchorIdx, targetIdx), Math.max(anchorIdx, targetIdx)];
+    selectedTrackIds.value = new Set(ids.slice(lo, hi + 1));
+    viewMode.value = 'selected';
+  }
+
+  /** Select a specific channel on an unlinked stereo track (null = both). */
+  function selectChannel(channelIndex: number | null): void {
+    selectedChannelIndex.value = channelIndex;
+  }
+
+  /** Central dispatch: returns the current edit targets based on selection state.
+   *  ALL editing operations MUST call this to determine what to affect. */
+  function getEditTargets(): { trackIds: string[]; channelIndex: number | null; mode: 'all' | 'single' | 'multi' } {
+    const ids = [...selectedTrackIds.value];
+    if (ids.length === 0) {
+      return { trackIds: tracks.value.map(t => t.id), channelIndex: null, mode: 'all' };
+    }
+    return {
+      trackIds: ids,
+      channelIndex: selectedChannelIndex.value,
+      mode: ids.length === 1 ? 'single' : 'multi',
+    };
+  }
 
   // Pending drag position for single-clip tracks — decoupled from track.trackStart
   // to prevent timelineDuration from changing during drag (which causes clip resizing)
@@ -3970,6 +4046,13 @@ export const useTracksStore = defineStore('tracks', () => {
     trackMap,
     getTrackById,
     selectedTrackId,
+    selectedTrackIds,
+    selectedChannelIndex,
+    selectTrackExclusive,
+    selectTrackToggle,
+    selectTrackRange,
+    selectChannel,
+    getEditTargets,
     selectedClipId,
     focusedClipId,
     selectedTrackClipIds,
