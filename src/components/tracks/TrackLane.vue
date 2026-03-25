@@ -750,7 +750,7 @@ onUnmounted(() => {
           </button>
           <!-- Mono-to-stereo button (mono tracks only, visible when channel lanes UI is on) -->
           <button
-            v-if="uiStore.showChannelLanes && !isStereoView && (track.audioData.channels ?? 1) === 1"
+            v-if="uiStore.showChannelLanes && !isStereoView"
             type="button"
             class="w-5 h-5 flex items-center justify-center rounded transition-colors bg-gray-700 text-gray-400 hover:bg-cyan-700 hover:text-cyan-200"
             title="Convert to stereo (duplicate to both channels)"
@@ -903,21 +903,21 @@ onUnmounted(() => {
         <div
           v-for="ch in [0, 1]"
           :key="ch"
-          class="absolute left-0 right-0 overflow-hidden"
+          class="absolute left-0 right-0 overflow-hidden group/lane"
           :style="{ top: `${ch * TRACK_SUBLANE_HEIGHT}px`, height: `${TRACK_SUBLANE_HEIGHT}px` }"
         >
           <!-- Lane label + delete channel button -->
-          <span class="absolute top-0 left-1 text-[8px] font-mono text-gray-500 z-20 select-none flex items-center gap-0.5">
-            {{ ch === 0 ? 'L' : 'R' }}
+          <div class="absolute top-0 left-1 z-20 flex items-center gap-1 pointer-events-auto">
+            <span class="text-[9px] font-mono font-bold text-gray-400 select-none">{{ ch === 0 ? 'L' : 'R' }}</span>
             <button
               type="button"
-              class="w-3 h-3 flex items-center justify-center rounded-sm text-gray-600 hover:text-red-400 hover:bg-red-900/30 transition-colors pointer-events-auto"
-              :title="ch === 0 ? 'Delete L channel (keep R)' : 'Delete R channel (keep L)'"
+              class="w-4 h-4 flex items-center justify-center rounded text-gray-500 hover:text-red-400 hover:bg-red-900/40 transition-colors opacity-0 group-hover/lane:opacity-100"
+              :title="ch === 0 ? 'Delete L channel (keep R on both)' : 'Delete R channel (keep L on both)'"
               @click.stop="tracksStore.replaceWithChannel(track.id, ch === 0 ? 1 : 0)"
             >
-              <svg class="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
             </button>
-          </span>
+          </div>
           <!-- Lane divider (between L and R) -->
           <div v-if="ch === 1" class="absolute top-0 left-0 right-0 h-px bg-gray-700/60 z-10 pointer-events-none" />
           <!-- Clips for this channel (use lane clips if materialized, otherwise parent clips) -->
