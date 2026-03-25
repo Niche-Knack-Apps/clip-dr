@@ -14,10 +14,10 @@ const formattedDuration = computed(() => {
 
 function stopAll() {
   if (recordingStore.isLocked) return;
-  if (recordingStore.sessions.length > 1) {
-    recordingStore.stopMultiRecording();
-  } else {
-    recordingStore.stopRecording();
+  // Stop all active sessions (works for both device sessions and main recording)
+  const activeSessions = recordingStore.sessions.filter(s => s.active);
+  for (const session of activeSessions) {
+    recordingStore.stopDeviceSession(session.sessionId);
   }
 }
 </script>

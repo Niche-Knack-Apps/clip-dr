@@ -138,11 +138,9 @@ function formatDuration(seconds: number): string {
 }
 
 function stopSession() {
-  if (recordingStore.sessions.length > 1) {
-    recordingStore.stopDeviceSession(props.session.sessionId);
-  } else {
-    recordingStore.stopRecording();
-  }
+  // Device sessions use stopDeviceSession; main recording uses stopRecording
+  // Detect: device sessions have a sessionId that doesn't match the main recording path
+  recordingStore.stopDeviceSession(props.session.sessionId);
 }
 
 defineExpose({ isDirty, draw });

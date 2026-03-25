@@ -1158,6 +1158,28 @@ export const useRecordingStore = defineStore('recording', () => {
       sessions.value = [...sessions.value, session];
       isRecording.value = true;
 
+      // Start level polling for device sessions (needed for waveform history)
+      if (!levelPollInterval) {
+        levelPollInterval = window.setInterval(async () => {
+          try {
+            const levels = await invoke<SessionLevel[]>('get_session_levels');
+            for (const sl of levels) {
+              const sess = sessions.value.find(s => s.sessionId === sl.session_id);
+              if (sess) {
+                sess.level = sl.level;
+                const buf = getOrCreateWaveformHistory(sess.sessionId);
+                buf.push(sl.level, recordingDuration.value);
+              }
+            }
+            currentLevel.value = levels.length > 0
+              ? Math.max(...levels.map(l => l.level))
+              : 0;
+          } catch {
+            // Ignore polling errors
+          }
+        }, 100);
+      }
+
       // Start duration tracking if not already running
       if (!durationInterval) {
         durationInterval = window.setInterval(() => {
@@ -1200,20 +1222,21 @@ export const useRecordingStore = defineStore('recording', () => {
       console.warn(`[Recording] stop_session('${sessionId}') error (cleaning up frontend state): ${msg}`);
     }
 
-    // Always remove from sessions list, even on error
-    sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
+    // Mark session inactive (keep in list for monitor mode during finalization)
+    const sess = sessions.value.find(s => s.sessionId === sessionId);
+    if (sess) sess.active = false;
 
-    // If no more active sessions, clear global recording state + epoch
-    if (sessions.value.filter(s => s.active).length === 0) {
+    // If no more active sessions, transition to finalizing
+    const hasActive = sessions.value.some(s => s.active);
+    if (!hasActive) {
       isRecording.value = false;
       isLocked.value = false;
       currentLevel.value = 0;
       recordingEpoch.value = null;
       recordingBasePosition.value = null;
-      if (durationInterval) {
-        clearInterval(durationInterval);
-        durationInterval = null;
-      }
+      if (levelPollInterval) { clearInterval(levelPollInterval); levelPollInterval = null; }
+      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+      isFinalizing.value = true;
       // Clean up scheduled recording if it was in 'recording' status
       if (schedule.value && schedule.value.status === 'recording') {
         schedule.value = { ...schedule.value, status: 'completed' };
@@ -1226,22 +1249,34 @@ export const useRecordingStore = defineStore('recording', () => {
       }
     }
 
+    const exitMonitorIfDone = () => {
+      if (!sessions.value.some(s => s.active)) {
+        for (const s of sessions.value) clearWaveformHistory(s.sessionId);
+        sessions.value = [];
+        isFinalizing.value = false;
+        console.log('[Recording] Monitor mode exited (device session)');
+      }
+    };
+
     // Import the recording if we got a successful result
     if (result?.result?.path) {
       // Brief delay for OS file flush
       await new Promise(r => setTimeout(r, 200));
 
       // Compute timeline position: base + offset from epoch
-      // For 'zero' placement, skip the epoch offset — the user wants t=0 regardless
-      // of backend startup latency. The offset only matters for multi-source sync.
       const offsetSeconds = (epochVal !== null && placement.value !== 'zero')
         ? (sessionStartTime - epochVal) / 1000
         : 0;
       const trackStart = (basePos ?? tracksStore.timelineDuration) + offsetSeconds;
 
-      createTrackFromRecording(result.result, trackStart).catch(e => {
+      createTrackFromRecording(result.result, trackStart).then(() => {
+        exitMonitorIfDone();
+      }).catch(e => {
         console.error('[Recording] Background import failed for session:', sessionId, e);
+        exitMonitorIfDone();
       });
+    } else {
+      exitMonitorIfDone();
     }
 
     return result;
