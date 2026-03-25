@@ -170,6 +170,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
     // Determine which channels to copy — use getEditTargets for channel awareness
     const targets = tracksStore.getEditTargets();
+    console.warn(`[Clipboard] copy: channelIndex=${targets.channelIndex}, buffer=${buffer.numberOfChannels}ch, trackId=${trackId}`);
     const selectedTrack = tracksStore.selectedTrack;
     let channelsToCopy: number[];
     if (targets.channelIndex != null && selectedTrack?.channelLinked === false) {
@@ -182,16 +183,15 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
     const ctx = audioStore.getAudioContext();
 
-    // When lanes are materialized and askew, each channel may have different
-    // clip offsets relative to the in/out region. Extract per-channel samples
-    // based on each lane's clip position, filling silence where a lane has no audio.
+    // When lanes are materialized, use lane-aware extraction that respects
+    // per-clip positions (even for single-channel copies — the raw buffer doesn't
+    // reflect moved lane clips, so the simple path would copy wrong sample offsets).
     const track = tracksStore.selectedTrack;
-    const hasAskewLanes = track?.channelLanes && track.channelLanes.length > 0
-      && channelsToCopy.length > 1;
+    const hasLanes = track?.channelLanes && track.channelLanes.length > 0;
 
     let newBuffer: AudioBuffer;
 
-    if (hasAskewLanes && track?.channelLanes) {
+    if (hasLanes && track?.channelLanes) {
       // Per-channel extraction with lane-aware offsets
       const regionDuration = end - start;
       const regionSamples = Math.floor(regionDuration * buffer.sampleRate);
@@ -251,6 +251,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
     }
 
     clipboardBuffer.value = newBuffer;
+    console.warn(`[Clipboard] copy result: channelsToCopy=${JSON.stringify(channelsToCopy)}, newBuffer=${newBuffer.numberOfChannels}ch, hasLanes=${hasLanes}`);
 
     // Generate waveform for the clipboard content
     const waveformData = await tracksStore.generateWaveformFromBuffer(newBuffer);
@@ -263,7 +264,7 @@ export const useClipboardStore = defineStore('clipboard', () => {
 
     // Capture per-lane clip offsets for askew stereo (so paste can reconstruct lanes)
     let laneClipOffsets: AudioClipboard['laneClipOffsets'];
-    if (hasAskewLanes && track?.channelLanes) {
+    if (hasLanes && track?.channelLanes && channelsToCopy.length > 1) {
       const regionStart = start + track.trackStart;
       laneClipOffsets = track.channelLanes.map(lane => ({
         channelIndex: lane.channelIndex,
