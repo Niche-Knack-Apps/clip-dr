@@ -260,16 +260,16 @@ export const useRecordingStore = defineStore('recording', () => {
         if (now - lastEventTime < 14) return;
         lastEventTime = now;
 
-        const { session_ids, levels, duration: dur } = event.payload;
-        recordingDuration.value = dur;
+        const { session_ids, levels } = event.payload;
+        // Duration comes from durationInterval (wall clock) — don't override here
+        // (Rust emitter duration_ms is not yet wired to sample count)
 
         for (let i = 0; i < session_ids.length; i++) {
           const session = _sessionMap.get(session_ids[i]);
           if (session) {
             session.level = levels[i];
-            session.duration = dur;
             const buf = getOrCreateWaveformHistory(session.sessionId);
-            buf.push(levels[i], dur);
+            buf.push(levels[i], recordingDuration.value);
           }
         }
         currentLevel.value = levels.length > 0 ? Math.max(...levels) : 0;
@@ -1221,8 +1221,9 @@ export const useRecordingStore = defineStore('recording', () => {
       // Level updates now come via push events (listen("recording-levels"))
       // — no polling needed. Only start duration tracking.
 
-      // Start duration tracking if not already running
-      if (!durationInterval) {
+      // Always recreate duration interval (old one may reference stale sessions)
+      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+      {
         durationInterval = window.setInterval(() => {
           for (const s of sessions.value) {
             if (s.active) {

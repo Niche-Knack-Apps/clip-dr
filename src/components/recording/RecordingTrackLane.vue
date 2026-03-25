@@ -101,21 +101,24 @@ function draw() {
     return;
   }
 
-  // Draw scrolling peak envelope from ring buffer (zero-copy iteration)
+  // Draw scrolling peak envelope — fixed bar width, newest data on right edge
   const { buffer, head, count } = view;
-  const maxBars = Math.min(count, Math.floor(w / 2));
-  const barWidth = w / maxBars;
+  const BAR_WIDTH = 2;
+  const maxVisible = Math.floor(w / BAR_WIDTH);
+  const barsToShow = Math.min(count, maxVisible);
   const centerY = h / 2;
 
   ctx.fillStyle = color;
 
-  const startIdx = (head - maxBars + buffer.length) % buffer.length;
-  for (let i = 0; i < maxBars; i++) {
+  // Draw from right edge leftward — newest sample at far right
+  const startIdx = (head - barsToShow + buffer.length) % buffer.length;
+  const xOffset = w - barsToShow * BAR_WIDTH; // empty space on left when few samples
+  for (let i = 0; i < barsToShow; i++) {
     const idx = (startIdx + i) % buffer.length;
     const sample = buffer[idx];
     const barH = sample.peak * h * 0.9;
-    const x = i * barWidth;
-    ctx.fillRect(x, centerY - barH / 2, Math.max(1, barWidth - 0.5), barH);
+    const x = xOffset + i * BAR_WIDTH;
+    ctx.fillRect(x, centerY - barH / 2, Math.max(1, BAR_WIDTH - 0.5), barH);
   }
 
   // Center line
