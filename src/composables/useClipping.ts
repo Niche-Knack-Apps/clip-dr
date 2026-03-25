@@ -45,16 +45,18 @@ export function useClipping() {
     historyStore.beginBatch('Create clip');
     try {
       // Scope extraction via getEditTargets (respects multi-selection + solo + channel).
+      const targets = tracksStore.getEditTargets();
       const hasSolo = tracksStore.tracks.some(t => t.solo);
       let sourceTrackIds: string[] | undefined;
-      let clipChannelIndex: number | null = null;
+      // Always respect channel selection (even when solo is active)
+      const clipChannelIndex = targets.channelIndex;
       if (hasSolo) {
         sourceTrackIds = tracksStore.tracks.filter(t => t.solo).map(t => t.id);
       } else {
-        const targets = tracksStore.getEditTargets();
         sourceTrackIds = targets.mode === 'all' ? undefined : targets.trackIds;
-        clipChannelIndex = targets.channelIndex;
       }
+
+      console.warn(`[Clipping] createClip: clipChannelIndex=${clipChannelIndex}, hasSolo=${hasSolo}, sourceTrackIds=${sourceTrackIds?.join(',') ?? 'all'}`);
 
       // Detect large files (same check as clipboard.cut)
       const hasLargeFile = tracksStore.tracks.some(t => {
