@@ -3417,7 +3417,7 @@ export const useTracksStore = defineStore('tracks', () => {
       });
     }
 
-    console.warn(`[Tracks] replaceWithChannel: newBuffer=${newBuffer.numberOfChannels}ch ${newBuffer.length}samples, waveform=${waveform.length}pts, clips=${newClips?.length ?? 'none'}`);
+    console.log(`[Tracks] replaceWithChannel: kept ch${keepChannelIndex}, ${newBuffer.numberOfChannels}ch ${newBuffer.length}samples`);
     tracks.value[idx] = {
       ...tracks.value[idx],
       audioData: { ...track.audioData, buffer: newBuffer, waveformData: waveform },
