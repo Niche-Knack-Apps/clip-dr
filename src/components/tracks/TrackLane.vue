@@ -378,6 +378,9 @@ function handleClipDragMove(event: MouseEvent) {
   // Check if we've crossed the drag threshold (synchronous - don't defer)
   if (!isClipDragging.value && Math.abs(deltaX) >= DRAG_THRESHOLD) {
     isClipDragging.value = true;
+    // Floor timeline duration BEFORE activating drag mode to prevent zoom-in
+    // (timelineDuration returns minTimelineDuration during drag)
+    tracksStore.minTimelineDuration = tracksStore.timelineDuration;
     uiStore.isClipDragActive = true;
     // Compute offset from mouse cursor to clip's left edge in screen coords
     const clipLeftPx = (clipDragOriginalStart.value / duration.value) * containerWidth.value;

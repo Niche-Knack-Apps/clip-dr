@@ -3909,6 +3909,7 @@ export const useTracksStore = defineStore('tracks', () => {
     selectedTrack,
     selectedClip,
     timelineDuration,
+    minTimelineDuration,
     hasAudio,
     createTrackFromBuffer,
     cloneTrack,
