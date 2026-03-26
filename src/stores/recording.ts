@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useAudioStore } from './audio';
 import { useTracksStore } from './tracks';
 import { usePlaybackStore } from './playback';
@@ -125,6 +126,53 @@ export interface SystemAudioInfo {
   cpal_monitor_device: string | null;
 }
 
+// ── Waveform Ring Buffer (zero-allocation, zero-copy) ──
+
+export interface WaveformSample {
+  peak: number;
+  channelPeaks: Float32Array;
+  time: number;
+}
+
+export class WaveformRingBuffer {
+  readonly buffer: WaveformSample[];
+  head = 0;
+  count = 0;
+  version = 0;
+  private readonly channels: number;
+
+  constructor(readonly capacity = 600, channels = 1) {
+    this.channels = channels;
+    this.buffer = Array.from({ length: capacity }, () => ({
+      peak: 0,
+      channelPeaks: new Float32Array(channels),
+      time: 0,
+    }));
+  }
+
+  push(peak: number, time: number, channelPeaks?: number[]) {
+    const slot = this.buffer[this.head];
+    slot.peak = peak;
+    slot.time = time;
+    if (channelPeaks) {
+      for (let i = 0; i < this.channels && i < channelPeaks.length; i++) {
+        slot.channelPeaks[i] = channelPeaks[i];
+      }
+    } else {
+      slot.channelPeaks[0] = peak;
+    }
+    this.head = (this.head + 1) % this.capacity;
+    if (this.count < this.capacity) this.count++;
+    this.version++;
+  }
+
+  getView() {
+    return { buffer: this.buffer, head: this.head, count: this.count, version: this.version };
+  }
+
+  clear() { this.head = 0; this.count = 0; this.version++; }
+}
+
 export const useRecordingStore = defineStore('recording', () => {
   const audioStore = useAudioStore();
   const tracksStore = useTracksStore();
@@ -133,6 +181,7 @@ export const useRecordingStore = defineStore('recording', () => {
   const isRecording = ref(false);
   const isPreparing = ref(false);
   const isMonitoring = ref(false);
+  const isFinalizing = ref(false);
   const currentLevel = ref(0);
   const recordingDuration = ref(0);
   const recordingPath = ref<string | null>(null);
@@ -157,6 +206,79 @@ export const useRecordingStore = defineStore('recording', () => {
   const activeSessions = computed(() =>
     sessions.value.filter(s => s.active)
   );
+
+  /** Monitor view is active when recording or finalizing (ephemeral UI mode) */
+  const monitorViewActive = computed(() =>
+    isRecording.value || sessions.value.some(s => s.active) || isFinalizing.value
+  );
+
+  // ── Waveform history ring buffers (per-session, ephemeral) ──
+  const waveformHistories = new Map<string, WaveformRingBuffer>();
+
+  function getOrCreateWaveformHistory(sessionId: string, channels = 1): WaveformRingBuffer {
+    let buf = waveformHistories.get(sessionId);
+    if (!buf) {
+      buf = new WaveformRingBuffer(600, channels);
+      waveformHistories.set(sessionId, buf);
+    }
+    return buf;
+  }
+
+  function getWaveformView(sessionId: string) {
+    const buf = waveformHistories.get(sessionId);
+    if (!buf) return null;
+    return buf.getView();
+  }
+
+  function clearWaveformHistory(sessionId: string) {
+    waveformHistories.delete(sessionId);
+  }
+
+  // ── Session map cache for O(1) lookup in event handler ──
+  let _sessionMap = new Map<string, RecordingSession>();
+  watch(sessions, (s) => {
+    _sessionMap = new Map(s.map(sess => [sess.sessionId, sess]));
+  }, { immediate: true });
+
+  // ── Push-based level listener (replaces polling) ──
+  interface RecordingLevelEvent {
+    session_ids: string[];
+    levels: number[];
+    duration: number;
+  }
+
+  let unlistenLevels: (() => void) | null = null;
+  let lastEventTime = 0;
+
+  async function initLevelListener() {
+    if (unlistenLevels) return;
+    unlistenLevels = await listen<RecordingLevelEvent>(
+      'recording-levels',
+      (event) => {
+        // Drop stale frames (backpressure)
+        const now = performance.now();
+        if (now - lastEventTime < 14) return;
+        lastEventTime = now;
+
+        const { session_ids, levels } = event.payload;
+        // Duration comes from durationInterval (wall clock) — don't override here
+        // (Rust emitter duration_ms is not yet wired to sample count)
+
+        for (let i = 0; i < session_ids.length; i++) {
+          const session = _sessionMap.get(session_ids[i]);
+          if (session) {
+            session.level = levels[i];
+            const buf = getOrCreateWaveformHistory(session.sessionId);
+            buf.push(levels[i], recordingDuration.value);
+          }
+        }
+        currentLevel.value = levels.length > 0 ? Math.max(...levels) : 0;
+      }
+    );
+  }
+
+  // Initialize listener on store creation
+  initLevelListener().catch(e => console.warn('[Recording] Failed to init level listener:', e));
 
   // Timemark state
   const timemarks = ref<TimeMark[]>([]);
@@ -506,13 +628,15 @@ export const useRecordingStore = defineStore('recording', () => {
       };
       sessions.value = [session];
 
-      // Start polling level (100ms = 10Hz, sufficient for visual meter)
+      // Start polling level (100ms = 10Hz, sufficient for visual meter + waveform history)
       levelPollInterval = window.setInterval(async () => {
         try {
           currentLevel.value = await invoke<number>('get_recording_level');
-          // Sync session level
+          // Sync session level + push to waveform history
           if (sessions.value.length > 0) {
             sessions.value[0].level = currentLevel.value;
+            const buf = getOrCreateWaveformHistory(sessions.value[0].sessionId);
+            buf.push(currentLevel.value, recordingDuration.value);
           }
         } catch (e) {
           // Ignore polling errors
@@ -593,19 +717,43 @@ export const useRecordingStore = defineStore('recording', () => {
       isRecording.value = false;
       isLocked.value = false;
       currentLevel.value = 0;
-      sessions.value = [];
+      // Keep sessions visible during finalization (monitor mode stays active)
+      for (const s of sessions.value) s.active = false;
+      isFinalizing.value = true;
 
       console.log(`[Recording] Stopped: path=${result.path}, duration=${result.duration?.toFixed(1)}s, rate=${result.sample_rate}, ch=${result.channels}, extra_segments=${result.extra_segments?.length ?? 0}`);
 
       // Brief delay to let OS flush file writes
       await new Promise(r => setTimeout(r, 200));
 
-      // Create track(s) from the recorded audio (fire-and-forget so dialog closes immediately)
+      // Create track(s) from the recorded audio, then exit monitor mode
+      const exitMonitor = () => {
+        for (const s of sessions.value) clearWaveformHistory(s.sessionId);
+        sessions.value = [];
+        isFinalizing.value = false;
+        console.log('[Recording] Monitor mode exited');
+      };
+
       if (result.path) {
-        createTrackFromRecording(result).catch(e => {
+        // Safety timeout: exit monitor after 30s even if import hangs
+        const safetyTimeout = setTimeout(() => {
+          if (isFinalizing.value) {
+            console.warn('[Recording] Safety timeout: forcing monitor exit after 30s');
+            exitMonitor();
+          }
+        }, 30000);
+
+        createTrackFromRecording(result).then(() => {
+          clearTimeout(safetyTimeout);
+          exitMonitor();
+        }).catch(e => {
+          clearTimeout(safetyTimeout);
           console.error('[Recording] Background import failed:', e);
           error.value = e instanceof Error ? e.message : String(e);
+          exitMonitor();
         });
+      } else {
+        exitMonitor();
       }
 
       return result;
@@ -614,6 +762,7 @@ export const useRecordingStore = defineStore('recording', () => {
       error.value = e instanceof Error ? e.message : String(e);
       isRecording.value = false;
       isLocked.value = false;
+      isFinalizing.value = false;
       return null;
     }
   }
@@ -886,13 +1035,17 @@ export const useRecordingStore = defineStore('recording', () => {
         duration: 0,
       }));
 
-      // Poll per-session levels
+      // Poll per-session levels + push to waveform history
       levelPollInterval = window.setInterval(async () => {
         try {
           const levels = await invoke<SessionLevel[]>('get_session_levels');
           for (const sl of levels) {
             const session = sessions.value.find(s => s.sessionId === sl.session_id);
-            if (session) session.level = sl.level;
+            if (session) {
+              session.level = sl.level;
+              const buf = getOrCreateWaveformHistory(session.sessionId);
+              buf.push(sl.level, recordingDuration.value);
+            }
           }
           // Update shared level to max of all sessions
           currentLevel.value = levels.length > 0
@@ -1008,6 +1161,19 @@ export const useRecordingStore = defineStore('recording', () => {
   /** Start recording from a single device. Does not affect other active sessions. */
   async function startDeviceSession(deviceId: string, sessionId: string): Promise<string | null> {
     error.value = null;
+
+    // Guard: remove any stale/inactive sessions for this device
+    const stale = sessions.value.filter(s => s.deviceId === deviceId && !s.active);
+    if (stale.length > 0) {
+      for (const s of stale) clearWaveformHistory(s.sessionId);
+      sessions.value = sessions.value.filter(s => !(s.deviceId === deviceId && !s.active));
+    }
+    // Guard: reject if device is already actively recording
+    if (sessions.value.some(s => s.deviceId === deviceId && s.active)) {
+      console.warn(`[Recording] Device ${deviceId} already recording — ignoring duplicate start`);
+      return null;
+    }
+
     try {
       // Set recording epoch on first session start (for timeline sync)
       // Base position respects placement setting
@@ -1052,8 +1218,12 @@ export const useRecordingStore = defineStore('recording', () => {
       sessions.value = [...sessions.value, session];
       isRecording.value = true;
 
-      // Start duration tracking if not already running
-      if (!durationInterval) {
+      // Level updates now come via push events (listen("recording-levels"))
+      // — no polling needed. Only start duration tracking.
+
+      // Always recreate duration interval (old one may reference stale sessions)
+      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+      {
         durationInterval = window.setInterval(() => {
           for (const s of sessions.value) {
             if (s.active) {
@@ -1077,65 +1247,68 @@ export const useRecordingStore = defineStore('recording', () => {
 
   /** Stop a single recording session by ID. Other sessions continue. */
   async function stopDeviceSession(sessionId: string): Promise<SessionResult | null> {
-    // Capture session timing BEFORE it gets removed
+    // Capture session timing BEFORE removal
     const session = sessions.value.find(s => s.sessionId === sessionId);
-    const sessionStartTime = session?.startTime ?? Date.now();
+    if (!session) {
+      console.warn(`[Recording] stopDeviceSession: session '${sessionId}' not found — already stopped`);
+      return null;
+    }
+    const sessionStartTime = session.startTime;
     const epochVal = recordingEpoch.value;
     const basePos = recordingBasePosition.value;
 
+    // Immediately remove session from array (prevents ghost accumulation)
+    clearWaveformHistory(sessionId);
+    sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
+
+    // Stop on Rust side
     let result: SessionResult | null = null;
     try {
       result = await invoke<SessionResult>('stop_session', { sessionId });
       console.log(`[Recording] Session '${sessionId}' stopped: ${result.result.duration.toFixed(1)}s`);
     } catch (e) {
-      // Handle gracefully: session may already be gone or captured 0 samples.
-      // Still clean up frontend state so the UI doesn't get stuck.
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[Recording] stop_session('${sessionId}') error (cleaning up frontend state): ${msg}`);
+      console.warn(`[Recording] stop_session('${sessionId}') error: ${msg}`);
     }
 
-    // Always remove from sessions list, even on error
-    sessions.value = sessions.value.filter(s => s.sessionId !== sessionId);
-
-    // If no more active sessions, clear global recording state + epoch
-    if (sessions.value.filter(s => s.active).length === 0) {
+    // If no more active sessions, transition to finalizing then exit
+    const hasActive = sessions.value.some(s => s.active);
+    if (!hasActive) {
       isRecording.value = false;
       isLocked.value = false;
       currentLevel.value = 0;
       recordingEpoch.value = null;
       recordingBasePosition.value = null;
-      if (durationInterval) {
-        clearInterval(durationInterval);
-        durationInterval = null;
-      }
-      // Clean up scheduled recording if it was in 'recording' status
+      if (levelPollInterval) { clearInterval(levelPollInterval); levelPollInterval = null; }
+      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
       if (schedule.value && schedule.value.status === 'recording') {
         schedule.value = { ...schedule.value, status: 'completed' };
-        if (scheduleCheckInterval) {
-          clearInterval(scheduleCheckInterval);
-          scheduleCheckInterval = null;
-        }
-        console.log('[Recording] Scheduled recording completed (manual stop)');
+        if (scheduleCheckInterval) { clearInterval(scheduleCheckInterval); scheduleCheckInterval = null; }
         setTimeout(() => { schedule.value = null; }, 2000);
       }
     }
 
-    // Import the recording if we got a successful result
+    // Import the recording in background (session already removed from UI)
     if (result?.result?.path) {
-      // Brief delay for OS file flush
+      // Set finalizing if this was the last session (keeps monitor view briefly visible)
+      if (!hasActive) isFinalizing.value = true;
       await new Promise(r => setTimeout(r, 200));
-
-      // Compute timeline position: base + offset from epoch
-      // For 'zero' placement, skip the epoch offset — the user wants t=0 regardless
-      // of backend startup latency. The offset only matters for multi-source sync.
       const offsetSeconds = (epochVal !== null && placement.value !== 'zero')
         ? (sessionStartTime - epochVal) / 1000
         : 0;
       const trackStart = (basePos ?? tracksStore.timelineDuration) + offsetSeconds;
-
-      createTrackFromRecording(result.result, trackStart).catch(e => {
-        console.error('[Recording] Background import failed for session:', sessionId, e);
+      createTrackFromRecording(result.result, trackStart).then(() => {
+        if (!sessions.value.some(s => s.active)) {
+          isFinalizing.value = false;
+          console.log('[Recording] Monitor mode exited');
+        }
+      }).catch(e => {
+        console.error('[Recording] Import failed for session:', sessionId, e);
+        if (!sessions.value.some(s => s.active)) isFinalizing.value = false;
       });
+    } else if (!hasActive) {
+      // No result to import — exit monitor immediately
+      isFinalizing.value = false;
     }
 
     return result;
@@ -1321,6 +1494,8 @@ export const useRecordingStore = defineStore('recording', () => {
     isRecording,
     isPreparing,
     isMonitoring,
+    isFinalizing,
+    monitorViewActive,
     currentLevel,
     recordingDuration,
     recordingPath,
@@ -1400,6 +1575,10 @@ export const useRecordingStore = defineStore('recording', () => {
     cancelSchedule,
     extendSchedule,
     removeScheduleEndTime,
+    // Waveform history (monitor mode)
+    getWaveformView,
+    getOrCreateWaveformHistory,
+    clearWaveformHistory,
     // Crash recovery
     orphanedRecordings,
     scanOrphanedRecordings,

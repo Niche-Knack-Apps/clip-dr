@@ -7,6 +7,7 @@ mod services;
 
 use commands::{audio, waveform, transcribe, moonshine, export, vad, clean, metadata, recording, import, playback, project};
 use std::panic;
+use tauri::Manager;
 
 fn main() {
     // Stderr logging only — the frontend DebugLogger (Settings > Logging) is the primary log store.
@@ -42,6 +43,9 @@ fn main() {
         .manage(recording::RecordingManager::new())
         .setup(|app| {
             let app_handle = app.handle().clone();
+            // Inject AppHandle into RecordingManager for push-based level emission
+            let mgr = app.state::<recording::RecordingManager>();
+            mgr.app_handle.set(app_handle.clone()).ok();
             services::path_service::init(&app_handle)?;
             // Clean up old/orphaned decode cache files
             if let Err(e) = services::path_service::cleanup_decode_cache() {
@@ -111,6 +115,7 @@ fn main() {
             recording::scan_orphaned_recordings,
             recording::recover_recording,
             recording::delete_orphaned_recording,
+            recording::set_monitor_active,
             transcribe::get_bundled_model_info,
             moonshine::transcribe_moonshine,
             moonshine::check_moonshine_model,

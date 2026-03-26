@@ -4,6 +4,7 @@ import FullWaveform from '@/components/waveform/FullWaveform.vue';
 import ZoomedWaveform from '@/components/waveform/ZoomedWaveform.vue';
 import WordTimeline from '@/components/transcription/WordTimeline.vue';
 import TrackList from '@/components/tracks/TrackList.vue';
+import RecordingMonitorView from '@/components/recording/RecordingMonitorView.vue';
 import ProgressModal from '@/components/ui/ProgressModal.vue';
 import { usePlaybackStore } from '@/stores/playback';
 import { useSelectionStore } from '@/stores/selection';
@@ -397,9 +398,15 @@ useKeyboardShortcuts({
       </div>
     </div>
 
+    <!-- Recording Monitor Mode — replaces all panels during recording -->
+    <RecordingMonitorView
+      v-if="recordingStore.monitorViewActive"
+      class="flex-1 min-h-0"
+    />
+
     <!-- Empty state -->
     <div
-      v-if="!hasAudio && !projectStore.loading"
+      v-else-if="!hasAudio && !projectStore.loading"
       class="flex-1 flex flex-col items-center justify-center text-gray-500"
     >
       <div

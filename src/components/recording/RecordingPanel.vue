@@ -57,6 +57,7 @@ function sessionIdFor(deviceId: string): string {
 }
 
 async function handleRecord(deviceId: string) {
+  if (recordingStore.isDeviceRecording(deviceId)) return; // already recording
   const sid = sessionIdFor(deviceId);
   await recordingStore.startDeviceSession(deviceId, sid);
 }

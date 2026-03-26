@@ -100,6 +100,14 @@ pub struct SessionLevel {
     pub level: f32,
 }
 
+/// Push-based level event (emitted at ~60Hz from dedicated emitter thread).
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingLevelEvent {
+    pub session_ids: Vec<String>,
+    pub levels: Vec<f32>,
+    pub duration: f64,
+}
+
 /// Level info for a device preview (returned by get_preview_levels).
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewLevel {
