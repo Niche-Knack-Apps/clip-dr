@@ -202,37 +202,27 @@ impl RecordingManager {
         self.emitter_active.store(true, Ordering::SeqCst);
 
         let active = self.emitter_active.clone();
-        let monitor_active = self.monitor_view_active.clone();
         let refs = self.emitter_refs.clone();
         let duration_ms = self.duration_ms.clone();
 
         let handle = std::thread::Builder::new()
             .name("level-emitter".into())
             .spawn(move || {
-                let mut last_levels: Vec<u32> = Vec::new();
                 while active.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(16));
-
-                    // Gate: skip if frontend monitor view isn't visible
-                    if !monitor_active.load(Ordering::Relaxed) { continue; }
 
                     // Read session refs — lock only the ref vec, not the full sessions map
                     let snap = refs.lock().expect("emitter_refs poisoned");
                     let mut ids: Vec<String> = Vec::with_capacity(snap.len());
                     let mut levels: Vec<f32> = Vec::with_capacity(snap.len());
-                    let mut raw: Vec<u32> = Vec::with_capacity(snap.len());
                     for r in snap.iter() {
                         if !r.active.load(Ordering::Relaxed) { continue; }
-                        let lv = r.level.load(Ordering::Relaxed);
                         ids.push(r.session_id.clone());
-                        levels.push(lv as f32 / 1000.0);
-                        raw.push(lv);
+                        levels.push(r.level.load(Ordering::Relaxed) as f32 / 1000.0);
                     }
                     drop(snap);
 
-                    // Change detection: skip if levels haven't changed
-                    if raw == last_levels { continue; }
-                    last_levels = raw;
+                    if ids.is_empty() { continue; } // no active sessions
 
                     let dur = duration_ms.load(Ordering::Relaxed) as f64 / 1000.0;
                     let _ = app.emit("recording-levels", RecordingLevelEvent {
